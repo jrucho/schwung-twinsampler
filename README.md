@@ -10,13 +10,15 @@ Place this folder at:
 
 `modules/overtake/twinsampler`
 
-Required files:
+Required files: 
+- `dsp.so`
+- `dsp_core.so`
+- `dsp_wrapper_monitor.c`
+- `help.json`
 - `module.json`
+- `plugin_api_v1.h`
 - `ui.js`
 - `ui_chain.js`
-- `dsp.so`
-- `help.json`
-- `README.md`
 
 ## Quick Start
 
