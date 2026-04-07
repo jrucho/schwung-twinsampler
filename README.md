@@ -54,7 +54,6 @@ Required files:
 - `Jog click`:
 - In main view: opens sample browser.
 - In browser: selects/enters item.
-- With `Shift` in main view: no recording toggle (use `Rec` button).
 - With `Shift` in browser: close browser.
 - With `Shift+Vol touch`: opens session load browser.
 
