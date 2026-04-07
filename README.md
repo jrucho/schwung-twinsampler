@@ -1,7 +1,5 @@
 # schwung-twinsampler
 
-# TwinSampler
-
 `TwinSampler` is an overtake sampler module for Schwung on Ableton Move.
 
 It provides two independent 4x4 pad sections (left/right), each with 8 banks, with full per-pad control, source slicing mode, recording, session management, undo/redo, and autosave.
