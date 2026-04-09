@@ -121,7 +121,7 @@ const LOOP_DOUBLE_PRESS_TICKS = 90;
 const LOOP_ERASE_HOLD_TICKS = 36;
 const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
-const LOOP_PAD_NOTES = [72, 73, 74, 75]; /* first row, right 4 pads */
+const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
 const LOOP_PAD_COLOR_PLAY = 21;
@@ -3082,26 +3082,7 @@ function selectLooper(index) {
 
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
-    if (next !== s.activeLooper) {
-        selectLooper(next);
-        const l = currentLooper();
-        if (l.state === 'stopped') {
-            l.state = 'playing';
-            l.playStartMs = looperNowMs();
-            l.loopPosMs = 0;
-            l.lastLoopPosMs = 0;
-            showStatus('Looper ' + (next + 1) + ': play', 90);
-            updateUtilityButtonLeds();
-            return;
-        }
-        if (l.state === 'empty') {
-            looperBeginRecording();
-            showStatus('Looper ' + (next + 1) + ': rec', 90);
-            return;
-        }
-        handleLoopButtonPress();
-        return;
-    }
+    if (next !== s.activeLooper) selectLooper(next);
     handleLoopButtonPress();
 }
 
