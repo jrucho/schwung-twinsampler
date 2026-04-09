@@ -18,7 +18,6 @@ typedef struct wrapper_instance {
     int record_mix_schwung;
     float record_mix_gain;
     int recording_cached;
-    int record_source_latched; /* -1=auto undecided, 0=line-in, 1=schwung */
     int16_t *input_backup;
     int16_t *input_mix;
     int scratch_samples;
@@ -34,10 +33,6 @@ static int clip_i32_to_i16(int32_t x) {
     if (x > 32767) return 32767;
     if (x < -32768) return -32768;
     return (int)x;
-}
-
-static int abs_i16(int x) {
-    return x < 0 ? -x : x;
 }
 
 static int parse_bool(const char *val) {
@@ -113,7 +108,6 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->record_mix_schwung = 1;
     inst->record_mix_gain = 1.0f;
     inst->recording_cached = 0;
-    inst->record_source_latched = -1;
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
@@ -213,21 +207,16 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
     if (!strcmp(key, "record_start")) {
         if (parse_bool(val)) {
             inst->recording_cached = 1;
-            inst->record_source_latched = -1;
         }
     } else if (!strcmp(key, "record_stop")) {
         if (parse_bool(val)) {
             inst->recording_cached = 0;
-            inst->record_source_latched = -1;
         }
     } else if (!strcmp(key, "recording")) {
         inst->recording_cached = parse_bool(val) ? 1 : 0;
-        if (!inst->recording_cached) inst->record_source_latched = -1;
     } else if (!strcmp(key, "record_toggle")) {
         if (parse_bool(val)) {
             inst->recording_cached = inst->recording_cached ? 0 : 1;
-            if (!inst->recording_cached) inst->record_source_latched = -1;
-            else inst->record_source_latched = -1;
         }
     }
 
@@ -289,30 +278,9 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         const int16_t *schwung_bus = (const int16_t *)(g_host->mapped_memory + g_host->audio_out_offset);
         if (audio_in_rw && schwung_bus) {
             memcpy(inst->input_backup, audio_in_rw, (size_t)total * sizeof(int16_t));
-            int schwung_peak = 0;
-            for (int i = 0; i < total; i++) {
-                const int v = abs_i16((int)schwung_bus[i]);
-                if (v > schwung_peak) schwung_peak = v;
-            }
-
-            /* Latch source for the whole take to avoid per-block flipping:
-             * - Prefer Schwung bus when it has signal.
-             * - Fall back to Line In only when Schwung is effectively silent.
-             */
-            if (inst->record_source_latched < 0) {
-                inst->record_source_latched = (schwung_peak > 8) ? 1 : 0;
-            } else if (inst->record_source_latched == 0 && schwung_peak > 32) {
-                /* If recording started in silence, allow one-way upgrade to Schwung
-                 * once real Schwung signal appears, but never flip back.
-                 */
-                inst->record_source_latched = 1;
-            }
-            const int use_schwung_only = inst->record_source_latched ? 1 : 0;
             const float rec_gain = inst->record_mix_gain;
             for (int i = 0; i < total; i++) {
-                const int32_t rec_mix = use_schwung_only
-                    ? (int32_t)((float)schwung_bus[i] * rec_gain)
-                    : (int32_t)audio_in_rw[i];
+                const int32_t rec_mix = (int32_t)audio_in_rw[i] + (int32_t)((float)schwung_bus[i] * rec_gain);
                 inst->input_mix[i] = (int16_t)clip_i32_to_i16(rec_mix);
             }
             memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
