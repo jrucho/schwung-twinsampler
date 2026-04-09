@@ -77,6 +77,7 @@ const LEFT_GRID_ONLY = false; /* dual-grid mode: left and right 4x4 sections act
 const MODULE_FLAVOR = '';
 
 const SAMPLES_DIR = '/data/UserData/UserLibrary/Samples';
+const RECORDED_SAMPLES_ROOT = SAMPLES_DIR + '/TwinSamplerRecorded';
 const SESSIONS_DIR = '/data/UserData/UserLibrary/TwinSamplerSessions';
 const LEGACY_SESSION_FILE = '/data/UserData/UserLibrary/twinsampler-session-v2.json';
 const AUTOSAVE_SESSION_FILE = '/data/UserData/UserLibrary/twinsampler-autosave-v1.json';
@@ -785,6 +786,67 @@ function deleteFilePath(path) {
         } catch (e) {}
     }
     return false;
+}
+
+function dirName(path) {
+    const raw = String(path || '');
+    if (!raw) return '';
+    const idx = raw.lastIndexOf('/');
+    if (idx <= 0) return idx === 0 ? '/' : '';
+    return raw.slice(0, idx);
+}
+
+function pathExists(path) {
+    if (!path) return false;
+    try {
+        const st = os.stat(path);
+        if (Array.isArray(st)) return !!st[0] && !st[1];
+        return !!st;
+    } catch (e) {}
+    const fs = fsApi();
+    if (fs && typeof fs.existsSync === 'function') {
+        try {
+            return !!fs.existsSync(path);
+        } catch (e2) {}
+    }
+    return false;
+}
+
+function isoLocalDateString(tsMs = Date.now()) {
+    const d = new Date(tsMs);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+}
+
+function recordingsDayDir(tsMs = Date.now()) {
+    return RECORDED_SAMPLES_ROOT + '/' + isoLocalDateString(tsMs);
+}
+
+function uniquePathInDir(dir, fileName) {
+    const cleanName = String(fileName || '').trim() || 'recording.wav';
+    const dot = cleanName.lastIndexOf('.');
+    const stem = dot > 0 ? cleanName.slice(0, dot) : cleanName;
+    const ext = dot > 0 ? cleanName.slice(dot) : '';
+    let candidate = dir + '/' + cleanName;
+    if (!pathExists(candidate)) return candidate;
+    for (let i = 1; i < 1000; i++) {
+        candidate = dir + '/' + stem + '_' + String(i) + ext;
+        if (!pathExists(candidate)) return candidate;
+    }
+    return dir + '/' + stem + '_' + String(Date.now()) + ext;
+}
+
+function ensureRecordedFileInDailyFolder(path) {
+    const src = String(path || '');
+    if (!src) return src;
+    const dayDir = recordingsDayDir(Date.now());
+    if (dirName(src) === dayDir) return src;
+    if (!ensureDirRecursive(dayDir)) return src;
+    const dst = uniquePathInDir(dayDir, baseName(src));
+    if (renameFilePath(src, dst)) return dst;
+    return src;
 }
 
 function autosavePath() {
@@ -2258,6 +2320,8 @@ function startFocusedRecording() {
     sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '1');
+    const recDir = recordingsDayDir(Date.now());
+    if (ensureDirRecursive(recDir)) sp('record_output_dir', recDir);
     sp('record_max_seconds', String(s.recordMaxSeconds));
     sp('record_start', '1');
 
@@ -2329,7 +2393,8 @@ function pollRecordingState() {
     s.recording = rec;
 
     if (prev === 1 && rec === 0) {
-        const path = String(gp('last_recorded_path', '') || '');
+        const pathRaw = String(gp('last_recorded_path', '') || '');
+        const path = ensureRecordedFileInDailyFolder(pathRaw);
         s.lastRecordedPath = path;
         const shouldLoad = !!s.recordLoadOnStop;
         s.recordLoadOnStop = false;
@@ -2343,7 +2408,7 @@ function pollRecordingState() {
             const t = s.recTarget;
             const mode = s.sections[t.sec].mode;
             if (mode === MODE_SINGLE) {
-                setSourcePath(t.sec, t.bank, path, false);
+                setSourcePath(t.sec, t.bank, path, true);
                 syncBankSliceState(t.sec, t.bank);
                 showStatus('Recorded+loaded SRC ' + recordTargetLabel(t), 110);
             } else {
@@ -2352,7 +2417,7 @@ function pollRecordingState() {
                 if (existing && existing !== path) {
                     showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
                 }
-                setSlotPath(t.sec, t.bank, slot, path, false);
+                setSlotPath(t.sec, t.bank, slot, path, true);
                 showStatus('Recorded+loaded ' + recordTargetLabel({ sec: t.sec, bank: t.bank, slot }), 110);
             }
         } else if (path) {
@@ -3276,7 +3341,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         const sameSource = src && existing.sourceTag === src;
         const deltaMs = Math.max(0, nowMs - clampInt(existing.lastOnMs, 0, 0x7fffffff, nowMs));
         if (sameSource && deltaMs <= MIDI_DUPLICATE_NOTE_ON_GUARD_MS) return true;
-        releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs);
+        releaseActiveVoice(existing.sec, existing.bank, existing.slot, !!existing.routeBank, recordToLooper, nowMs, true);
         flushPendingNoteOffs();
     }
     clearPendingOff(sec, bank, slot);
@@ -3363,7 +3428,6 @@ function tickMidiEchoCache() {
 
 function addrKey(sec, bank, slot) {
     return String(clampInt(sec, 0, GRID_COUNT - 1, 0)) + ':' +
-        String(clampInt(bank, 0, BANK_COUNT - 1, 0)) + ':' +
         String(clampInt(slot, 0, GRID_SIZE - 1, 0));
 }
 
@@ -3388,13 +3452,13 @@ function emitPadNoteOffNow(sec, bank, slot, routeBank, recordToLooper) {
     if (recordToLooper) looperRecordEvent('off', sec, bank, slot, 0);
 }
 
-function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = Date.now()) {
+function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = Date.now(), forceImmediate = false) {
     const key = addrKey(sec, bank, slot);
     const voice = activeVoicesByAddr[key];
     if (!voice) return false;
 
     const elapsed = Math.max(0, nowMs - clampInt(voice.startedMs, 0, 0x7fffffff, nowMs));
-    if (elapsed < MIDI_MIN_NOTE_LENGTH_MS) {
+    if (!forceImmediate && elapsed < MIDI_MIN_NOTE_LENGTH_MS) {
         pendingNoteOffsByAddr[key] = {
             sec,
             bank,
