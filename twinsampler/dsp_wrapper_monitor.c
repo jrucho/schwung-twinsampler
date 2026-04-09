@@ -18,6 +18,7 @@ typedef struct wrapper_instance {
     int record_mix_schwung;
     float record_mix_gain;
     int recording_cached;
+    int record_source_latched; /* -1=auto undecided, 0=line-in, 1=schwung */
     int16_t *input_backup;
     int16_t *input_mix;
     int scratch_samples;
@@ -112,6 +113,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->record_mix_schwung = 1;
     inst->record_mix_gain = 1.0f;
     inst->recording_cached = 0;
+    inst->record_source_latched = -1;
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
@@ -209,13 +211,24 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
     }
 
     if (!strcmp(key, "record_start")) {
-        if (parse_bool(val)) inst->recording_cached = 1;
+        if (parse_bool(val)) {
+            inst->recording_cached = 1;
+            inst->record_source_latched = -1;
+        }
     } else if (!strcmp(key, "record_stop")) {
-        if (parse_bool(val)) inst->recording_cached = 0;
+        if (parse_bool(val)) {
+            inst->recording_cached = 0;
+            inst->record_source_latched = -1;
+        }
     } else if (!strcmp(key, "recording")) {
         inst->recording_cached = parse_bool(val) ? 1 : 0;
+        if (!inst->recording_cached) inst->record_source_latched = -1;
     } else if (!strcmp(key, "record_toggle")) {
-        if (parse_bool(val)) inst->recording_cached = inst->recording_cached ? 0 : 1;
+        if (parse_bool(val)) {
+            inst->recording_cached = inst->recording_cached ? 0 : 1;
+            if (!inst->recording_cached) inst->record_source_latched = -1;
+            else inst->record_source_latched = -1;
+        }
     }
 
     if (inst->core_api_v2 && inst->core_api_v2->set_param && inst->core_instance) {
@@ -282,13 +295,19 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
                 if (v > schwung_peak) schwung_peak = v;
             }
 
-            /* Auto behavior:
-             * - If Schwung bus has signal, record Schwung bus only.
-             * - If Schwung bus is effectively silent, fall back to Line In
-             *   so recording does not capture silence in host routings where
-             *   Line In is not present on the Schwung bus.
+            /* Latch source for the whole take to avoid per-block flipping:
+             * - Prefer Schwung bus when it has signal.
+             * - Fall back to Line In only when Schwung is effectively silent.
              */
-            const int use_schwung_only = (schwung_peak > 8) ? 1 : 0;
+            if (inst->record_source_latched < 0) {
+                inst->record_source_latched = (schwung_peak > 8) ? 1 : 0;
+            } else if (inst->record_source_latched == 0 && schwung_peak > 32) {
+                /* If recording started in silence, allow one-way upgrade to Schwung
+                 * once real Schwung signal appears, but never flip back.
+                 */
+                inst->record_source_latched = 1;
+            }
+            const int use_schwung_only = inst->record_source_latched ? 1 : 0;
             const float rec_gain = inst->record_mix_gain;
             for (int i = 0; i < total; i++) {
                 const int32_t rec_mix = use_schwung_only
