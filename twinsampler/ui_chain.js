@@ -406,9 +406,13 @@ function midiChannelNibbleFrom1Based(channel1Based) {
 function sendExternalMidi(data) {
     const bytes = Array.isArray(data) ? data : [];
     if (bytes.length < 3) return false;
+    const status = clampInt(bytes[0], 0, 255, 0);
+    const d1 = clampInt(bytes[1], 0, 127, 0);
+    const d2 = clampInt(bytes[2], 0, 127, 0);
+    const framed = [(2 << 4) | ((status & 0xF0) >> 4), status, d1, d2];
     try {
         if (typeof move_midi_external_send === 'function') {
-            move_midi_external_send(bytes);
+            move_midi_external_send(framed);
             return true;
         }
     } catch (e) {}
@@ -425,6 +429,24 @@ function sendExternalMidi(data) {
         }
     } catch (e) {}
     return false;
+}
+
+function unpackMidiMessage(data) {
+    if (!data || typeof data.length !== 'number') return null;
+    if (data.length >= 4) {
+        const status = clampInt(data[1], 0, 255, 0);
+        if ((status & 0x80) !== 0) {
+            return [status, clampInt(data[2], 0, 127, 0), clampInt(data[3], 0, 127, 0)];
+        }
+    }
+    if (data.length >= 3) {
+        return [
+            clampInt(data[0], 0, 255, 0),
+            clampInt(data[1], 0, 127, 0),
+            clampInt(data[2], 0, 127, 0)
+        ];
+    }
+    return null;
 }
 
 function activateStandaloneMidiPort() {
@@ -1354,7 +1376,6 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
-    applyBankStateToDsp(sec, b, true);
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
@@ -2237,9 +2258,8 @@ function updateRecordButtonLed() {
 function loopLedColor() {
     const st = s.midiLooper.state;
     if (st === 'recording') return BrightRed;
-    if (st === 'overdub') return 15;
+    if (st === 'overdub') return BrightRed;
     if (st === 'playing') return 120;
-    if (st === 'stopped') return 60;
     return Black;
 }
 
@@ -3047,7 +3067,6 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
 function triggerPadOff(sec, bank, slot, routeBank, recordToLooper = true) {
     const addr = { sec, bank, slot };
     if (!shouldSendNoteOffForAddr(addr)) return false;
-    flashPadPress(sec, bank, slot);
     const triggerNote = padNoteFor(sec, slot);
     if (routeBank) {
         withPlaybackBank(sec, bank, () => {
@@ -3183,12 +3202,13 @@ function sendMidiOut(pad, velocity, side, bank, isNoteOn, polyPressure) {
 }
 
 function handleMidiIn(msg) {
-    if (!msg || typeof msg.length !== 'number' || msg.length < 3) return;
-    const statusRaw = clampInt(msg[0], 0, 255, 0);
+    const packet = unpackMidiMessage(msg);
+    if (!packet) return;
+    const statusRaw = packet[0];
     const status = statusRaw & 0xF0;
     const channel1Based = (statusRaw & 0x0F) + 1;
-    const note = clampInt(msg[1], 0, 127, 0);
-    const value = clampInt(msg[2], 0, 127, 0);
+    const note = packet[1];
+    const value = packet[2];
 
     const route = getBankFromChannel(channel1Based);
     if (!route) return;
