@@ -121,6 +121,27 @@ const LOOP_DOUBLE_PRESS_TICKS = 90;
 const LOOP_ERASE_HOLD_TICKS = 36;
 const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
+const LOOP_PAD_NOTES = [72, 73, 74, 75]; /* first row, right 4 pads */
+const LOOP_PAD_COLOR_OFF = Black;
+const LOOP_PAD_COLOR_RECORD = BrightRed;
+const LOOP_PAD_COLOR_PLAY = 21;
+const LOOP_PAD_COLOR_OVERDUB = 9;
+
+function createLooperState() {
+    return {
+        state: 'empty', /* empty|recording|playing|overdub|stopped */
+        events: [],
+        loopLengthMs: 0,
+        recordStartMs: 0,
+        playStartMs: 0,
+        loopPosMs: 0,
+        lastLoopPosMs: 0,
+        buttonHeld: false,
+        buttonDownTick: -1,
+        lastPressTick: -9999,
+        eraseHoldTriggered: false
+    };
+}
 
 const BANK_COLOR_SEQUENCE = [8, 15, 3, 21, 7, 31, 47, 1];
 const COLOR_PALETTE = [120, 118, 8, 9, 11, 12, 14, 15, 16, 47, 48, 3, 7, 21, 1, 125, 127];
@@ -335,19 +356,9 @@ const s = {
 
     transportTicks: 0,
     padPressFlash: {},
-    midiLooper: {
-        state: 'empty', /* empty|recording|playing|overdub|stopped */
-        events: [],
-        loopLengthMs: 0,
-        recordStartMs: 0,
-        playStartMs: 0,
-        loopPosMs: 0,
-        lastLoopPosMs: 0,
-        buttonHeld: false,
-        buttonDownTick: -1,
-        lastPressTick: -9999,
-        eraseHoldTriggered: false
-    },
+    midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
+    activeLooper: 0,
+    loopPadMode: false,
 
     statusText: '',
     statusTicks: 0,
@@ -1072,6 +1083,22 @@ function previewNowMs() {
 
 function looperNowMs() {
     return previewNowMs();
+}
+
+function currentLooper() {
+    const idx = clampInt(s.activeLooper, 0, 3, 0);
+    return s.midiLoopers[idx];
+}
+
+function looperStateColor(state) {
+    if (state === 'recording') return LOOP_PAD_COLOR_RECORD;
+    if (state === 'playing') return LOOP_PAD_COLOR_PLAY;
+    if (state === 'overdub') return LOOP_PAD_COLOR_OVERDUB;
+    return LOOP_PAD_COLOR_OFF;
+}
+
+function loopPadIndexFromPadNote(note) {
+    return LOOP_PAD_NOTES.indexOf(note);
 }
 
 function previewCanPlay() {
@@ -1810,7 +1837,15 @@ function rebuildLedQueue() {
         for (let slot = 0; slot < GRID_SIZE; slot++) {
             const note = padNoteFor(sec, slot);
             let color = (LEFT_GRID_ONLY && sec === 1) ? 0 : effectivePadColor(sec, bankIdx, slot);
-            if (s.copySource && s.copySource.sec === sec && s.copySource.bank === bankIdx && s.copySource.slot === slot) {
+            let loopPad = false;
+            if (s.loopPadMode) {
+                const lp = loopPadIndexFromPadNote(note);
+                if (lp >= 0) {
+                    color = looperStateColor(s.midiLoopers[lp].state);
+                    loopPad = true;
+                }
+            }
+            if (!loopPad && s.copySource && s.copySource.sec === sec && s.copySource.bank === bankIdx && s.copySource.slot === slot) {
                 color = 120;
             }
             s.ledQueue.push([note, color]);
@@ -2256,7 +2291,7 @@ function updateRecordButtonLed() {
 }
 
 function loopLedColor() {
-    const st = s.midiLooper.state;
+    const st = currentLooper().state;
     if (st === 'recording') return BrightRed;
     if (st === 'overdub') return BrightRed;
     if (st === 'playing') return 120;
@@ -2296,13 +2331,14 @@ function drawMain() {
 
     const lMode = s.sections[0].mode === MODE_SINGLE ? 'SRC' : 'PAD';
     const rMode = s.sections[1].mode === MODE_SINGLE ? 'SRC' : 'PAD';
-    const looperTag = s.midiLooper.state === 'recording'
+    const looperState = currentLooper().state;
+    const looperTag = looperState === 'recording'
         ? 'REC'
-        : (s.midiLooper.state === 'overdub'
+        : (looperState === 'overdub'
             ? 'OVD'
-            : (s.midiLooper.state === 'playing'
+            : (looperState === 'playing'
                 ? 'PLAY'
-                : (s.midiLooper.state === 'stopped' ? 'STOP' : 'OFF')));
+                : (looperState === 'stopped' ? 'STOP' : 'OFF')));
 
     clear_screen();
 
@@ -2331,7 +2367,7 @@ function drawMain() {
     let footer = '';
     if (s.statusTicks > 0) footer = s.statusText;
     else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'Loop:' + looperTag + ' Mute:' + (s.muteHeld ? 'ON' : 'OFF');
+    else footer = 'L' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
     print(0, 50, shortText(footer, 21), 1);
 }
 
@@ -2892,18 +2928,23 @@ function handleStepBankNote(note, velocity) {
 }
 
 function looperReset(clearEvents) {
-    s.midiLooper.state = 'empty';
-    if (clearEvents) s.midiLooper.events = [];
-    s.midiLooper.loopLengthMs = 0;
-    s.midiLooper.recordStartMs = 0;
-    s.midiLooper.playStartMs = 0;
-    s.midiLooper.loopPosMs = 0;
-    s.midiLooper.lastLoopPosMs = 0;
+    const l = currentLooper();
+    l.state = 'empty';
+    if (clearEvents) l.events = [];
+    l.loopLengthMs = 0;
+    l.recordStartMs = 0;
+    l.playStartMs = 0;
+    l.loopPosMs = 0;
+    l.lastLoopPosMs = 0;
+    l.buttonHeld = false;
+    l.buttonDownTick = -1;
+    l.lastPressTick = -9999;
+    l.eraseHoldTriggered = false;
     updateUtilityButtonLeds();
 }
 
 function looperRecordEvent(type, sec, bank, slot, velocity) {
-    const l = s.midiLooper;
+    const l = currentLooper();
     if (l.state !== 'recording' && l.state !== 'overdub') return;
     let atMs = 0;
     const now = looperNowMs();
@@ -2920,7 +2961,7 @@ function looperRecordEvent(type, sec, bank, slot, velocity) {
 }
 
 function looperBeginRecording() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     l.events = [];
     l.recordStartMs = looperNowMs();
     l.playStartMs = l.recordStartMs;
@@ -2933,7 +2974,7 @@ function looperBeginRecording() {
 }
 
 function looperFinishRecordingStartPlayback() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     const now = looperNowMs();
     const len = Math.max(80, now - l.recordStartMs);
     l.loopLengthMs = len;
@@ -2947,7 +2988,7 @@ function looperFinishRecordingStartPlayback() {
 }
 
 function looperToggleOverdub() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     if (l.state === 'playing') {
         l.state = 'overdub';
         showStatus('Looper: overdub', 90);
@@ -2959,7 +3000,7 @@ function looperToggleOverdub() {
 }
 
 function looperStopPlayback() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     if (l.state === 'empty') {
         showStatus('Looper: empty', 70);
         return;
@@ -2980,7 +3021,7 @@ function looperErase() {
 }
 
 function handleLoopButtonPress() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     const now = s.transportTicks;
     const isDouble = (now - l.lastPressTick) <= LOOP_DOUBLE_PRESS_TICKS;
     l.lastPressTick = now;
@@ -3015,12 +3056,64 @@ function handleLoopButtonPress() {
 }
 
 function handleLoopButtonRelease() {
-    s.midiLooper.buttonHeld = false;
-    s.midiLooper.buttonDownTick = -1;
+    const l = currentLooper();
+    l.buttonHeld = false;
+    l.buttonDownTick = -1;
+}
+
+function stopActiveLooperForSwitch() {
+    const l = currentLooper();
+    if (l.state === 'recording') looperFinishRecordingStartPlayback();
+    if (l.state === 'playing' || l.state === 'overdub') {
+        l.state = 'stopped';
+        l.buttonHeld = false;
+        l.buttonDownTick = -1;
+    }
+}
+
+function selectLooper(index) {
+    const next = clampInt(index, 0, 3, 0);
+    if (next === s.activeLooper) return;
+    stopActiveLooperForSwitch();
+    s.activeLooper = next;
+    updateUtilityButtonLeds();
+    markLedsDirty();
+}
+
+function fireLooperPad(index) {
+    const next = clampInt(index, 0, 3, 0);
+    if (next !== s.activeLooper) {
+        selectLooper(next);
+        const l = currentLooper();
+        if (l.state === 'stopped') {
+            l.state = 'playing';
+            l.playStartMs = looperNowMs();
+            l.loopPosMs = 0;
+            l.lastLoopPosMs = 0;
+            showStatus('Looper ' + (next + 1) + ': play', 90);
+            updateUtilityButtonLeds();
+            return;
+        }
+        if (l.state === 'empty') {
+            looperBeginRecording();
+            showStatus('Looper ' + (next + 1) + ': rec', 90);
+            return;
+        }
+        handleLoopButtonPress();
+        return;
+    }
+    handleLoopButtonPress();
+}
+
+function toggleLoopPadMode() {
+    s.loopPadMode = !s.loopPadMode;
+    showStatus(s.loopPadMode ? 'Looper pad mode ON' : 'Looper pad mode OFF', 90);
+    markLedsDirty();
+    updateUtilityButtonLeds();
 }
 
 function tickMidiLooperButtonHold() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     if (!l.buttonHeld || l.eraseHoldTriggered) return;
     if (l.buttonDownTick < 0) return;
     if ((s.transportTicks - l.buttonDownTick) < LOOP_ERASE_HOLD_TICKS) return;
@@ -3081,7 +3174,7 @@ function triggerPadOff(sec, bank, slot, routeBank, recordToLooper = true) {
 }
 
 function tickMidiLooperPlayback() {
-    const l = s.midiLooper;
+    const l = currentLooper();
     if ((l.state !== 'playing' && l.state !== 'overdub') || l.loopLengthMs <= 0 || !l.events.length) return;
 
     const now = looperNowMs();
@@ -3127,6 +3220,13 @@ function tickPadPressFlash() {
 function handlePadNote(note, velocity) {
     if (velocity <= 0) return false;
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
+    if (s.loopPadMode) {
+        const lp = loopPadIndexFromPadNote(note);
+        if (lp >= 0) {
+            fireLooperPad(lp);
+            return true;
+        }
+    }
 
     const slice = s.shiftHeld ? sliceFromPadNote(note) : playableSliceFromPadNote(note);
     if (slice < 0) return false;
@@ -3470,6 +3570,10 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveLoop) {
+            if (val > 0 && s.shiftHeld) {
+                toggleLoopPadMode();
+                return;
+            }
             if (val > 0) handleLoopButtonPress();
             else handleLoopButtonRelease();
             return;
@@ -3593,12 +3697,11 @@ function init() {
 
     s.view = 'main';
     s.muteHeld = false;
+    s.loopPadMode = false;
     s.transportTicks = 0;
+    s.activeLooper = 0;
+    s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
     looperReset(true);
-    s.midiLooper.lastPressTick = -9999;
-    s.midiLooper.buttonHeld = false;
-    s.midiLooper.buttonDownTick = -1;
-    s.midiLooper.eraseHoldTriggered = false;
     s.autosavePending = false;
     s.autosaveTicks = 0;
     resetHistory();
