@@ -1567,7 +1567,7 @@ function setSlotGain(sec, bank, slot, value) {
 function setSlotPitch(sec, bank, slot, value) {
     const v = clampFloat(value, -48.0, 48.0, 0.0);
     slotAt(sec, bank, slot).pitch = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_pitch_at', 'slot_pitch', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_pitch_at', 'slot_pitch', v.toFixed(2), 180, true);
     markSessionChanged();
 }
 
@@ -3307,8 +3307,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob6) {
-            if (s.sections[s.focusedSection].mode === MODE_SINGLE) adjustFocusedBankPitch(delta);
-            else adjustGlobalPitch(delta);
+            adjustFocusedBankPitch(delta);
             return;
         }
         if (cc === MoveKnob7) {
