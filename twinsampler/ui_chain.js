@@ -126,6 +126,7 @@ const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
 const LOOP_PAD_COLOR_PLAY = 21;
 const LOOP_PAD_COLOR_OVERDUB = 9;
+const LOOP_PAD_COLOR_STOPPED = 118;
 
 function createLooperState() {
     return {
@@ -136,10 +137,12 @@ function createLooperState() {
         playStartMs: 0,
         loopPosMs: 0,
         lastLoopPosMs: 0,
+        layerStack: [],
         buttonHeld: false,
         buttonDownTick: -1,
         lastPressTick: -9999,
-        eraseHoldTriggered: false
+        eraseHoldTriggered: false,
+        holdEraseArmed: false
     };
 }
 
@@ -1094,6 +1097,7 @@ function looperStateColor(state) {
     if (state === 'recording') return LOOP_PAD_COLOR_RECORD;
     if (state === 'playing') return LOOP_PAD_COLOR_PLAY;
     if (state === 'overdub') return LOOP_PAD_COLOR_OVERDUB;
+    if (state === 'stopped') return LOOP_PAD_COLOR_STOPPED;
     return LOOP_PAD_COLOR_OFF;
 }
 
@@ -2293,8 +2297,9 @@ function updateRecordButtonLed() {
 function loopLedColor() {
     const st = currentLooper().state;
     if (st === 'recording') return BrightRed;
-    if (st === 'overdub') return BrightRed;
-    if (st === 'playing') return 120;
+    if (st === 'overdub') return LOOP_PAD_COLOR_OVERDUB;
+    if (st === 'playing') return LOOP_PAD_COLOR_PLAY;
+    if (st === 'stopped') return LOOP_PAD_COLOR_STOPPED;
     return Black;
 }
 
@@ -2936,10 +2941,12 @@ function looperReset(clearEvents) {
     l.playStartMs = 0;
     l.loopPosMs = 0;
     l.lastLoopPosMs = 0;
+    l.layerStack = [];
     l.buttonHeld = false;
     l.buttonDownTick = -1;
     l.lastPressTick = -9999;
     l.eraseHoldTriggered = false;
+    l.holdEraseArmed = false;
     updateUtilityButtonLeds();
 }
 
@@ -2963,6 +2970,7 @@ function looperRecordEvent(type, sec, bank, slot, velocity) {
 function looperBeginRecording() {
     const l = currentLooper();
     l.events = [];
+    l.layerStack = [];
     l.recordStartMs = looperNowMs();
     l.playStartMs = l.recordStartMs;
     l.loopPosMs = 0;
@@ -2990,6 +2998,7 @@ function looperFinishRecordingStartPlayback() {
 function looperToggleOverdub() {
     const l = currentLooper();
     if (l.state === 'playing') {
+        l.layerStack.push(l.events.length);
         l.state = 'overdub';
         showStatus('Looper: overdub', 90);
     } else if (l.state === 'overdub') {
@@ -3020,6 +3029,19 @@ function looperErase() {
     updateUtilityButtonLeds();
 }
 
+function looperUndoLastLayer() {
+    const l = currentLooper();
+    if (!Array.isArray(l.layerStack) || !l.layerStack.length) {
+        showStatus('Looper: no layer', 80);
+        return false;
+    }
+    const start = clampInt(l.layerStack.pop(), 0, l.events.length, 0);
+    l.events = l.events.slice(0, start);
+    showStatus('Looper: layer undo', 90);
+    updateUtilityButtonLeds();
+    return true;
+}
+
 function handleLoopButtonPress(fromPadTap = false) {
     const l = currentLooper();
     const now = s.transportTicks;
@@ -3028,9 +3050,11 @@ function handleLoopButtonPress(fromPadTap = false) {
     l.buttonHeld = !fromPadTap;
     l.buttonDownTick = fromPadTap ? -1 : now;
     l.eraseHoldTriggered = false;
+    l.holdEraseArmed = false;
 
     if (isDouble) {
         looperStopPlayback();
+        l.holdEraseArmed = true;
         showStatus('Looper: stopped (hold to erase)', 100);
         return;
     }
@@ -3059,6 +3083,7 @@ function handleLoopButtonRelease() {
     const l = currentLooper();
     l.buttonHeld = false;
     l.buttonDownTick = -1;
+    l.holdEraseArmed = false;
 }
 
 function stopActiveLooperForSwitch() {
@@ -3099,7 +3124,16 @@ function tickMidiLooperButtonHold() {
     if (l.buttonDownTick < 0) return;
     if ((s.transportTicks - l.buttonDownTick) < LOOP_ERASE_HOLD_TICKS) return;
     l.eraseHoldTriggered = true;
-    looperErase();
+    if (l.holdEraseArmed) {
+        looperErase();
+        l.holdEraseArmed = false;
+        return;
+    }
+    if (l.state === 'playing') {
+        looperUndoLastLayer();
+        l.buttonHeld = false;
+        l.buttonDownTick = -1;
+    }
 }
 
 function isPadMuted(sec, bank, slot) {
