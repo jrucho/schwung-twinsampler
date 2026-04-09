@@ -1509,7 +1509,6 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
-    applyBankStateToDsp(sec, b, true);
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
@@ -2671,14 +2670,13 @@ function applyAllStateToDsp() {
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) {
-            applyBankStateToDsp(sec, bank, false);
+            applyBankStateToDsp(sec, bank, true);
         }
     }
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         const bank = s.sections[sec].currentBank;
         spb('section_bank', sec + ':' + bank, 200);
-        applyBankStateToDsp(sec, bank, true);
     }
 
     setSelectedSlice(s.selectedSlice);
