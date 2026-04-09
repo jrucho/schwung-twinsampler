@@ -34,6 +34,8 @@ const MoveCopy = pickConst('MoveCopy', 60);
 const MoveCapture = pickConst('MoveCapture', 52);
 const MoveRec = pickConst('MoveRec', 86);
 const MoveRecord = pickConst('MoveRecord', 118);
+const MoveLoop = pickConst('MoveLoop', 87);
+const MoveMute = pickConst('MoveMute', 88);
 const MoveUndo = pickConst('MoveUndo', 56);
 const MoveDelete = pickConst('MoveDelete', 119);
 const MoveMaster = pickConst('MoveMaster', 79);
@@ -90,6 +92,9 @@ const GRID_SIZE = 16;
 const GRID_COUNT = 2;
 const BANK_COUNT = 8;
 const TOTAL_PADS = GRID_SIZE * GRID_COUNT;
+const MIDI_NOTE_BASE = 36; /* C1 in Drum Rack convention */
+const MIDI_FIXED_NOTES = Array.from({ length: GRID_SIZE }, (_, i) => MIDI_NOTE_BASE + i);
+const MIDI_OUT_POLY_AFTERTOUCH = false;
 
 const PAD_NOTE_MIN = 68;
 const PAD_NOTE_MAX = 99;
@@ -112,6 +117,34 @@ const SOURCE_PITCH_LIVE_RETRIGGER = true;
 const RECORD_LED_BLINK_PERIOD_TICKS = 24;
 const LED_RESYNC_INTERVAL_TICKS = 18;
 const LED_RESYNC_PASSES = 3;
+const LOOP_DOUBLE_PRESS_TICKS = 90;
+const LOOP_ERASE_HOLD_TICKS = 36;
+const PAD_PRESS_FLASH_TICKS = 5;
+const PAD_PRESS_LED_COLOR = 122; /* dim white */
+const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
+const LOOP_PAD_COLOR_OFF = Black;
+const LOOP_PAD_COLOR_RECORD = BrightRed;
+const LOOP_PAD_COLOR_PLAY = 21;
+const LOOP_PAD_COLOR_OVERDUB = 9;
+const LOOP_PAD_COLOR_STOPPED = 118;
+
+function createLooperState() {
+    return {
+        state: 'empty', /* empty|recording|playing|overdub|stopped */
+        events: [],
+        loopLengthMs: 0,
+        recordStartMs: 0,
+        playStartMs: 0,
+        loopPosMs: 0,
+        lastLoopPosMs: 0,
+        layerStack: [],
+        buttonHeld: false,
+        buttonDownTick: -1,
+        lastPressTick: -9999,
+        eraseHoldTriggered: false,
+        holdEraseArmed: false
+    };
+}
 
 const BANK_COLOR_SEQUENCE = [8, 15, 3, 21, 7, 31, 47, 1];
 const COLOR_PALETTE = [120, 118, 8, 9, 11, 12, 14, 15, 16, 47, 48, 3, 7, 21, 1, 125, 127];
@@ -218,7 +251,8 @@ function makeSlot() {
         pitch: 0.0,
         modeGate: 0,
         loop: 0,
-        color: -1
+        color: -1,
+        muted: 0
     };
 }
 
@@ -233,7 +267,8 @@ function cloneSlot(s) {
         pitch: s.pitch,
         modeGate: s.modeGate,
         loop: s.loop,
-        color: s.color
+        color: s.color,
+        muted: s.muted ? 1 : 0
     };
 }
 
@@ -320,6 +355,13 @@ const s = {
     copySource: null,
     stepCopySource: null,
     activePadPress: {},
+    muteHeld: false,
+
+    transportTicks: 0,
+    padPressFlash: {},
+    midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
+    activeLooper: 0,
+    loopPadMode: false,
 
     statusText: '',
     statusTicks: 0,
@@ -340,6 +382,107 @@ const s = {
 
 const editCursorCache = { sec: -1, bank: -1, slot: -1 };
 const playbackCompatCache = { sec: -1, bank: -1, slot: -1 };
+const midiHeldByChannelNote = {};
+
+function normalizeSide(side) {
+    if (side === 1 || side === 'right' || side === 'R' || side === 'r') return 1;
+    return 0;
+}
+
+function getNoteForPad(padIndex) {
+    const idx = clampInt(padIndex, 0, GRID_SIZE - 1, 0);
+    return MIDI_FIXED_NOTES[idx];
+}
+
+function getPadFromNote(note) {
+    const n = clampInt(note, 0, 127, -1);
+    const idx = MIDI_FIXED_NOTES.indexOf(n);
+    return idx >= 0 ? idx : -1;
+}
+
+function getChannel(side, bank) {
+    const sSide = normalizeSide(side);
+    const sBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
+    return sSide === 0 ? (sBank + 1) : (sBank + 9);
+}
+
+function getBankFromChannel(channel) {
+    const ch = clampInt(channel, 1, 16, -1);
+    if (ch < 1 || ch > 16) return null;
+    if (ch <= 8) return { side: 0, bank: ch - 1 };
+    return { side: 1, bank: ch - 9 };
+}
+
+function midiChannelNibbleFrom1Based(channel1Based) {
+    return clampInt(channel1Based, 1, 16, 1) - 1;
+}
+
+function sendExternalMidi(data) {
+    const bytes = Array.isArray(data) ? data : [];
+    if (bytes.length < 3) return false;
+    const status = clampInt(bytes[0], 0, 255, 0);
+    const d1 = clampInt(bytes[1], 0, 127, 0);
+    const d2 = clampInt(bytes[2], 0, 127, 0);
+    const framed = [(2 << 4) | ((status & 0xF0) >> 4), status, d1, d2];
+    try {
+        if (typeof move_midi_external_send === 'function') {
+            move_midi_external_send(framed);
+            return true;
+        }
+    } catch (e) {}
+    try {
+        if (typeof host_midi_send_external === 'function') {
+            host_midi_send_external(bytes);
+            return true;
+        }
+    } catch (e) {}
+    try {
+        if (typeof move_midi_send_external === 'function') {
+            move_midi_send_external(bytes);
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
+
+function unpackMidiMessage(data) {
+    if (!data || typeof data.length !== 'number') return null;
+    if (data.length >= 4) {
+        const status = clampInt(data[1], 0, 255, 0);
+        if ((status & 0x80) !== 0) {
+            return [status, clampInt(data[2], 0, 127, 0), clampInt(data[3], 0, 127, 0)];
+        }
+    }
+    if (data.length >= 3) {
+        return [
+            clampInt(data[0], 0, 255, 0),
+            clampInt(data[1], 0, 127, 0),
+            clampInt(data[2], 0, 127, 0)
+        ];
+    }
+    return null;
+}
+
+function activateStandaloneMidiPort() {
+    const target = 'standalone';
+    try {
+        if (typeof host_set_midi_port === 'function') host_set_midi_port(target);
+    } catch (e) {}
+    try {
+        if (typeof host_set_midi_input_port === 'function') host_set_midi_input_port(target);
+    } catch (e) {}
+    try {
+        if (typeof host_set_midi_output_port === 'function') host_set_midi_output_port(target);
+    } catch (e) {}
+    try {
+        if (typeof move_midi_select_port === 'function') move_midi_select_port(target);
+    } catch (e) {}
+    try {
+        sp('midi_port', target);
+        sp('midi_in_port', target);
+        sp('midi_out_port', target);
+    } catch (e) {}
+}
 
 function gp(key, fallback) {
     try {
@@ -941,6 +1084,27 @@ function previewNowMs() {
     return 0;
 }
 
+function looperNowMs() {
+    return previewNowMs();
+}
+
+function currentLooper() {
+    const idx = clampInt(s.activeLooper, 0, 3, 0);
+    return s.midiLoopers[idx];
+}
+
+function looperStateColor(state) {
+    if (state === 'recording') return LOOP_PAD_COLOR_RECORD;
+    if (state === 'playing') return LOOP_PAD_COLOR_PLAY;
+    if (state === 'overdub') return LOOP_PAD_COLOR_OVERDUB;
+    if (state === 'stopped') return LOOP_PAD_COLOR_STOPPED;
+    return LOOP_PAD_COLOR_OFF;
+}
+
+function loopPadIndexFromPadNote(note) {
+    return LOOP_PAD_NOTES.indexOf(note);
+}
+
 function previewCanPlay() {
     return typeof host_preview_play === 'function';
 }
@@ -1243,13 +1407,9 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
-    applyBankStateToDsp(sec, b, true);
 
     if (sec === s.focusedSection) {
-        editCursorCache.bank = -1;
-        ensureEditCursor();
-        invalidatePlaybackCompat();
-        syncFocusedSlotPlaybackCompat(true);
+        refreshRealtimeUiState();
     }
 
     showStatus('S' + (sec + 1) + ' bank ' + (b + 1), 70);
@@ -1438,7 +1598,7 @@ function setSlotGain(sec, bank, slot, value) {
 function setSlotPitch(sec, bank, slot, value) {
     const v = clampFloat(value, -48.0, 48.0, 0.0);
     slotAt(sec, bank, slot).pitch = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_pitch_at', 'slot_pitch', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_pitch_at', 'slot_pitch', v.toFixed(2), 180, true);
     markSessionChanged();
 }
 
@@ -1496,6 +1656,7 @@ function applySlotToDsp(sec, bank, slot, srcSlot) {
     dst.modeGate = clampInt(srcSlot.modeGate, 0, 1, 1);
     dst.loop = clampInt(srcSlot.loop, 0, 2, 0);
     dst.color = clampInt(srcSlot.color, -1, 127, -1);
+    dst.muted = clampInt(srcSlot.muted, 0, 1, 0);
 
     sendSlotStateToDsp(sec, bank, slot, true);
 }
@@ -1663,6 +1824,10 @@ function stepNoteFor(sec, bank) {
 function effectivePadColor(sec, bankIdx, slotIdx) {
     const bank = s.sections[sec].banks[bankIdx];
     const slot = bank.slots[slotIdx];
+    const pressKey = sec + ':' + bankIdx + ':' + slotIdx;
+    const flashUntil = clampInt(s.padPressFlash[pressKey], 0, 0x7fffffff, 0);
+    if (flashUntil > s.transportTicks) return PAD_PRESS_LED_COLOR;
+    if (slot.muted) return 1;
     const base = normalizeColor(bank.bankColor, defaultBankColor(bankIdx));
     const slotColor = clampInt(slot.color, -1, 127, -1);
     return slotColor >= 0 ? slotColor : base;
@@ -1676,7 +1841,15 @@ function rebuildLedQueue() {
         for (let slot = 0; slot < GRID_SIZE; slot++) {
             const note = padNoteFor(sec, slot);
             let color = (LEFT_GRID_ONLY && sec === 1) ? 0 : effectivePadColor(sec, bankIdx, slot);
-            if (s.copySource && s.copySource.sec === sec && s.copySource.bank === bankIdx && s.copySource.slot === slot) {
+            let loopPad = false;
+            if (s.loopPadMode) {
+                const lp = loopPadIndexFromPadNote(note);
+                if (lp >= 0) {
+                    color = looperStateColor(s.midiLoopers[lp].state);
+                    loopPad = true;
+                }
+            }
+            if (!loopPad && s.copySource && s.copySource.sec === sec && s.copySource.bank === bankIdx && s.copySource.slot === slot) {
                 color = 120;
             }
             s.ledQueue.push([note, color]);
@@ -1721,6 +1894,19 @@ function forceLedRefreshNow() {
         setLED(entry[0], entry[1]);
     }
     updateRecordButtonLed();
+    updateUtilityButtonLeds();
+}
+
+function refreshRealtimeUiState() {
+    editCursorCache.sec = -1;
+    editCursorCache.bank = -1;
+    editCursorCache.slot = -1;
+    ensureEditCursor(true);
+    invalidatePlaybackCompat();
+    syncFocusedSlotPlaybackCompat(true);
+    forceLedRefreshNow();
+    s.ledResyncPasses = LED_RESYNC_PASSES;
+    s.ledResyncTicks = LED_RESYNC_INTERVAL_TICKS;
 }
 
 function tickLedResync() {
@@ -2108,6 +2294,20 @@ function updateRecordButtonLed() {
     setButtonLED(MoveRecord, color);
 }
 
+function loopLedColor() {
+    const st = currentLooper().state;
+    if (st === 'recording') return BrightRed;
+    if (st === 'overdub') return LOOP_PAD_COLOR_OVERDUB;
+    if (st === 'playing') return LOOP_PAD_COLOR_PLAY;
+    if (st === 'stopped') return LOOP_PAD_COLOR_STOPPED;
+    return Black;
+}
+
+function updateUtilityButtonLeds() {
+    setButtonLED(MoveLoop, loopLedColor());
+    setButtonLED(MoveMute, s.muteHeld ? 120 : Black);
+}
+
 function tickRecordButtonBlink() {
     if (s.recording || !s.recordArmed) return;
     s.recordBlinkTicks++;
@@ -2136,6 +2336,14 @@ function drawMain() {
 
     const lMode = s.sections[0].mode === MODE_SINGLE ? 'SRC' : 'PAD';
     const rMode = s.sections[1].mode === MODE_SINGLE ? 'SRC' : 'PAD';
+    const looperState = currentLooper().state;
+    const looperTag = looperState === 'recording'
+        ? 'REC'
+        : (looperState === 'overdub'
+            ? 'OVD'
+            : (looperState === 'playing'
+                ? 'PLAY'
+                : (looperState === 'stopped' ? 'STOP' : 'OFF')));
 
     clear_screen();
 
@@ -2164,7 +2372,7 @@ function drawMain() {
     let footer = '';
     if (s.statusTicks > 0) footer = s.statusText;
     else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'Sh1-5All 6T 7G 8L';
+    else footer = 'L' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
     print(0, 50, shortText(footer, 21), 1);
 }
 
@@ -2243,7 +2451,8 @@ function sanitizeSlot(raw) {
         pitch: clampFloat(raw.pitch, -48.0, 48.0, base.pitch),
         modeGate: clampInt(raw.modeGate, 0, 1, base.modeGate),
         loop: clampInt(raw.loop, 0, 2, base.loop),
-        color: clampInt(raw.color, -1, 127, base.color)
+        color: clampInt(raw.color, -1, 127, base.color),
+        muted: clampInt(raw.muted, 0, 1, base.muted)
     };
 }
 
@@ -2723,9 +2932,317 @@ function handleStepBankNote(note, velocity) {
     return true;
 }
 
+function looperReset(clearEvents) {
+    const l = currentLooper();
+    l.state = 'empty';
+    if (clearEvents) l.events = [];
+    l.loopLengthMs = 0;
+    l.recordStartMs = 0;
+    l.playStartMs = 0;
+    l.loopPosMs = 0;
+    l.lastLoopPosMs = 0;
+    l.layerStack = [];
+    l.buttonHeld = false;
+    l.buttonDownTick = -1;
+    l.lastPressTick = -9999;
+    l.eraseHoldTriggered = false;
+    l.holdEraseArmed = false;
+    updateUtilityButtonLeds();
+}
+
+function looperRecordEvent(type, sec, bank, slot, velocity) {
+    const l = currentLooper();
+    if (l.state !== 'recording' && l.state !== 'overdub') return;
+    let atMs = 0;
+    const now = looperNowMs();
+    if (l.state === 'recording') atMs = Math.max(0, now - l.recordStartMs);
+    else atMs = clampInt(l.loopPosMs, 0, Math.max(0, l.loopLengthMs - 1), 0);
+    l.events.push({
+        atMs,
+        type: type === 'off' ? 'off' : 'on',
+        sec: clampInt(sec, 0, GRID_COUNT - 1, 0),
+        bank: clampInt(bank, 0, BANK_COUNT - 1, 0),
+        slot: clampInt(slot, 0, GRID_SIZE - 1, 0),
+        velocity: clampInt(velocity, 0, 127, 0)
+    });
+}
+
+function looperBeginRecording() {
+    const l = currentLooper();
+    l.events = [];
+    l.layerStack = [];
+    l.recordStartMs = looperNowMs();
+    l.playStartMs = l.recordStartMs;
+    l.loopPosMs = 0;
+    l.lastLoopPosMs = 0;
+    l.loopLengthMs = 0;
+    l.state = 'recording';
+    showStatus('Looper: recording', 100);
+    updateUtilityButtonLeds();
+}
+
+function looperFinishRecordingStartPlayback() {
+    const l = currentLooper();
+    const now = looperNowMs();
+    const len = Math.max(80, now - l.recordStartMs);
+    l.loopLengthMs = len;
+    l.events = l.events.filter((e) => e.atMs >= 0 && e.atMs < len);
+    l.playStartMs = now;
+    l.loopPosMs = 0;
+    l.lastLoopPosMs = 0;
+    l.state = l.events.length ? 'playing' : 'empty';
+    showStatus(l.events.length ? ('Looper: play ' + len + 'ms') : 'Looper: empty', 100);
+    updateUtilityButtonLeds();
+}
+
+function looperToggleOverdub() {
+    const l = currentLooper();
+    if (l.state === 'playing') {
+        l.layerStack.push(l.events.length);
+        l.state = 'overdub';
+        showStatus('Looper: overdub', 90);
+    } else if (l.state === 'overdub') {
+        l.state = 'playing';
+        showStatus('Looper: play', 90);
+    }
+    updateUtilityButtonLeds();
+}
+
+function looperStopPlayback() {
+    const l = currentLooper();
+    if (l.state === 'empty') {
+        showStatus('Looper: empty', 70);
+        return;
+    }
+    if (l.state === 'recording') looperFinishRecordingStartPlayback();
+    l.state = l.events.length ? 'stopped' : 'empty';
+    l.playStartMs = looperNowMs();
+    l.loopPosMs = 0;
+    l.lastLoopPosMs = 0;
+    showStatus('Looper: stopped', 80);
+    updateUtilityButtonLeds();
+}
+
+function looperErase() {
+    looperReset(true);
+    showStatus('Looper: erased', 100);
+    updateUtilityButtonLeds();
+}
+
+function looperUndoLastLayer() {
+    const l = currentLooper();
+    if (!Array.isArray(l.layerStack) || !l.layerStack.length) {
+        showStatus('Looper: no layer', 80);
+        return false;
+    }
+    const start = clampInt(l.layerStack.pop(), 0, l.events.length, 0);
+    l.events = l.events.slice(0, start);
+    showStatus('Looper: layer undo', 90);
+    updateUtilityButtonLeds();
+    return true;
+}
+
+function handleLoopButtonPress(fromPadTap = false) {
+    const l = currentLooper();
+    const now = s.transportTicks;
+    const isDouble = !fromPadTap && ((now - l.lastPressTick) <= LOOP_DOUBLE_PRESS_TICKS);
+    l.lastPressTick = now;
+    l.buttonHeld = !fromPadTap;
+    l.buttonDownTick = fromPadTap ? -1 : now;
+    l.eraseHoldTriggered = false;
+    l.holdEraseArmed = false;
+
+    if (isDouble) {
+        looperStopPlayback();
+        l.holdEraseArmed = true;
+        showStatus('Looper: stopped (hold to erase)', 100);
+        return;
+    }
+
+    if (l.state === 'empty') {
+        looperBeginRecording();
+        return;
+    }
+    if (l.state === 'stopped') {
+        l.state = 'playing';
+        l.playStartMs = looperNowMs();
+        l.loopPosMs = 0;
+        l.lastLoopPosMs = 0;
+        showStatus('Looper: play', 90);
+        updateUtilityButtonLeds();
+        return;
+    }
+    if (l.state === 'recording') {
+        looperFinishRecordingStartPlayback();
+        return;
+    }
+    looperToggleOverdub();
+}
+
+function handleLoopButtonRelease() {
+    const l = currentLooper();
+    l.buttonHeld = false;
+    l.buttonDownTick = -1;
+    l.holdEraseArmed = false;
+}
+
+function stopActiveLooperForSwitch() {
+    const l = currentLooper();
+    if (l.state === 'recording') looperFinishRecordingStartPlayback();
+    if (l.state === 'playing' || l.state === 'overdub') {
+        l.state = 'stopped';
+        l.buttonHeld = false;
+        l.buttonDownTick = -1;
+    }
+}
+
+function selectLooper(index) {
+    const next = clampInt(index, 0, 3, 0);
+    if (next === s.activeLooper) return;
+    stopActiveLooperForSwitch();
+    s.activeLooper = next;
+    updateUtilityButtonLeds();
+    markLedsDirty();
+}
+
+function fireLooperPad(index) {
+    const next = clampInt(index, 0, 3, 0);
+    if (next !== s.activeLooper) selectLooper(next);
+    handleLoopButtonPress(false);
+}
+
+function toggleLoopPadMode() {
+    s.loopPadMode = !s.loopPadMode;
+    showStatus(s.loopPadMode ? 'Looper pad mode ON' : 'Looper pad mode OFF', 90);
+    markLedsDirty();
+    updateUtilityButtonLeds();
+}
+
+function tickMidiLooperButtonHold() {
+    const l = currentLooper();
+    if (!l.buttonHeld || l.eraseHoldTriggered) return;
+    if (l.buttonDownTick < 0) return;
+    if ((s.transportTicks - l.buttonDownTick) < LOOP_ERASE_HOLD_TICKS) return;
+    l.eraseHoldTriggered = true;
+    if (l.holdEraseArmed) {
+        looperErase();
+        l.holdEraseArmed = false;
+        return;
+    }
+    if (l.state === 'playing') {
+        looperUndoLastLayer();
+        l.buttonHeld = false;
+        l.buttonDownTick = -1;
+    }
+}
+
+function isPadMuted(sec, bank, slot) {
+    return !!slotAt(sec, bank, slot).muted;
+}
+
+function togglePadMute(sec, bank, slot) {
+    const sl = slotAt(sec, bank, slot);
+    sl.muted = sl.muted ? 0 : 1;
+    markLedsDirty();
+    markSessionChanged();
+    showStatus('S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' ' + (sl.muted ? 'Muted' : 'Unmuted'), 90);
+    s.dirty = true;
+}
+
+function flashPadPress(sec, bank, slot) {
+    const key = sec + ':' + bank + ':' + slot;
+    s.padPressFlash[key] = s.transportTicks + PAD_PRESS_FLASH_TICKS;
+    markLedsDirty();
+}
+
+function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = true) {
+    if (isPadMuted(sec, bank, slot)) return false;
+    flashPadPress(sec, bank, slot);
+    const triggerNote = padNoteFor(sec, slot);
+    const vel = clampInt(velocity, 1, 127, 100);
+    if (routeBank) {
+        withPlaybackBank(sec, bank, () => {
+            spe('pad_note_on', triggerNote + ':' + vel);
+        });
+    } else {
+        spe('pad_note_on', triggerNote + ':' + vel);
+    }
+    sendMidiOut(slot, vel, sec, bank, true);
+    if (recordToLooper) looperRecordEvent('on', sec, bank, slot, vel);
+    return true;
+}
+
+function triggerPadOff(sec, bank, slot, routeBank, recordToLooper = true) {
+    const addr = { sec, bank, slot };
+    if (!shouldSendNoteOffForAddr(addr)) return false;
+    const triggerNote = padNoteFor(sec, slot);
+    if (routeBank) {
+        withPlaybackBank(sec, bank, () => {
+            spe('pad_note_off', String(triggerNote));
+        });
+    } else {
+        spe('pad_note_off', String(triggerNote));
+    }
+    sendMidiOut(slot, 0, sec, bank, false);
+    if (recordToLooper) looperRecordEvent('off', sec, bank, slot, 0);
+    return true;
+}
+
+function tickMidiLooperPlayback() {
+    const l = currentLooper();
+    if ((l.state !== 'playing' && l.state !== 'overdub') || l.loopLengthMs <= 0 || !l.events.length) return;
+
+    const now = looperNowMs();
+    const elapsed = Math.max(0, now - l.playStartMs);
+    const prev = l.loopPosMs;
+    const cur = elapsed % l.loopLengthMs;
+    l.lastLoopPosMs = prev;
+    l.loopPosMs = cur;
+
+    for (let i = 0; i < l.events.length; i++) {
+        const ev = l.events[i];
+        const t = clampInt(ev.atMs, 0, Math.max(0, l.loopLengthMs - 1), 0);
+        const crossed = (prev < cur)
+            ? (t > prev && t <= cur)
+            : (prev > cur ? (t > prev || t <= cur) : false);
+        if (!crossed) continue;
+        if (ev.type === 'on') {
+            if (isPadMuted(ev.sec, ev.bank, ev.slot)) continue;
+            flashPadPress(ev.sec, ev.bank, ev.slot);
+            withPlaybackBank(ev.sec, ev.bank, () => {
+                spe('pad_note_on', padNoteFor(ev.sec, ev.slot) + ':' + clampInt(ev.velocity, 1, 127, 100));
+            });
+            sendMidiOut(ev.slot, ev.velocity, ev.sec, ev.bank, true);
+        } else {
+            triggerPadOff(ev.sec, ev.bank, ev.slot, true, false);
+        }
+    }
+}
+
+function tickPadPressFlash() {
+    const keys = Object.keys(s.padPressFlash);
+    if (!keys.length) return;
+    let changed = false;
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        const until = clampInt(s.padPressFlash[k], 0, 0x7fffffff, 0);
+        if (until > s.transportTicks) continue;
+        delete s.padPressFlash[k];
+        changed = true;
+    }
+    if (changed) markLedsDirty();
+}
+
 function handlePadNote(note, velocity) {
     if (velocity <= 0) return false;
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
+    if (s.loopPadMode) {
+        const lp = loopPadIndexFromPadNote(note);
+        if (lp >= 0) {
+            fireLooperPad(lp);
+            return true;
+        }
+    }
 
     const slice = s.shiftHeld ? sliceFromPadNote(note) : playableSliceFromPadNote(note);
     if (slice < 0) return false;
@@ -2735,9 +3252,13 @@ function handlePadNote(note, velocity) {
     const addr = { sec, bank, slot };
     const triggerNote = padNoteFor(sec, slot);
 
+    if (s.muteHeld && !s.shiftHeld) {
+        togglePadMute(sec, bank, slot);
+        return true;
+    }
+
     if (!s.shiftHeld) {
-        /* Trigger first; selection sync can be deferred to avoid overtake param congestion. */
-        spe('pad_note_on', triggerNote + ':' + velocity);
+        if (!triggerPadOn(sec, bank, slot, velocity, false)) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         setSelectedSlice(slice, false, true);
     } else {
@@ -2761,15 +3282,80 @@ function handlePadNote(note, velocity) {
 
 function handlePadNoteRelease(note) {
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
+    if (s.loopPadMode) {
+        const lp = loopPadIndexFromPadNote(note);
+        if (lp >= 0) {
+            if (lp === s.activeLooper) handleLoopButtonRelease();
+            return true;
+        }
+    }
     const stored = s.activePadPress[String(note)];
     delete s.activePadPress[String(note)];
     if (!stored) return true;
     const addr = stored;
 
-    if (!shouldSendNoteOffForAddr(addr)) return true;
-    const releaseNote = clampInt(addr.triggerNote, PAD_NOTE_MIN, PAD_NOTE_MAX, padNoteFor(addr.sec, addr.slot));
-    spe('pad_note_off', String(releaseNote));
+    triggerPadOff(addr.sec, addr.bank, addr.slot, false);
     return true;
+}
+
+function withPlaybackBank(sec, bank, fn) {
+    const sSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const targetBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
+    const visibleBank = clampInt(s.sections[sSec].currentBank, 0, BANK_COUNT - 1, 0);
+
+    spb('section_bank', sSec + ':' + targetBank, 120);
+    try {
+        fn();
+    } finally {
+        if (targetBank !== visibleBank) spb('section_bank', sSec + ':' + visibleBank, 120);
+    }
+}
+
+function sendMidiOut(pad, velocity, side, bank, isNoteOn, polyPressure) {
+    const padIdx = clampInt(pad, 0, GRID_SIZE - 1, 0);
+    const vel = clampInt(velocity, 0, 127, 0);
+    const ch = getChannel(side, bank);
+    const note = getNoteForPad(padIdx);
+    const statusBase = isNoteOn ? 0x90 : 0x80;
+    sendExternalMidi([statusBase | midiChannelNibbleFrom1Based(ch), note, vel]);
+    if (isNoteOn && MIDI_OUT_POLY_AFTERTOUCH) {
+        const press = clampInt(polyPressure, 0, 127, vel);
+        sendExternalMidi([0xA0 | midiChannelNibbleFrom1Based(ch), note, press]);
+    }
+}
+
+function handleMidiIn(msg) {
+    const packet = unpackMidiMessage(msg);
+    if (!packet) return;
+    const statusRaw = packet[0];
+    const status = statusRaw & 0xF0;
+    const channel1Based = (statusRaw & 0x0F) + 1;
+    const note = packet[1];
+    const value = packet[2];
+
+    const route = getBankFromChannel(channel1Based);
+    if (!route) return;
+    const side = route.side;
+    const bank = route.bank;
+    const pad = getPadFromNote(note);
+    if (pad < 0) return;
+
+    const sec = side;
+    const slot = pad;
+    const triggerNote = padNoteFor(sec, slot);
+    const key = String(channel1Based) + ':' + String(note);
+
+    if (status === 0x90 && value > 0) {
+        if (!triggerPadOn(sec, bank, slot, value, true)) return;
+        midiHeldByChannelNote[key] = { sec, bank, slot, triggerNote };
+        return;
+    }
+
+    if (status === 0x80 || (status === 0x90 && value === 0)) {
+        const held = midiHeldByChannelNote[key] || { sec, bank, slot, triggerNote };
+        delete midiHeldByChannelNote[key];
+        triggerPadOff(held.sec, held.bank, held.slot, true);
+    }
 }
 
 function handleMainKnob(delta) {
@@ -2844,8 +3430,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob6) {
-            if (s.sections[s.focusedSection].mode === MODE_SINGLE) adjustFocusedBankPitch(delta);
-            else adjustGlobalPitch(delta);
+            adjustFocusedBankPitch(delta);
             return;
         }
         if (cc === MoveKnob7) {
@@ -2901,6 +3486,7 @@ function tickAutosave() {
 function syncFromDsp() {
     pollRecordingState();
     tickRecordButtonBlink();
+    syncFocusedSlotPlaybackCompat();
 }
 
 function initFromDspDefaults() {
@@ -2999,6 +3585,23 @@ function onMidiMessageInternal(data) {
             return;
         }
 
+        if (cc === MoveMute) {
+            s.muteHeld = val > 0;
+            if (s.muteHeld) showStatus('Mute hold: tap pad', 70);
+            updateUtilityButtonLeds();
+            return;
+        }
+
+        if (cc === MoveLoop) {
+            if (val > 0 && s.shiftHeld) {
+                toggleLoopPadMode();
+                return;
+            }
+            if (val > 0) handleLoopButtonPress();
+            else handleLoopButtonRelease();
+            return;
+        }
+
         if ((cc === MoveRec || cc === MoveRecord) && val > 0) {
             handleRecordButtonPress();
             return;
@@ -3090,7 +3693,7 @@ function onMidiMessageInternal(data) {
 }
 
 function onMidiMessageExternal(data) {
-    void data;
+    handleMidiIn(data);
 }
 
 function init() {
@@ -3100,6 +3703,7 @@ function init() {
     s.ledsDirty = true;
 
     initFromDspDefaults();
+    activateStandaloneMidiPort();
     browserOpen(SAMPLES_DIR, 'samples');
     s.copySource = null;
     s.sessionBrowserIntent = 'load';
@@ -3115,6 +3719,12 @@ function init() {
     }
 
     s.view = 'main';
+    s.muteHeld = false;
+    s.loopPadMode = false;
+    s.transportTicks = 0;
+    s.activeLooper = 0;
+    s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
+    looperReset(true);
     s.autosavePending = false;
     s.autosaveTicks = 0;
     resetHistory();
@@ -3127,10 +3737,14 @@ function init() {
 }
 
 function tick() {
+    s.transportTicks++;
     syncFromDsp();
     tickStatusTimer();
     tickAutosave();
     previewTick();
+    tickMidiLooperButtonHold();
+    tickMidiLooperPlayback();
+    tickPadPressFlash();
     tickLedResync();
     drainLedQueue();
 
