@@ -1509,6 +1509,7 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
+    applyBankStateToDsp(sec, b, true);
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
