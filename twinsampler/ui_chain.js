@@ -121,6 +121,9 @@ const LOOP_DOUBLE_PRESS_TICKS = 90;
 const LOOP_ERASE_HOLD_TICKS = 36;
 const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
+const RECORD_ACK_TIMEOUT_TICKS = 72;
+const RECORD_INTENT_WINDOW_TICKS = 48;
+const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -332,6 +335,8 @@ const s = {
     recordMaxSeconds: 30,
     recording: 0,
     recordArmed: false,
+    recordState: 'idle', /* idle|armed|starting|recording|stopping */
+    recordStateTicks: 0,
     recordLoadOnStop: false,
     recordMonitorOn: false,
     recordBlinkOn: false,
@@ -356,6 +361,9 @@ const s = {
     stepCopySource: null,
     activePadPress: {},
     muteHeld: false,
+    lastPadTriggerTick: -9999,
+    midiEchoSuppression: true,
+    recentOutboundMidi: {},
 
     transportTicks: 0,
     padPressFlash: {},
@@ -417,12 +425,33 @@ function midiChannelNibbleFrom1Based(channel1Based) {
     return clampInt(channel1Based, 1, 16, 1) - 1;
 }
 
+function midiEchoKey(status, d1, d2) {
+    return String(status & 0xFF) + ':' + String(d1 & 0x7F) + ':' + String(d2 & 0x7F);
+}
+
+function rememberOutboundMidi(status, d1, d2) {
+    if (!s.midiEchoSuppression) return;
+    s.recentOutboundMidi[midiEchoKey(status, d1, d2)] = Date.now();
+}
+
+function shouldSuppressEchoedMidi(status, d1, d2) {
+    if (!s.midiEchoSuppression) return false;
+    const now = Date.now();
+    const key = midiEchoKey(status, d1, d2);
+    const ts = clampInt(s.recentOutboundMidi[key], 0, 0x7fffffff, 0);
+    if (!ts) return false;
+    if ((now - ts) <= MIDI_ECHO_SUPPRESS_WINDOW_MS) return true;
+    delete s.recentOutboundMidi[key];
+    return false;
+}
+
 function sendExternalMidi(data) {
     const bytes = Array.isArray(data) ? data : [];
     if (bytes.length < 3) return false;
     const status = clampInt(bytes[0], 0, 255, 0);
     const d1 = clampInt(bytes[1], 0, 127, 0);
     const d2 = clampInt(bytes[2], 0, 127, 0);
+    rememberOutboundMidi(status, d1, d2);
     const framed = [(2 << 4) | ((status & 0xF0) >> 4), status, d1, d2];
     try {
         if (typeof move_midi_external_send === 'function') {
@@ -2151,9 +2180,30 @@ function setRecordMonitorEnabled(enabled) {
     sp('monitor', on);
 }
 
+function setRecordState(next) {
+    s.recordState = next;
+    s.recordStateTicks = 0;
+}
+
+function isRecordTransitionPending() {
+    return s.recordState === 'starting' || s.recordState === 'stopping';
+}
+
+function shouldPreferInternalCapture() {
+    if (Object.keys(s.activePadPress).length > 0) return true;
+    if ((s.transportTicks - s.lastPadTriggerTick) <= RECORD_INTENT_WINDOW_TICKS) return true;
+    const looper = currentLooper();
+    return looper.state === 'recording' || looper.state === 'playing' || looper.state === 'overdub';
+}
+
+function recordTargetLabel(target = s.recTarget) {
+    return 'S' + (target.sec + 1) + ' B' + (target.bank + 1) + ' P' + (target.slot + 1);
+}
+
 function armFocusedRecording() {
     if (s.recording) return;
     s.recordArmed = true;
+    setRecordState('armed');
     s.recordLoadOnStop = false;
     s.recordBlinkOn = true;
     s.recordBlinkTicks = 0;
@@ -2166,6 +2216,7 @@ function armFocusedRecording() {
 function disarmFocusedRecording() {
     if (s.recording) return;
     s.recordArmed = false;
+    setRecordState('idle');
     s.recordLoadOnStop = false;
     s.recordBlinkOn = false;
     s.recordBlinkTicks = 0;
@@ -2176,26 +2227,33 @@ function disarmFocusedRecording() {
 }
 
 function startFocusedRecording() {
+    if (isRecordTransitionPending()) return;
     const a = focusedAddr();
     s.recTarget = { sec: a.sec, bank: a.bank, slot: a.slot };
     s.recordLoadOnStop = false;
     s.recordArmed = true;
+    setRecordState('starting');
     s.recordBlinkOn = true;
     s.recordBlinkTicks = 0;
     setRecordMonitorEnabled(true);
 
     sp('record_target', a.sec + ':' + a.bank + ':' + a.slot);
+    sp('record_capture_mode', 'auto');
+    sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
+    sp('monitor_policy', '1');
+    sp('debug_capture_logs', '1');
     sp('record_max_seconds', String(s.recordMaxSeconds));
     sp('record_start', '1');
 
-    showStatus('Recording S' + (a.sec + 1) + ' B' + (a.bank + 1) + ' P' + (a.slot + 1), 90);
+    showStatus('REC lock ' + recordTargetLabel(a), 90);
     s.dirty = true;
 }
 
 function stopFocusedRecording(loadOnStop) {
-    if (!s.recording) return;
+    if (!s.recording || isRecordTransitionPending()) return;
     s.recordLoadOnStop = !!loadOnStop;
     s.recordArmed = false;
+    setRecordState('stopping');
     s.recordBlinkOn = false;
     s.recordBlinkTicks = 0;
     setRecordMonitorEnabled(false);
@@ -2217,6 +2275,10 @@ function toggleFocusedRecording() {
 }
 
 function handleRecordButtonPress() {
+    if (isRecordTransitionPending()) {
+        showStatus('REC busy...', 50);
+        return;
+    }
     if (s.view !== 'main') {
         showStatus('Close browser to record', 80);
         return;
@@ -2224,7 +2286,7 @@ function handleRecordButtonPress() {
     if (s.recording) {
         if (s.shiftHeld) {
             stopFocusedRecording(true);
-            showStatus('Rec stop+load', 90);
+            showStatus('Rec stop+load ' + recordTargetLabel(), 90);
         } else {
             stopFocusedRecording(false);
             showStatus('Rec stop', 80);
@@ -2255,6 +2317,7 @@ function pollRecordingState() {
         const shouldLoad = !!s.recordLoadOnStop;
         s.recordLoadOnStop = false;
         s.recordArmed = false;
+        setRecordState('idle');
         s.recordBlinkOn = false;
         s.recordBlinkTicks = 0;
         setRecordMonitorEnabled(false);
@@ -2265,10 +2328,16 @@ function pollRecordingState() {
             if (mode === MODE_SINGLE) {
                 setSourcePath(t.sec, t.bank, path, false);
                 syncBankSliceState(t.sec, t.bank);
+                showStatus('Recorded+loaded SRC ' + recordTargetLabel(t), 110);
             } else {
-                setSlotPath(t.sec, t.bank, t.slot, path, false);
+                let slot = t.slot;
+                const existing = slotAt(t.sec, t.bank, slot).path;
+                if (existing && existing !== path) {
+                    showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
+                }
+                setSlotPath(t.sec, t.bank, slot, path, false);
+                showStatus('Recorded+loaded ' + recordTargetLabel({ sec: t.sec, bank: t.bank, slot }), 110);
             }
-            showStatus('Recorded+loaded: ' + shortText(baseName(path), 14), 110);
         } else if (path) {
             showStatus('Recorded: ' + shortText(baseName(path), 14), 90);
         } else {
@@ -2276,6 +2345,7 @@ function pollRecordingState() {
         }
     } else if (rec === 1) {
         s.recordArmed = true;
+        setRecordState('recording');
         s.recordBlinkOn = true;
         s.recordBlinkTicks = 0;
         setRecordMonitorEnabled(true);
@@ -2284,6 +2354,19 @@ function pollRecordingState() {
 
     s.dirty = true;
     updateRecordButtonLed();
+}
+
+function tickRecordStateMachine() {
+    if (s.recordState !== 'starting' && s.recordState !== 'stopping') return;
+    s.recordStateTicks++;
+    if (s.recordStateTicks < RECORD_ACK_TIMEOUT_TICKS) return;
+    if (s.recordState === 'starting') {
+        setRecordState('armed');
+        showStatus('REC start timeout', 80);
+    } else if (s.recordState === 'stopping') {
+        setRecordState(s.recording ? 'recording' : 'idle');
+        showStatus('REC stop timeout', 80);
+    }
 }
 
 function updateRecordButtonLed() {
@@ -2371,7 +2454,9 @@ function drawMain() {
 
     let footer = '';
     if (s.statusTicks > 0) footer = s.statusText;
-    else if (s.copySource) footer = 'Copy armed: tap dest pad';
+    else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
+        footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
+    } else if (s.copySource) footer = 'Copy armed: tap dest pad';
     else footer = 'L' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
     print(0, 50, shortText(footer, 21), 1);
 }
@@ -3158,6 +3243,7 @@ function flashPadPress(sec, bank, slot) {
 function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = true) {
     if (isPadMuted(sec, bank, slot)) return false;
     flashPadPress(sec, bank, slot);
+    s.lastPadTriggerTick = s.transportTicks;
     const triggerNote = padNoteFor(sec, slot);
     const vel = clampInt(velocity, 1, 127, 100);
     if (routeBank) {
@@ -3233,6 +3319,17 @@ function tickPadPressFlash() {
     if (changed) markLedsDirty();
 }
 
+function tickMidiEchoCache() {
+    if (!s.midiEchoSuppression) return;
+    const now = Date.now();
+    const keys = Object.keys(s.recentOutboundMidi);
+    for (let i = 0; i < keys.length; i++) {
+        const k = keys[i];
+        const ts = clampInt(s.recentOutboundMidi[k], 0, 0x7fffffff, 0);
+        if (!ts || (now - ts) > (MIDI_ECHO_SUPPRESS_WINDOW_MS * 4)) delete s.recentOutboundMidi[k];
+    }
+}
+
 function handlePadNote(note, velocity) {
     if (velocity <= 0) return false;
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
@@ -3264,6 +3361,10 @@ function handlePadNote(note, velocity) {
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
+        if (s.recording || isRecordTransitionPending()) {
+            showStatus('REC focus ' + recordTargetLabel({ sec, bank, slot }), 60);
+            return true;
+        }
     }
 
     if (s.shiftHeld) {
@@ -3332,6 +3433,7 @@ function handleMidiIn(msg) {
     const channel1Based = (statusRaw & 0x0F) + 1;
     const note = packet[1];
     const value = packet[2];
+    if (shouldSuppressEchoedMidi(statusRaw, note, value)) return;
 
     const route = getBankFromChannel(channel1Based);
     if (!route) return;
@@ -3485,6 +3587,7 @@ function tickAutosave() {
 
 function syncFromDsp() {
     pollRecordingState();
+    tickRecordStateMachine();
     tickRecordButtonBlink();
     syncFocusedSlotPlaybackCompat();
 }
@@ -3519,6 +3622,8 @@ function initFromDspDefaults() {
     s.recording = clampInt(gp('recording', 0), 0, 1, 0);
     s.lastRecordedPath = String(gp('last_recorded_path', '') || '');
     s.recordArmed = s.recording ? true : false;
+    s.recordState = s.recording ? 'recording' : (s.recordArmed ? 'armed' : 'idle');
+    s.recordStateTicks = 0;
     s.recordLoadOnStop = false;
     s.recordMonitorOn = s.recording ? true : false;
     s.recordBlinkOn = s.recording ? true : false;
@@ -3745,6 +3850,7 @@ function tick() {
     tickMidiLooperButtonHold();
     tickMidiLooperPlayback();
     tickPadPressFlash();
+    tickMidiEchoCache();
     tickLedResync();
     drainLedQueue();
 
