@@ -35,6 +35,10 @@ static int clip_i32_to_i16(int32_t x) {
     return (int)x;
 }
 
+static int abs_i16(int x) {
+    return x < 0 ? -x : x;
+}
+
 static int parse_bool(const char *val) {
     if (!val) return 0;
     if (!strcmp(val, "1")) return 1;
@@ -272,9 +276,24 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         const int16_t *schwung_bus = (const int16_t *)(g_host->mapped_memory + g_host->audio_out_offset);
         if (audio_in_rw && schwung_bus) {
             memcpy(inst->input_backup, audio_in_rw, (size_t)total * sizeof(int16_t));
+            int schwung_peak = 0;
+            for (int i = 0; i < total; i++) {
+                const int v = abs_i16((int)schwung_bus[i]);
+                if (v > schwung_peak) schwung_peak = v;
+            }
+
+            /* Auto behavior:
+             * - If Schwung bus has signal, record Schwung bus only.
+             * - If Schwung bus is effectively silent, fall back to Line In
+             *   so recording does not capture silence in host routings where
+             *   Line In is not present on the Schwung bus.
+             */
+            const int use_schwung_only = (schwung_peak > 8) ? 1 : 0;
             const float rec_gain = inst->record_mix_gain;
             for (int i = 0; i < total; i++) {
-                const int32_t rec_mix = (int32_t)((float)schwung_bus[i] * rec_gain);
+                const int32_t rec_mix = use_schwung_only
+                    ? (int32_t)((float)schwung_bus[i] * rec_gain)
+                    : (int32_t)audio_in_rw[i];
                 inst->input_mix[i] = (int16_t)clip_i32_to_i16(rec_mix);
             }
             memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
