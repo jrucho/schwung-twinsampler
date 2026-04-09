@@ -3083,7 +3083,7 @@ function selectLooper(index) {
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
     if (next !== s.activeLooper) selectLooper(next);
-    handleLoopButtonPress(true);
+    handleLoopButtonPress(false);
 }
 
 function toggleLoopPadMode() {
@@ -3247,6 +3247,13 @@ function handlePadNote(note, velocity) {
 
 function handlePadNoteRelease(note) {
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
+    if (s.loopPadMode) {
+        const lp = loopPadIndexFromPadNote(note);
+        if (lp >= 0) {
+            if (lp === s.activeLooper) handleLoopButtonRelease();
+            return true;
+        }
+    }
     const stored = s.activePadPress[String(note)];
     delete s.activePadPress[String(note)];
     if (!stored) return true;

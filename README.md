@@ -4,6 +4,33 @@
 
 It provides two independent 4x4 pad sections (left/right), each with 8 banks, with full per-pad control, source slicing mode, recording, session management, undo/redo, and autosave.
 
+## Version
+
+Current documented feature set: **v0.1**
+
+### What is new in v0.1
+
+- Fixed-note MIDI mapping for Drum Rack compatibility:
+  - pads map to `C1..D#2` (`36..51`) and this never remaps across bank switches
+  - left banks route on MIDI channels `1..8`, right banks on `9..16`
+- MIDI OUT on pad press/release and MIDI IN routing by channel+note
+- Standalone MIDI port auto-selection attempt on module init
+- Per-pad mute (`Mute hold + pad`) with LED feedback
+- Pad press flash feedback (dim white)
+- Internal MIDI looper system:
+  - loop button looper workflow (record / play / overdub / stop / erase)
+  - 4 independent loopers on top-right row in loop-pad mode (`Shift + Loop` toggles mode)
+  - top-right pads in loop-pad mode follow looper-button semantics, including double-press+hold erase
+
+### Looper storage / where loop audio is recorded
+
+Important: the v0.1 looper is a **MIDI event looper**, not an audio looper.
+
+- It stores pad note events in memory (runtime JS state in `ui_chain.js`).
+- It does **not** write loop audio files to disk.
+- It does **not** create temp WAVs for loop content.
+- Loop content is temporary for the current module run/session state and is not an audio bounce.
+
 ## Install
 
 Place this folder at:
@@ -146,6 +173,21 @@ When scope is `Pad` (`P`), knobs edit focused slot only.
 - `Shift + Undo`: redo latest undone state.
 
 - `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
+
+### Loop pad mode (v0.1)
+
+- `Shift + Loop`: toggle loop-pad mode ON/OFF.
+- In loop-pad mode, the **top-right 4 pads** are reassigned as looper selectors/triggers (4 independent loopers).
+- In loop-pad mode, those 4 pads no longer trigger sampler voices; all other pads behave normally.
+- Looper pad LED states:
+  - off = no color
+  - recording = red
+  - playing = green
+  - overdub = orange
+- Looper pad press behavior matches loop button behavior for the selected looper, including:
+  - record -> play -> overdub -> play
+  - double press to stop
+  - double press and hold to erase
 
 ### Sample Browser Manual
 
