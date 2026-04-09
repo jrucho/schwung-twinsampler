@@ -3978,6 +3978,12 @@ function init() {
     clearPadAndStepLeds();
     s.ledQueue = [];
     s.ledsDirty = true;
+    s.activePadPress = {};
+    s.padPressFlash = {};
+    s.sections = [
+        makeSection(MODE_SINGLE),
+        makeSection(MODE_PER_SLOT)
+    ];
 
     initFromDspDefaults();
     activateStandaloneMidiPort();
