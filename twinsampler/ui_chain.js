@@ -3020,13 +3020,13 @@ function looperErase() {
     updateUtilityButtonLeds();
 }
 
-function handleLoopButtonPress() {
+function handleLoopButtonPress(fromPadTap = false) {
     const l = currentLooper();
     const now = s.transportTicks;
-    const isDouble = (now - l.lastPressTick) <= LOOP_DOUBLE_PRESS_TICKS;
+    const isDouble = !fromPadTap && ((now - l.lastPressTick) <= LOOP_DOUBLE_PRESS_TICKS);
     l.lastPressTick = now;
-    l.buttonHeld = true;
-    l.buttonDownTick = now;
+    l.buttonHeld = !fromPadTap;
+    l.buttonDownTick = fromPadTap ? -1 : now;
     l.eraseHoldTriggered = false;
 
     if (isDouble) {
@@ -3083,7 +3083,7 @@ function selectLooper(index) {
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
     if (next !== s.activeLooper) selectLooper(next);
-    handleLoopButtonPress();
+    handleLoopButtonPress(true);
 }
 
 function toggleLoopPadMode() {
