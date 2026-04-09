@@ -4,6 +4,21 @@
 
 It provides two independent 4x4 pad sections (left/right), each with 8 banks, with full per-pad control, source slicing mode, recording, session management, undo/redo, and autosave.
 
+### Loop pad mode (v0.1)
+
+- `Shift + Loop`: toggle loop-pad mode ON/OFF.
+- In loop-pad mode, the **top-right 4 pads** are reassigned as looper selectors/triggers (4 independent loopers).
+- In loop-pad mode, those 4 pads no longer trigger sampler voices; all other pads behave normally.
+- Looper pad LED states:
+  - off = no color
+  - recording = red
+  - playing = green
+  - overdub = orange
+- Looper pad press behavior matches loop button behavior for the selected looper, including:
+  - record -> play -> overdub -> play
+  - double press to stop
+  - double press and hold to erase
+
 ## Install
 
 Place this folder at:
@@ -146,21 +161,6 @@ When scope is `Pad` (`P`), knobs edit focused slot only.
 - `Shift + Undo`: redo latest undone state.
 
 - `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
-
-### Loop pad mode (v0.1)
-
-- `Shift + Loop`: toggle loop-pad mode ON/OFF.
-- In loop-pad mode, the **top-right 4 pads** are reassigned as looper selectors/triggers (4 independent loopers).
-- In loop-pad mode, those 4 pads no longer trigger sampler voices; all other pads behave normally.
-- Looper pad LED states:
-  - off = no color
-  - recording = red
-  - playing = green
-  - overdub = orange
-- Looper pad press behavior matches loop button behavior for the selected looper, including:
-  - record -> play -> overdub -> play
-  - double press to stop
-  - double press and hold to erase
 
 ### Sample Browser Manual
 
