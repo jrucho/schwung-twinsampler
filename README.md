@@ -265,8 +265,8 @@ On init, TwinSampler attempts:
 2. second press (while blinking): start recording (monitor remains on)
 3. third press: stop recording + disable monitor
 - `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the focused target.
-- While recording, wrapper DSP feeds the recorder with `Line In + Schwung audio bus` mixed together.
-- Monitoring remains `Line In` only (Schwung bus is added to record path, not monitor path).
+- While recording, wrapper DSP feeds the recorder from the `Schwung audio bus` path.
+- Monitoring remains `Line In` only (monitor path stays independent from record source path).
 - Recording target is focused section/bank/slot.
 - In `Source` mode, load target is focused bank source.
 - In `Per-Pad` mode, load target is focused slot.

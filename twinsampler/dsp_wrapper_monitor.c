@@ -274,7 +274,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             memcpy(inst->input_backup, audio_in_rw, (size_t)total * sizeof(int16_t));
             const float rec_gain = inst->record_mix_gain;
             for (int i = 0; i < total; i++) {
-                const int32_t rec_mix = (int32_t)audio_in_rw[i] + (int32_t)((float)schwung_bus[i] * rec_gain);
+                const int32_t rec_mix = (int32_t)((float)schwung_bus[i] * rec_gain);
                 inst->input_mix[i] = (int16_t)clip_i32_to_i16(rec_mix);
             }
             memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));

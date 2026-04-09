@@ -2263,10 +2263,10 @@ function pollRecordingState() {
             const t = s.recTarget;
             const mode = s.sections[t.sec].mode;
             if (mode === MODE_SINGLE) {
-                setSourcePath(t.sec, t.bank, path, false);
+                setSourcePath(t.sec, t.bank, path, true);
                 syncBankSliceState(t.sec, t.bank);
             } else {
-                setSlotPath(t.sec, t.bank, t.slot, path, false);
+                setSlotPath(t.sec, t.bank, t.slot, path, true);
             }
             showStatus('Recorded+loaded: ' + shortText(baseName(path), 14), 110);
         } else if (path) {
