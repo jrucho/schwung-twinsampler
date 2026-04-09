@@ -3174,6 +3174,7 @@ function tickMidiLooperPlayback() {
         if (!crossed) continue;
         if (ev.type === 'on') {
             if (isPadMuted(ev.sec, ev.bank, ev.slot)) continue;
+            flashPadPress(ev.sec, ev.bank, ev.slot);
             withPlaybackBank(ev.sec, ev.bank, () => {
                 spe('pad_note_on', padNoteFor(ev.sec, ev.slot) + ':' + clampInt(ev.velocity, 1, 127, 100));
             });
