@@ -17,10 +17,17 @@ typedef struct wrapper_instance {
     float monitor_gain;
     int record_mix_schwung;
     float record_mix_gain;
+    int record_intent_internal;
+    int record_capture_mode; /* 0=auto 1=input 2=bus 3=mix */
+    int monitor_policy; /* 0=always 1=auto-dedupe */
     int recording_cached;
     int16_t *input_backup;
     int16_t *input_mix;
     int scratch_samples;
+    int capture_source_last; /* 0=none 1=input 2=bus 3=mix */
+    float input_peak_last;
+    float bus_peak_last;
+    int debug_capture_logs;
 } wrapper_instance_t;
 
 static const host_api_v1_t *g_host = NULL;
@@ -41,6 +48,17 @@ static int parse_bool(const char *val) {
     if (!strcmp(val, "true")) return 1;
     if (!strcmp(val, "on")) return 1;
     return 0;
+}
+
+static int parse_int_or_default(const char *val, int fallback);
+
+static int parse_capture_mode(const char *val, int fallback) {
+    if (!val || !val[0]) return fallback;
+    if (!strcmp(val, "auto")) return 0;
+    if (!strcmp(val, "input")) return 1;
+    if (!strcmp(val, "bus")) return 2;
+    if (!strcmp(val, "mix")) return 3;
+    return parse_int_or_default(val, fallback);
 }
 
 static int parse_int_or_default(const char *val, int fallback) {
@@ -99,6 +117,24 @@ static int load_core_for_instance(wrapper_instance_t *inst, const char *module_d
     return 1;
 }
 
+static float peak_abs_i16(const int16_t *buf, int samples) {
+    if (!buf || samples <= 0) return 0.0f;
+    int32_t peak = 0;
+    for (int i = 0; i < samples; i++) {
+        int32_t v = buf[i];
+        if (v < 0) v = -v;
+        if (v > peak) peak = v;
+    }
+    return (float)peak / 32767.0f;
+}
+
+static const char* capture_source_name(int capture_source) {
+    if (capture_source == 1) return "input";
+    if (capture_source == 2) return "bus";
+    if (capture_source == 3) return "mix";
+    return "none";
+}
+
 static void* wrapper_create_instance(const char *module_dir, const char *json_defaults) {
     wrapper_instance_t *inst = (wrapper_instance_t *)calloc(1, sizeof(wrapper_instance_t));
     if (!inst) return NULL;
@@ -107,7 +143,14 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->monitor_gain = 1.0f;
     inst->record_mix_schwung = 1;
     inst->record_mix_gain = 1.0f;
+    inst->record_intent_internal = 0;
+    inst->record_capture_mode = 0;
+    inst->monitor_policy = 1;
     inst->recording_cached = 0;
+    inst->capture_source_last = 0;
+    inst->input_peak_last = 0.0f;
+    inst->bus_peak_last = 0.0f;
+    inst->debug_capture_logs = 0;
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
@@ -203,6 +246,22 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->record_mix_gain = parse_float_clamped(val, 0.0f, 2.0f, inst->record_mix_gain);
         return;
     }
+    if (!strcmp(key, "record_intent_internal")) {
+        inst->record_intent_internal = parse_bool(val);
+        return;
+    }
+    if (!strcmp(key, "record_capture_mode")) {
+        inst->record_capture_mode = parse_capture_mode(val, inst->record_capture_mode);
+        return;
+    }
+    if (!strcmp(key, "monitor_policy")) {
+        inst->monitor_policy = parse_int_or_default(val, inst->monitor_policy) ? 1 : 0;
+        return;
+    }
+    if (!strcmp(key, "debug_capture_logs")) {
+        inst->debug_capture_logs = parse_bool(val);
+        return;
+    }
 
     if (!strcmp(key, "record_start")) {
         if (parse_bool(val)) inst->recording_cached = 1;
@@ -235,6 +294,21 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     if (!strcmp(key, "record_mix_gain")) {
         return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->record_mix_gain);
     }
+    if (!strcmp(key, "record_intent_internal")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->record_intent_internal ? 1 : 0);
+    }
+    if (!strcmp(key, "record_capture_mode")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->record_capture_mode);
+    }
+    if (!strcmp(key, "capture_source_last")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->capture_source_last);
+    }
+    if (!strcmp(key, "capture_input_peak")) {
+        return snprintf(buf, (size_t)buf_len, "%.4f", (double)inst->input_peak_last);
+    }
+    if (!strcmp(key, "capture_bus_peak")) {
+        return snprintf(buf, (size_t)buf_len, "%.4f", (double)inst->bus_peak_last);
+    }
 
     if (inst->core_api_v2 && inst->core_api_v2->get_param && inst->core_instance) {
         return inst->core_api_v2->get_param(inst->core_instance, key, buf, buf_len);
@@ -260,8 +334,9 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
     int input_replaced = 0;
     int16_t *audio_in_rw = NULL;
 
+    int capture_source = 0;
+
     if (g_host && g_host->mapped_memory &&
-        inst->record_mix_schwung &&
         inst->input_backup &&
         inst->input_mix &&
         total <= inst->scratch_samples &&
@@ -271,14 +346,57 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         audio_in_rw = (int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
         const int16_t *schwung_bus = (const int16_t *)(g_host->mapped_memory + g_host->audio_out_offset);
         if (audio_in_rw && schwung_bus) {
-            memcpy(inst->input_backup, audio_in_rw, (size_t)total * sizeof(int16_t));
-            const float rec_gain = inst->record_mix_gain;
-            for (int i = 0; i < total; i++) {
-                const int32_t rec_mix = (int32_t)audio_in_rw[i] + (int32_t)((float)schwung_bus[i] * rec_gain);
-                inst->input_mix[i] = (int16_t)clip_i32_to_i16(rec_mix);
+            const float input_peak = peak_abs_i16(audio_in_rw, total);
+            const float bus_peak = peak_abs_i16(schwung_bus, total);
+            const int input_active = input_peak > 0.010f ? 1 : 0;
+            const int bus_active = bus_peak > 0.010f ? 1 : 0;
+            inst->input_peak_last = input_peak;
+            inst->bus_peak_last = bus_peak;
+
+            capture_source = 1; /* clean-by-default input path */
+            if (inst->record_capture_mode == 3) {
+                capture_source = 3;
+            } else if (inst->record_capture_mode == 2) {
+                capture_source = 2;
+            } else if (inst->record_capture_mode == 1) {
+                capture_source = 1;
+            } else {
+                if (inst->record_intent_internal && bus_active) capture_source = 2;
+                else if (!input_active && bus_active) capture_source = 2;
+                else if (input_active && bus_active) capture_source = 1;
+                else if (bus_active) capture_source = 2;
+                else capture_source = 1;
             }
-            memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
-            input_replaced = 1;
+
+            memcpy(inst->input_backup, audio_in_rw, (size_t)total * sizeof(int16_t));
+            if (capture_source == 2) {
+                const float rec_gain = inst->record_mix_gain;
+                for (int i = 0; i < total; i++) {
+                    const int32_t bus_only = (int32_t)((float)schwung_bus[i] * rec_gain);
+                    inst->input_mix[i] = (int16_t)clip_i32_to_i16(bus_only);
+                }
+                memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
+                input_replaced = 1;
+            } else if (capture_source == 3 && inst->record_mix_schwung) {
+                const float rec_gain = inst->record_mix_gain;
+                for (int i = 0; i < total; i++) {
+                    const int32_t rec_mix = (int32_t)audio_in_rw[i] + (int32_t)((float)schwung_bus[i] * rec_gain);
+                    inst->input_mix[i] = (int16_t)clip_i32_to_i16(rec_mix);
+                }
+                memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
+                input_replaced = 1;
+            }
+            if (inst->capture_source_last != capture_source && inst->debug_capture_logs) {
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                    "TwinSampler capture=%s inPeak=%.3f busPeak=%.3f intentInternal=%d",
+                    capture_source_name(capture_source),
+                    (double)input_peak,
+                    (double)bus_peak,
+                    inst->record_intent_internal ? 1 : 0);
+                log_msg(msg);
+            }
+            inst->capture_source_last = capture_source;
         }
     }
 
@@ -293,6 +411,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
     }
 
     if (!inst->monitor_enabled || !g_host || !g_host->mapped_memory) return;
+    if (inst->monitor_policy && core_is_recording(inst) && capture_source == 2) return;
 
     if (g_host->audio_in_offset <= 0) return;
     const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
