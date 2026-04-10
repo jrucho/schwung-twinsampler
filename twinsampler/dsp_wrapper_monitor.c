@@ -42,6 +42,17 @@ static int clip_i32_to_i16(int32_t x) {
     return (int)x;
 }
 
+static int16_t mix_i16_limited(int16_t input_sample, int16_t bus_sample, float bus_gain) {
+    float mixed = (float)input_sample + ((float)bus_sample * bus_gain);
+    const float limit = 32767.0f;
+    if (mixed > limit || mixed < -limit) {
+        const float sign = mixed < 0.0f ? -1.0f : 1.0f;
+        const float abs_mixed = mixed * sign;
+        mixed = sign * (limit - ((limit * limit) / (abs_mixed + limit)));
+    }
+    return (int16_t)mixed;
+}
+
 static int parse_bool(const char *val) {
     if (!val) return 0;
     if (!strcmp(val, "1")) return 1;
@@ -142,7 +153,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->monitor_enabled = 0;
     inst->monitor_gain = 1.0f;
     inst->record_mix_schwung = 1;
-    inst->record_mix_gain = 1.0f;
+    inst->record_mix_gain = 0.85f;
     inst->record_intent_internal = 0;
     inst->record_capture_mode = 0;
     inst->monitor_policy = 1;
@@ -363,7 +374,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             } else {
                 if (inst->record_intent_internal && bus_active) capture_source = 2;
                 else if (!input_active && bus_active) capture_source = 2;
-                else if (input_active && bus_active) capture_source = 1;
+                else if (input_active && bus_active) capture_source = 3;
                 else if (bus_active) capture_source = 2;
                 else capture_source = 1;
             }
@@ -380,8 +391,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             } else if (capture_source == 3 && inst->record_mix_schwung) {
                 const float rec_gain = inst->record_mix_gain;
                 for (int i = 0; i < total; i++) {
-                    const int32_t rec_mix = (int32_t)audio_in_rw[i] + (int32_t)((float)schwung_bus[i] * rec_gain);
-                    inst->input_mix[i] = (int16_t)clip_i32_to_i16(rec_mix);
+                    inst->input_mix[i] = mix_i16_limited(audio_in_rw[i], schwung_bus[i], rec_gain);
                 }
                 memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
                 input_replaced = 1;
