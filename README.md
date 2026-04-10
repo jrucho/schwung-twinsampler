@@ -117,6 +117,7 @@ Default scope is pad (`P`).
 - `K6`: Pitch
 - `K7`: Gain
 - `K8`: Loop mode
+- Trim detail: `K3/K4` now use fine trim by default; hold `Shift` while turning for coarse trim.
 
 ### Knobs: Shift Edit Layer (Main view, no Vol touch)
 
@@ -148,6 +149,7 @@ When scope is `Bank` (`G`) in normal (non-shift) knob page:
 - `K8`: all-pad loop
 
 When scope is `Pad` (`P`), knobs edit focused slot only.
+Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locked to the selected pad.
 
 ### Transport / Utility Buttons
 

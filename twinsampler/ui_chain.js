@@ -133,6 +133,8 @@ const LOOP_PAD_COLOR_RECORD = BrightRed;
 const LOOP_PAD_COLOR_PLAY = 21;
 const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
+const TRIM_STEP_FINE = 1.0;
+const TRIM_STEP_COARSE = 5.0;
 
 function createLooperState() {
     return {
@@ -2063,7 +2065,8 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
-    const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * 5.0;
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
+    const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
     setSlotStartTrim(a.sec, a.bank, a.slot, v);
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
@@ -2071,7 +2074,8 @@ function adjustPadStartTrim(delta) {
 
 function adjustPadEndTrim(delta) {
     const a = focusedAddr();
-    const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * 5.0;
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
+    const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * step;
     setSlotEndTrim(a.sec, a.bank, a.slot, v);
     showStatus('P' + (a.slot + 1) + ' End ' + Math.round(slotAt(a.sec, a.bank, a.slot).endTrim), 80);
     s.dirty = true;
@@ -2180,16 +2184,18 @@ function adjustAllDecay(delta) {
 }
 
 function adjustAllStartTrim(delta) {
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
-        const v = slotAt(sec, bank, slot).startTrim + delta * 5.0;
+        const v = slotAt(sec, bank, slot).startTrim + delta * step;
         setSlotStartTrim(sec, bank, slot, v);
     });
     showStatus('All start ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).startTrim), 80);
 }
 
 function adjustAllEndTrim(delta) {
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
-        const v = slotAt(sec, bank, slot).endTrim + delta * 5.0;
+        const v = slotAt(sec, bank, slot).endTrim + delta * step;
         setSlotEndTrim(sec, bank, slot, v);
     });
     showStatus('All end ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).endTrim), 80);
@@ -3528,7 +3534,8 @@ function handlePadNote(note, velocity) {
     if (!s.shiftHeld) {
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
-        setSelectedSlice(slice, false, true);
+        s.editScope = 'P';
+        setSelectedSlice(slice, false, false);
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
