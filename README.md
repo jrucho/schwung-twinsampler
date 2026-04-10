@@ -4,6 +4,8 @@
 
 It provides two independent 4x4 pad sections (left/right), each with 8 banks, with full per-pad control, source slicing mode, recording, session management, undo/redo, and autosave.
 
+[![Watch the video](https://img.youtube.com/vi/dNPo0ITg-AQ/0.jpg)](https://youtu.be/dNPo0ITg-AQ)
+
 ### Loop pad mode (v0.1)
 
 - `Shift + Loop`: toggle loop-pad mode ON/OFF.
