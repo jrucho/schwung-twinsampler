@@ -6,7 +6,10 @@ It gives you two 4x4 pad sections (left/right), with 8 banks per section, quick 
 
 [![Watch the video](https://img.youtube.com/vi/dNPo0ITg-AQ/0.jpg)](https://youtu.be/dNPo0ITg-AQ)
 
-▶️ Demo: https://youtu.be/dNPo0ITg-AQ
+▶️ Demo (YouTube): https://youtu.be/dNPo0ITg-AQ
+
+> GitHub README files do not support an inline playable YouTube embed.  
+> To get a **playable video directly on GitHub**, add an `.mp4/.webm` file to this repo and use an HTML `<video>` tag that points to that file.
 
 ---
 
