@@ -271,7 +271,7 @@ On init, TwinSampler attempts:
 - `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the focused target.
 - While recording, wrapper DSP feeds the recorder with `Line In + Schwung audio bus` mixed together when both are active (auto mode).
 - In auto mode, if only one source is active, recorder captures that source directly (clean `Line In` or clean `Schwung` bus).
-- Mixed capture uses soft limiting and default bus gain headroom (`record_mix_gain = 0.85`) to reduce clipping artifacts on hot line inputs.
+- Mixed capture uses float-domain summing with equal-power dual-source headroom and dithering on int16 handoff to reduce quantization artifacts without limiter coloration.
 - Monitoring remains `Line In` only (Schwung bus is added to record path, not monitor path).
 - Recording target is focused section/bank/slot.
 - In `Source` mode, load target is focused bank source.

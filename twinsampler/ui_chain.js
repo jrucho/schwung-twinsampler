@@ -2319,7 +2319,7 @@ function startFocusedRecording() {
     sp('record_capture_mode', 'auto');
     sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
     sp('monitor_policy', '1');
-    sp('debug_capture_logs', '1');
+    sp('debug_capture_logs', '0');
     const recDir = recordingsDayDir(Date.now());
     if (ensureDirRecursive(recDir)) sp('record_output_dir', recDir);
     sp('record_max_seconds', String(s.recordMaxSeconds));
