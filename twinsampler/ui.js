@@ -19,38 +19,6 @@ function safeInvoke(label, fn, arg) {
     }
 }
 
-function requestExitModule() {
-    if (exitRequested) return;
-    exitRequested = true;
-
-    let exited = false;
-    try {
-        if (typeof host_exit_module === 'function') {
-            host_exit_module();
-            exited = true;
-        }
-    } catch (e) {
-        try {
-            const msg = e && e.stack ? e.stack : String(e);
-            console.log('TwinSampler exit error: ' + msg);
-        } catch (e2) {}
-    }
-
-    if (exited) return;
-
-    /* Fallback path when host_exit_module is missing/broken in shadow context. */
-    try {
-        if (typeof shadow_set_overtake_mode === 'function') {
-            shadow_set_overtake_mode(0);
-        }
-    } catch (e) {}
-    try {
-        if (typeof shadow_request_exit === 'function') {
-            shadow_request_exit();
-        }
-    } catch (e) {}
-}
-
 globalThis.init = function() {
     exitRequested = false;
     if (typeof impl.init !== 'function') {
@@ -79,3 +47,34 @@ globalThis.onMidiMessageInternal = function(data) {
 globalThis.onMidiMessageExternal = function(data) {
     safeInvoke('onMidiMessageExternal', impl.onMidiMessageExternal, data);
 };
+
+function requestExitModule() {
+    if (exitRequested) return;
+    exitRequested = true;
+
+    let exited = false;
+    try {
+        if (typeof host_exit_module === 'function') {
+            host_exit_module();
+            exited = true;
+        }
+    } catch (e) {
+        try {
+            const msg = e && e.stack ? e.stack : String(e);
+            console.log('TwinSampler exit error: ' + msg);
+        } catch (e2) {}
+    }
+
+    if (exited) return;
+
+    try {
+        if (typeof shadow_set_overtake_mode === 'function') {
+            shadow_set_overtake_mode(0);
+        }
+    } catch (e) {}
+    try {
+        if (typeof shadow_request_exit === 'function') {
+            shadow_request_exit();
+        }
+    } catch (e) {}
+}

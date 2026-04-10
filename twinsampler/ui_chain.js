@@ -77,6 +77,7 @@ const LEFT_GRID_ONLY = false; /* dual-grid mode: left and right 4x4 sections act
 const MODULE_FLAVOR = '';
 
 const SAMPLES_DIR = '/data/UserData/UserLibrary/Samples';
+const RECORDED_SAMPLES_ROOT = SAMPLES_DIR + '/TwinSamplerRecorded';
 const SESSIONS_DIR = '/data/UserData/UserLibrary/TwinSamplerSessions';
 const LEGACY_SESSION_FILE = '/data/UserData/UserLibrary/twinsampler-session-v2.json';
 const AUTOSAVE_SESSION_FILE = '/data/UserData/UserLibrary/twinsampler-autosave-v1.json';
@@ -124,6 +125,8 @@ const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
 const RECORD_INTENT_WINDOW_TICKS = 48;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
+const MIDI_MIN_NOTE_LENGTH_MS = 8;
+const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -391,6 +394,8 @@ const s = {
 const editCursorCache = { sec: -1, bank: -1, slot: -1 };
 const playbackCompatCache = { sec: -1, bank: -1, slot: -1 };
 const midiHeldByChannelNote = {};
+const activeVoicesByAddr = {};
+const pendingNoteOffsByAddr = {};
 
 function normalizeSide(side) {
     if (side === 1 || side === 'right' || side === 'R' || side === 'r') return 1;
@@ -426,7 +431,14 @@ function midiChannelNibbleFrom1Based(channel1Based) {
 }
 
 function midiEchoKey(status, d1, d2) {
-    return String(status & 0xFF) + ':' + String(d1 & 0x7F) + ':' + String(d2 & 0x7F);
+    const st = status & 0xFF;
+    const hi = st & 0xF0;
+    if (hi === 0x90 || hi === 0x80) {
+        const note = d1 & 0x7F;
+        const normalized = (hi === 0x90 && (d2 & 0x7F) > 0) ? 'note_on' : 'note_off';
+        return String(st & 0x0F) + ':' + normalized + ':' + String(note);
+    }
+    return String(st) + ':' + String(d1 & 0x7F) + ':' + String(d2 & 0x7F);
 }
 
 function rememberOutboundMidi(status, d1, d2) {
@@ -774,6 +786,67 @@ function deleteFilePath(path) {
         } catch (e) {}
     }
     return false;
+}
+
+function dirName(path) {
+    const raw = String(path || '');
+    if (!raw) return '';
+    const idx = raw.lastIndexOf('/');
+    if (idx <= 0) return idx === 0 ? '/' : '';
+    return raw.slice(0, idx);
+}
+
+function pathExists(path) {
+    if (!path) return false;
+    try {
+        const st = os.stat(path);
+        if (Array.isArray(st)) return !!st[0] && !st[1];
+        return !!st;
+    } catch (e) {}
+    const fs = fsApi();
+    if (fs && typeof fs.existsSync === 'function') {
+        try {
+            return !!fs.existsSync(path);
+        } catch (e2) {}
+    }
+    return false;
+}
+
+function isoLocalDateString(tsMs = Date.now()) {
+    const d = new Date(tsMs);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return y + '-' + m + '-' + day;
+}
+
+function recordingsDayDir(tsMs = Date.now()) {
+    return RECORDED_SAMPLES_ROOT + '/' + isoLocalDateString(tsMs);
+}
+
+function uniquePathInDir(dir, fileName) {
+    const cleanName = String(fileName || '').trim() || 'recording.wav';
+    const dot = cleanName.lastIndexOf('.');
+    const stem = dot > 0 ? cleanName.slice(0, dot) : cleanName;
+    const ext = dot > 0 ? cleanName.slice(dot) : '';
+    let candidate = dir + '/' + cleanName;
+    if (!pathExists(candidate)) return candidate;
+    for (let i = 1; i < 1000; i++) {
+        candidate = dir + '/' + stem + '_' + String(i) + ext;
+        if (!pathExists(candidate)) return candidate;
+    }
+    return dir + '/' + stem + '_' + String(Date.now()) + ext;
+}
+
+function ensureRecordedFileInDailyFolder(path) {
+    const src = String(path || '');
+    if (!src) return src;
+    const dayDir = recordingsDayDir(Date.now());
+    if (dirName(src) === dayDir) return src;
+    if (!ensureDirRecursive(dayDir)) return src;
+    const dst = uniquePathInDir(dayDir, baseName(src));
+    if (renameFilePath(src, dst)) return dst;
+    return src;
 }
 
 function autosavePath() {
@@ -2045,7 +2118,7 @@ function retriggerHeldFocusedSourcePadForPitch() {
 
         const note = clampInt(press.triggerNote, PAD_NOTE_MIN, PAD_NOTE_MAX, padNoteFor(sec, slot));
         const velocity = clampInt(press.velocity, 1, 127, 100);
-        sp('pad_note_on', note + ':' + velocity);
+        triggerPadOn(sec, bank, slot, velocity, false, false, 'pitch-retrigger:' + String(note));
         return;
     }
 }
@@ -2200,6 +2273,11 @@ function recordTargetLabel(target = s.recTarget) {
     return 'S' + (target.sec + 1) + ' B' + (target.bank + 1) + ' P' + (target.slot + 1);
 }
 
+function captureFocusedRecordTarget() {
+    const a = focusedAddr();
+    return { sec: a.sec, bank: a.bank, slot: a.slot };
+}
+
 function armFocusedRecording() {
     if (s.recording) return;
     s.recordArmed = true;
@@ -2228,8 +2306,8 @@ function disarmFocusedRecording() {
 
 function startFocusedRecording() {
     if (isRecordTransitionPending()) return;
-    const a = focusedAddr();
-    s.recTarget = { sec: a.sec, bank: a.bank, slot: a.slot };
+    const a = captureFocusedRecordTarget();
+    s.recTarget = a;
     s.recordLoadOnStop = false;
     s.recordArmed = true;
     setRecordState('starting');
@@ -2242,6 +2320,8 @@ function startFocusedRecording() {
     sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '1');
+    const recDir = recordingsDayDir(Date.now());
+    if (ensureDirRecursive(recDir)) sp('record_output_dir', recDir);
     sp('record_max_seconds', String(s.recordMaxSeconds));
     sp('record_start', '1');
 
@@ -2285,6 +2365,7 @@ function handleRecordButtonPress() {
     }
     if (s.recording) {
         if (s.shiftHeld) {
+            s.recTarget = captureFocusedRecordTarget();
             stopFocusedRecording(true);
             showStatus('Rec stop+load ' + recordTargetLabel(), 90);
         } else {
@@ -2312,7 +2393,8 @@ function pollRecordingState() {
     s.recording = rec;
 
     if (prev === 1 && rec === 0) {
-        const path = String(gp('last_recorded_path', '') || '');
+        const pathRaw = String(gp('last_recorded_path', '') || '');
+        const path = ensureRecordedFileInDailyFolder(pathRaw);
         s.lastRecordedPath = path;
         const shouldLoad = !!s.recordLoadOnStop;
         s.recordLoadOnStop = false;
@@ -2326,7 +2408,7 @@ function pollRecordingState() {
             const t = s.recTarget;
             const mode = s.sections[t.sec].mode;
             if (mode === MODE_SINGLE) {
-                setSourcePath(t.sec, t.bank, path, false);
+                setSourcePath(t.sec, t.bank, path, true);
                 syncBankSliceState(t.sec, t.bank);
                 showStatus('Recorded+loaded SRC ' + recordTargetLabel(t), 110);
             } else {
@@ -2335,7 +2417,7 @@ function pollRecordingState() {
                 if (existing && existing !== path) {
                     showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
                 }
-                setSlotPath(t.sec, t.bank, slot, path, false);
+                setSlotPath(t.sec, t.bank, slot, path, true);
                 showStatus('Recorded+loaded ' + recordTargetLabel({ sec: t.sec, bank: t.bank, slot }), 110);
             }
         } else if (path) {
@@ -2588,14 +2670,13 @@ function applyAllStateToDsp() {
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) {
-            applyBankStateToDsp(sec, bank, false);
+            applyBankStateToDsp(sec, bank, true);
         }
     }
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         const bank = s.sections[sec].currentBank;
         spb('section_bank', sec + ':' + bank, 200);
-        applyBankStateToDsp(sec, bank, true);
     }
 
     setSelectedSlice(s.selectedSlice);
@@ -3054,6 +3135,7 @@ function looperRecordEvent(type, sec, bank, slot, velocity) {
 
 function looperBeginRecording() {
     const l = currentLooper();
+    releaseVoicesByOwner('looper:', looperNowMs());
     l.events = [];
     l.layerStack = [];
     l.recordStartMs = looperNowMs();
@@ -3068,6 +3150,7 @@ function looperBeginRecording() {
 
 function looperFinishRecordingStartPlayback() {
     const l = currentLooper();
+    releaseVoicesByOwner('looper:', looperNowMs());
     const now = looperNowMs();
     const len = Math.max(80, now - l.recordStartMs);
     l.loopLengthMs = len;
@@ -3100,6 +3183,7 @@ function looperStopPlayback() {
         return;
     }
     if (l.state === 'recording') looperFinishRecordingStartPlayback();
+    releaseVoicesByOwner('looper:', looperNowMs());
     l.state = l.events.length ? 'stopped' : 'empty';
     l.playStartMs = looperNowMs();
     l.loopPosMs = 0;
@@ -3109,6 +3193,7 @@ function looperStopPlayback() {
 }
 
 function looperErase() {
+    releaseVoicesByOwner('looper:', looperNowMs());
     looperReset(true);
     showStatus('Looper: erased', 100);
     updateUtilityButtonLeds();
@@ -3173,6 +3258,7 @@ function handleLoopButtonRelease() {
 
 function stopActiveLooperForSwitch() {
     const l = currentLooper();
+    releaseVoicesByOwner('looper:' + String(clampInt(s.activeLooper, 0, 3, 0)), looperNowMs());
     if (l.state === 'recording') looperFinishRecordingStartPlayback();
     if (l.state === 'playing' || l.state === 'overdub') {
         l.state = 'stopped';
@@ -3240,12 +3326,24 @@ function flashPadPress(sec, bank, slot) {
     markLedsDirty();
 }
 
-function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = true) {
+function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = true, sourceTag = '') {
     if (isPadMuted(sec, bank, slot)) return false;
     flashPadPress(sec, bank, slot);
     s.lastPadTriggerTick = s.transportTicks;
     const triggerNote = padNoteFor(sec, slot);
     const vel = clampInt(velocity, 1, 127, 100);
+    const nowMs = Date.now();
+    const key = addrKey(sec, bank, slot);
+    const existing = activeVoicesByAddr[key];
+    const src = String(sourceTag || '');
+    if (existing) {
+        const sameSource = src && existing.sourceTag === src;
+        const deltaMs = Math.max(0, nowMs - clampInt(existing.lastOnMs, 0, 0x7fffffff, nowMs));
+        if (sameSource && deltaMs <= MIDI_DUPLICATE_NOTE_ON_GUARD_MS) return true;
+        releaseActiveVoice(existing.sec, existing.bank, existing.slot, !!existing.routeBank, recordToLooper, nowMs, true);
+        flushPendingNoteOffs();
+    }
+    clearPendingOff(sec, bank, slot);
     if (routeBank) {
         withPlaybackBank(sec, bank, () => {
             spe('pad_note_on', triggerNote + ':' + vel);
@@ -3255,23 +3353,23 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     }
     sendMidiOut(slot, vel, sec, bank, true);
     if (recordToLooper) looperRecordEvent('on', sec, bank, slot, vel);
+    activeVoicesByAddr[key] = {
+        sec,
+        bank,
+        slot,
+        routeBank: !!routeBank,
+        owner: src,
+        sourceTag: src,
+        startedMs: nowMs,
+        lastOnMs: nowMs
+    };
     return true;
 }
 
 function triggerPadOff(sec, bank, slot, routeBank, recordToLooper = true) {
     const addr = { sec, bank, slot };
-    if (!shouldSendNoteOffForAddr(addr)) return false;
-    const triggerNote = padNoteFor(sec, slot);
-    if (routeBank) {
-        withPlaybackBank(sec, bank, () => {
-            spe('pad_note_off', String(triggerNote));
-        });
-    } else {
-        spe('pad_note_off', String(triggerNote));
-    }
-    sendMidiOut(slot, 0, sec, bank, false);
-    if (recordToLooper) looperRecordEvent('off', sec, bank, slot, 0);
-    return true;
+    if (!currentVoiceAt(sec, bank, slot) && !shouldSendNoteOffForAddr(addr)) return false;
+    return releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, Date.now());
 }
 
 function tickMidiLooperPlayback() {
@@ -3294,11 +3392,8 @@ function tickMidiLooperPlayback() {
         if (!crossed) continue;
         if (ev.type === 'on') {
             if (isPadMuted(ev.sec, ev.bank, ev.slot)) continue;
-            flashPadPress(ev.sec, ev.bank, ev.slot);
-            withPlaybackBank(ev.sec, ev.bank, () => {
-                spe('pad_note_on', padNoteFor(ev.sec, ev.slot) + ':' + clampInt(ev.velocity, 1, 127, 100));
-            });
-            sendMidiOut(ev.slot, ev.velocity, ev.sec, ev.bank, true);
+            const vel = clampInt(ev.velocity, 1, 127, 100);
+            triggerPadOn(ev.sec, ev.bank, ev.slot, vel, true, false, 'looper:' + String(clampInt(s.activeLooper, 0, 3, 0)));
         } else {
             triggerPadOff(ev.sec, ev.bank, ev.slot, true, false);
         }
@@ -3330,6 +3425,82 @@ function tickMidiEchoCache() {
     }
 }
 
+function addrKey(sec, bank, slot) {
+    return String(clampInt(sec, 0, GRID_COUNT - 1, 0)) + ':' +
+        String(clampInt(slot, 0, GRID_SIZE - 1, 0));
+}
+
+function currentVoiceAt(sec, bank, slot) {
+    return activeVoicesByAddr[addrKey(sec, bank, slot)] || null;
+}
+
+function clearPendingOff(sec, bank, slot) {
+    delete pendingNoteOffsByAddr[addrKey(sec, bank, slot)];
+}
+
+function emitPadNoteOffNow(sec, bank, slot, routeBank, recordToLooper) {
+    const triggerNote = padNoteFor(sec, slot);
+    if (routeBank) {
+        withPlaybackBank(sec, bank, () => {
+            spe('pad_note_off', String(triggerNote));
+        });
+    } else {
+        spe('pad_note_off', String(triggerNote));
+    }
+    sendMidiOut(slot, 0, sec, bank, false);
+    if (recordToLooper) looperRecordEvent('off', sec, bank, slot, 0);
+}
+
+function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = Date.now(), forceImmediate = false) {
+    const key = addrKey(sec, bank, slot);
+    const voice = activeVoicesByAddr[key];
+    if (!voice) return false;
+
+    const elapsed = Math.max(0, nowMs - clampInt(voice.startedMs, 0, 0x7fffffff, nowMs));
+    if (!forceImmediate && elapsed < MIDI_MIN_NOTE_LENGTH_MS) {
+        pendingNoteOffsByAddr[key] = {
+            sec,
+            bank,
+            slot,
+            routeBank: !!routeBank,
+            recordToLooper: !!recordToLooper,
+            dueAtMs: nowMs + (MIDI_MIN_NOTE_LENGTH_MS - elapsed)
+        };
+        return true;
+    }
+
+    clearPendingOff(sec, bank, slot);
+    emitPadNoteOffNow(sec, bank, slot, routeBank, recordToLooper);
+    delete activeVoicesByAddr[key];
+    return true;
+}
+
+function releaseVoicesByOwner(ownerPrefix, nowMs = Date.now()) {
+    const keys = Object.keys(activeVoicesByAddr);
+    for (let i = 0; i < keys.length; i++) {
+        const v = activeVoicesByAddr[keys[i]];
+        if (!v) continue;
+        if (!String(v.owner || '').startsWith(ownerPrefix)) continue;
+        clearPendingOff(v.sec, v.bank, v.slot);
+        emitPadNoteOffNow(v.sec, v.bank, v.slot, !!v.routeBank, false);
+        delete activeVoicesByAddr[keys[i]];
+    }
+}
+
+function flushPendingNoteOffs() {
+    const now = Date.now();
+    const keys = Object.keys(pendingNoteOffsByAddr);
+    for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const p = pendingNoteOffsByAddr[key];
+        if (!p) continue;
+        if (now < clampInt(p.dueAtMs, 0, 0x7fffffff, 0)) continue;
+        emitPadNoteOffNow(p.sec, p.bank, p.slot, !!p.routeBank, !!p.recordToLooper);
+        delete activeVoicesByAddr[key];
+        delete pendingNoteOffsByAddr[key];
+    }
+}
+
 function handlePadNote(note, velocity) {
     if (velocity <= 0) return false;
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
@@ -3355,7 +3526,7 @@ function handlePadNote(note, velocity) {
     }
 
     if (!s.shiftHeld) {
-        if (!triggerPadOn(sec, bank, slot, velocity, false)) return true;
+        if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         setSelectedSlice(slice, false, true);
     } else {
@@ -3448,7 +3619,7 @@ function handleMidiIn(msg) {
     const key = String(channel1Based) + ':' + String(note);
 
     if (status === 0x90 && value > 0) {
-        if (!triggerPadOn(sec, bank, slot, value, true)) return;
+        if (!triggerPadOn(sec, bank, slot, value, true, true, 'ext:' + key)) return;
         midiHeldByChannelNote[key] = { sec, bank, slot, triggerNote };
         return;
     }
@@ -3806,6 +3977,12 @@ function init() {
     clearPadAndStepLeds();
     s.ledQueue = [];
     s.ledsDirty = true;
+    s.activePadPress = {};
+    s.padPressFlash = {};
+    s.sections = [
+        makeSection(MODE_SINGLE),
+        makeSection(MODE_PER_SLOT)
+    ];
 
     initFromDspDefaults();
     activateStandaloneMidiPort();
@@ -3828,6 +4005,8 @@ function init() {
     s.loopPadMode = false;
     s.transportTicks = 0;
     s.activeLooper = 0;
+    for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
+    for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
     s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
     looperReset(true);
     s.autosavePending = false;
@@ -3851,6 +4030,7 @@ function tick() {
     tickMidiLooperPlayback();
     tickPadPressFlash();
     tickMidiEchoCache();
+    flushPendingNoteOffs();
     tickLedResync();
     drainLedQueue();
 
@@ -3860,6 +4040,12 @@ function tick() {
 }
 
 function beforeExit() {
+    const keys = Object.keys(activeVoicesByAddr);
+    for (let i = 0; i < keys.length; i++) {
+        const v = activeVoicesByAddr[keys[i]];
+        if (!v) continue;
+        emitPadNoteOffNow(v.sec, v.bank, v.slot, !!v.routeBank, false);
+    }
     previewStop();
     setRecordMonitorEnabled(false);
     s.ledResyncPasses = 0;
