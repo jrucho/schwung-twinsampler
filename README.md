@@ -42,12 +42,27 @@ Required files:
 
 ---
 
-## Simple Manual
+## Base Functions Manual
+
+This section covers the main day-to-day functions (without deep technical details).
 
 ### Pads and banks
 - Tap a pad to play it and focus it.
 - `Step 1-8` = left section banks.
 - `Step 9-16` = right section banks.
+- You can work with two independent sections (left/right), each with its own bank selection.
+
+### Main controls
+- `Jog click`: open/confirm in browser.
+- `Jog turn`: browse lists or adjust the main record-length setting.
+- `K1-K8`: edit the focused sound (envelope, trims, pitch, gain, loop mode).
+- `Shift + K1-K8`: apply those edits more broadly (typically to the focused bank).
+
+### Sound setup
+- Each section supports:
+  - **Source mode**: one source sample split across pads.
+  - **Per-Pad mode**: each pad can have its own sample.
+- `Shift + Jog turn` switches the focused section mode.
 
 ### Copy and paste
 - **Pad copy/paste**: hold `Shift`, tap source pad, tap destination pad.
@@ -60,11 +75,18 @@ Required files:
 - Double press to stop.
 - Double press + hold to erase.
 - `Shift + Loop` enables loop-pad mode (top-right pads control loopers).
+- There are 4 loopers you can quickly access in loop-pad mode.
 
 ### MIDI basics
 - MIDI In/Out is supported.
 - External notes can trigger pads.
 - TwinSampler also sends note events when pads are played.
+
+### Browser, recording, sessions
+- **Sample browser**: load WAV files to pads/sources.
+- **Recording**: record directly into TwinSampler and place audio on the focused target.
+- **Sessions**: save and load complete setups (samples, pad settings, colors, and states).
+- **Undo/Redo**: quickly roll changes back/forward with `Undo` and `Shift + Undo`.
 
 ---
 
