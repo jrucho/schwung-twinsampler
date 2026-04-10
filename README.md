@@ -23,6 +23,68 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - double press to stop
   - double press and hold to erase
 
+### Looper / Loopers overview
+
+TwinSampler has **4 independent MIDI loopers**. Think of it as:
+- one **Loop button workflow** (record/play/overdub control), and
+- four separate looper memories (`L1` to `L4`) you can switch between.
+
+#### States
+Each looper can be in one of these states:
+- `empty`: no loop recorded yet
+- `recording`: capturing your pad hits
+- `playing`: looping recorded events
+- `overdub`: playing while recording new events on top
+- `stopped`: loop exists but playback is paused
+
+#### Main actions
+- Press `Loop` on an empty looper: starts recording.
+- Press `Loop` again: closes recording and starts playback.
+- Press `Loop` while playing: toggles overdub ON/OFF.
+- Double press `Loop`: stops playback.
+- Double press + hold `Loop`: erases the current looper.
+- Hold `Loop` while playing (single-press hold): undo last overdub layer.
+
+#### Loop pad mode and multiple loopers
+- `Shift + Loop` toggles loop-pad mode.
+- In loop-pad mode, top-right pads select/fire loopers `L1-L4`.
+- Selecting another looper auto-stops the currently active one if needed.
+- Each looper keeps its own recorded event list and loop length.
+
+#### What gets recorded in the looper
+- Looper records **pad note on/off events** with timing and velocity.
+- Playback re-triggers TwinSampler pads (including bank routing), not raw audio bounce.
+- Muted pads stay muted during looper playback.
+
+### MIDI In / MIDI Out
+
+TwinSampler supports both MIDI input and MIDI output.
+
+#### MIDI note mapping
+- Pad note map is fixed to `C1-D#2` (`36-51`) for the 16 pad slots.
+- Banks are selected by MIDI channel:
+  - Channels `1-8` -> **left section** banks `1-8`
+  - Channels `9-16` -> **right section** banks `1-8`
+
+Example:
+- `Note 36` on Channel `1` triggers left section, bank 1, pad 1.
+- `Note 36` on Channel `10` triggers right section, bank 2, pad 1.
+
+#### MIDI In behavior
+- Note On (`9n`, velocity > 0): triggers the mapped pad in the mapped section/bank.
+- Note Off (`8n` or `9n` with velocity 0): releases that same pad voice.
+- Incoming notes outside `36-51` are ignored by TwinSampler pad triggering.
+
+#### MIDI Out behavior
+- Every internal pad trigger emits MIDI out:
+  - Note On on press
+  - Note Off on release
+- Output uses the same note map (`36-51`) and channel-to-bank mapping above.
+- This includes manual pad playing and looper playback events.
+
+#### Echo/feedback protection
+- TwinSampler suppresses immediate echoed MIDI events from its own output so external MIDI-thru loops do not double-trigger.
+
 ## Install
 
 Place this folder at:
