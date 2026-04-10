@@ -110,6 +110,22 @@ Required files:
 5. Edit pad/chop parameters with `K1-K8`.
 6. Save/load sessions with `Shift+Copy` / `Shift+Menu`.
 
+## Copy / Paste (Pads and Banks)
+
+Yes — TwinSampler supports copy/paste for both pads and banks.
+
+### Pad copy/paste
+- Hold `Shift` and tap a source pad (sets copy source).
+- While still holding `Shift`, tap a destination pad (pastes slot settings/content).
+- Release `Shift` to clear copy state.
+
+### Bank copy/paste
+- Hold `Shift` and press a source `Step` button (sets bank copy source).
+- While still holding `Shift`, press a destination `Step` button (copies full bank to destination bank).
+
+### Bank clear shortcut
+- `Shift + Vol touch + Step`: clear/reset destination bank content (keeps bank color).
+
 ## Core Concepts
 
 ### Two sections
