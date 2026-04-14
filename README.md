@@ -403,3 +403,7 @@ Same recommendation: latest `ui_chain.js` includes blocking send for velocity to
 - TwinSampler is optimized for Move’s 6-line display and overtake workflow.
 - Left and right sections are independent at UI/state level.
 - The module may run in a dirty device environment; session files are plain JSON for easy recovery.
+
+## Contributing
+
+- Planning a modularization PR? See `docs/modularization-pr-guide.md`.
