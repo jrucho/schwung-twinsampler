@@ -232,6 +232,7 @@ Autosave file:
 - Colors (bank + pad)
 - Global settings (gain/pitch, velocity, etc.)
 - Source slice start map/transient state
+- Looper state (`activeLooper`, loop-pad mode, and recorded looper note events/length)
 
 ### Open session menus
 

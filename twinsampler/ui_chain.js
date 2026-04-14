@@ -605,7 +605,7 @@ function makeInitSessionPayload() {
     const left = makeSection(MODE_SINGLE);
     const right = makeSection(MODE_PER_SLOT);
     return {
-        version: 4,
+        version: 5,
         sessionName: INIT_SESSION_NAME,
         selectedSlice: 0,
         focusedSection: 0,
@@ -616,6 +616,9 @@ function makeInitSessionPayload() {
         globalPitch: 0.0,
         velocitySens: 0,
         recordMaxSeconds: 30,
+        activeLooper: 0,
+        loopPadMode: false,
+        midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
         sections: [
             {
                 mode: left.mode,
@@ -2595,7 +2598,7 @@ function draw() {
 
 function serializeSession() {
     return {
-        version: 4,
+        version: 5,
         sessionName: s.sessionName,
         selectedSlice: s.selectedSlice,
         focusedSection: s.focusedSection,
@@ -2606,6 +2609,22 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
+        activeLooper: clampInt(s.activeLooper, 0, 3, 0),
+        loopPadMode: !!s.loopPadMode,
+        midiLoopers: s.midiLoopers.map((l) => ({
+            state: (l && (l.state === 'playing' || l.state === 'stopped' || l.state === 'empty')) ? l.state : (l && l.events && l.events.length ? 'stopped' : 'empty'),
+            loopLengthMs: clampInt(l && l.loopLengthMs, 0, 600000, 0),
+            events: Array.isArray(l && l.events)
+                ? l.events.map((ev) => ({
+                    atMs: clampInt(ev && ev.atMs, 0, 600000, 0),
+                    type: (ev && ev.type === 'off') ? 'off' : 'on',
+                    sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+                    bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+                    slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+                    velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+                }))
+                : []
+        })),
         sections: s.sections.map((sec) => ({
             mode: sec.mode,
             currentBank: sec.currentBank,
@@ -2668,6 +2687,47 @@ function sanitizeSection(raw, defaultMode) {
     };
 }
 
+function sanitizeLooperState(raw) {
+    const base = createLooperState();
+    if (!raw || typeof raw !== 'object') return base;
+
+    const len = clampInt(raw.loopLengthMs, 0, 600000, 0);
+    const srcEvents = Array.isArray(raw.events) ? raw.events : [];
+    const events = srcEvents
+        .map((ev) => ({
+            atMs: clampInt(ev && ev.atMs, 0, Math.max(0, len - 1), 0),
+            type: (ev && ev.type === 'off') ? 'off' : 'on',
+            sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+            bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+            slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+            velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+        }))
+        .sort((a, b) => a.atMs - b.atMs);
+
+    let state = 'empty';
+    if (events.length && len > 0) {
+        const inState = String(raw.state || '').toLowerCase();
+        if (inState === 'playing' || inState === 'stopped') state = inState;
+        else state = 'stopped';
+    }
+
+    return {
+        state,
+        events,
+        loopLengthMs: events.length ? len : 0,
+        recordStartMs: 0,
+        playStartMs: looperNowMs(),
+        loopPosMs: 0,
+        lastLoopPosMs: 0,
+        layerStack: [],
+        buttonHeld: false,
+        buttonDownTick: -1,
+        lastPressTick: -9999,
+        eraseHoldTriggered: false,
+        holdEraseArmed: false
+    };
+}
+
 function applyAllStateToDsp() {
     sp('global_gain', s.globalGain.toFixed(3));
     sp('global_pitch', s.globalPitch.toFixed(2));
@@ -2711,6 +2771,10 @@ function applyParsedSession(parsed, silent, label) {
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
+    const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
+    s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
+    s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
+    s.loopPadMode = !!parsed.loopPadMode;
 
     const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
     s.sections = [
@@ -2723,6 +2787,8 @@ function applyParsedSession(parsed, silent, label) {
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) syncBankSliceState(sec, bank);
     }
+    updateUtilityButtonLeds();
+    markLedsDirty();
     s.autosavePending = false;
     s.autosaveTicks = 0;
     if (!silent) showStatus('Loaded ' + shortText(label || s.sessionName, 14), 120);
