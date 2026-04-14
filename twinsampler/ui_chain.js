@@ -140,6 +140,8 @@ function createLooperState() {
     return {
         state: 'empty', /* empty|recording|playing|overdub|stopped */
         events: [],
+        quantized: 0,
+        preQuantizeEvents: [],
         loopLengthMs: 0,
         recordStartMs: 0,
         playStartMs: 0,
@@ -2612,9 +2614,20 @@ function serializeSession() {
         loopPadMode: !!s.loopPadMode,
         midiLoopers: s.midiLoopers.map((l) => ({
             state: (l && (l.state === 'playing' || l.state === 'stopped' || l.state === 'empty')) ? l.state : (l && l.events && l.events.length ? 'stopped' : 'empty'),
+            quantized: (l && l.quantized) ? 1 : 0,
             loopLengthMs: clampInt(l && l.loopLengthMs, 0, 600000, 0),
             events: Array.isArray(l && l.events)
                 ? l.events.map((ev) => ({
+                    atMs: clampInt(ev && ev.atMs, 0, 600000, 0),
+                    type: (ev && ev.type === 'off') ? 'off' : 'on',
+                    sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+                    bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+                    slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+                    velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+                }))
+                : [],
+            preQuantizeEvents: Array.isArray(l && l.preQuantizeEvents)
+                ? l.preQuantizeEvents.map((ev) => ({
                     atMs: clampInt(ev && ev.atMs, 0, 600000, 0),
                     type: (ev && ev.type === 'off') ? 'off' : 'on',
                     sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
@@ -2692,7 +2705,18 @@ function sanitizeLooperState(raw) {
 
     const len = clampInt(raw.loopLengthMs, 0, 600000, 0);
     const srcEvents = Array.isArray(raw.events) ? raw.events : [];
+    const srcPreQuantizeEvents = Array.isArray(raw.preQuantizeEvents) ? raw.preQuantizeEvents : [];
     const events = srcEvents
+        .map((ev) => ({
+            atMs: clampInt(ev && ev.atMs, 0, Math.max(0, len - 1), 0),
+            type: (ev && ev.type === 'off') ? 'off' : 'on',
+            sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+            bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+            slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+            velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+        }))
+        .sort((a, b) => a.atMs - b.atMs);
+    const preQuantizeEvents = srcPreQuantizeEvents
         .map((ev) => ({
             atMs: clampInt(ev && ev.atMs, 0, Math.max(0, len - 1), 0),
             type: (ev && ev.type === 'off') ? 'off' : 'on',
@@ -2713,6 +2737,8 @@ function sanitizeLooperState(raw) {
     return {
         state,
         events,
+        quantized: (raw.quantized && preQuantizeEvents.length) ? 1 : 0,
+        preQuantizeEvents: (raw.quantized && preQuantizeEvents.length) ? preQuantizeEvents : [],
         loopLengthMs: events.length ? len : 0,
         recordStartMs: 0,
         playStartMs: looperNowMs(),
@@ -3197,6 +3223,8 @@ function looperReset(clearEvents) {
     const l = currentLooper();
     l.state = 'empty';
     if (clearEvents) l.events = [];
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     l.loopLengthMs = 0;
     l.recordStartMs = 0;
     l.playStartMs = 0;
@@ -3214,6 +3242,8 @@ function looperReset(clearEvents) {
 function looperRecordEvent(type, sec, bank, slot, velocity) {
     const l = currentLooper();
     if (l.state !== 'recording' && l.state !== 'overdub') return;
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     let atMs = 0;
     const now = looperNowMs();
     if (l.state === 'recording') atMs = Math.max(0, now - l.recordStartMs);
@@ -3232,6 +3262,8 @@ function looperBeginRecording() {
     const l = currentLooper();
     releaseVoicesByOwner('looper:', looperNowMs());
     l.events = [];
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     l.layerStack = [];
     l.recordStartMs = looperNowMs();
     l.playStartMs = l.recordStartMs;
@@ -3250,11 +3282,14 @@ function looperFinishRecordingStartPlayback() {
     const len = Math.max(80, now - l.recordStartMs);
     l.loopLengthMs = len;
     l.events = l.events.filter((e) => e.atMs >= 0 && e.atMs < len);
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     l.playStartMs = now;
     l.loopPosMs = 0;
     l.lastLoopPosMs = 0;
     l.state = l.events.length ? 'playing' : 'empty';
     showStatus(l.events.length ? ('Looper: play ' + len + 'ms') : 'Looper: empty', 100);
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3268,6 +3303,7 @@ function looperToggleOverdub() {
         l.state = 'playing';
         showStatus('Looper: play', 90);
     }
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3284,6 +3320,7 @@ function looperStopPlayback() {
     l.loopPosMs = 0;
     l.lastLoopPosMs = 0;
     showStatus('Looper: stopped', 80);
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3291,6 +3328,7 @@ function looperErase() {
     releaseVoicesByOwner('looper:', looperNowMs());
     looperReset(true);
     showStatus('Looper: erased', 100);
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3302,7 +3340,10 @@ function looperUndoLastLayer() {
     }
     const start = clampInt(l.layerStack.pop(), 0, l.events.length, 0);
     l.events = l.events.slice(0, start);
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     showStatus('Looper: layer undo', 90);
+    markSessionChanged();
     updateUtilityButtonLeds();
     return true;
 }
@@ -3311,8 +3352,20 @@ function looperQuantize(index, steps = 16) {
     const l = looperByIndex(index);
     if (!l || !Array.isArray(l.events) || !l.events.length || l.loopLengthMs <= 0) {
         showStatus('Looper: nothing to quantize', 90);
-        return;
+        return false;
     }
+
+    if (l.quantized && Array.isArray(l.preQuantizeEvents) && l.preQuantizeEvents.length) {
+        l.events = l.preQuantizeEvents.map((ev) => Object.assign({}, ev));
+        l.quantized = 0;
+        l.preQuantizeEvents = [];
+        showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': unquantized', 100);
+        markSessionChanged();
+        s.dirty = true;
+        return true;
+    }
+
+    l.preQuantizeEvents = l.events.map((ev) => Object.assign({}, ev));
     const safeSteps = clampInt(steps, 2, 64, 16);
     const gridMs = Math.max(1, l.loopLengthMs / safeSteps);
     const minNoteMs = Math.max(1, Math.floor(gridMs * 0.25));
@@ -3344,8 +3397,11 @@ function looperQuantize(index, steps = 16) {
     for (let i = 0; i < quantized.length; i++) delete quantized[i]._idx;
 
     l.events = quantized;
+    l.quantized = 1;
     showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': quantized 1/' + safeSteps, 100);
+    markSessionChanged();
     s.dirty = true;
+    return true;
 }
 
 function handleLoopButtonPress(fromPadTap = false) {
@@ -4025,8 +4081,11 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveUndo && val > 0) {
-            if (s.shiftHeld) redoSessionState();
-            else undoSessionState();
+            if (s.shiftHeld) {
+                redoSessionState();
+            } else if (!looperUndoLastLayer()) {
+                undoSessionState();
+            }
             return;
         }
 

@@ -34,7 +34,7 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - record -> play -> overdub -> play
   - double press to stop
   - double press and hold to erase
-- `Shift + looper pad` in loop-pad mode: quantize that looper's recorded note events to 1/16 grid.
+- `Shift + looper pad` in loop-pad mode: toggle quantize ON/OFF for that looper's recorded note events (1/16 grid).
 
 ### Main screen legend
 
@@ -185,7 +185,7 @@ Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locke
 
 - `Shift + Delete` (main view): clear all audio in focused bank.
 
-- `Undo`: undo latest edit state.
+- `Undo`: if looper has a recorded overdub layer, undo that looper layer first; otherwise undo latest edit state.
 - `Shift + Undo`: redo latest undone state.
 
 - `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
@@ -233,6 +233,7 @@ Autosave file:
 - Global settings (gain/pitch, velocity, etc.)
 - Source slice start map/transient state
 - Looper state (`activeLooper`, loop-pad mode, and recorded looper note events/length)
+- Looper quantize toggle state and pre-quantize event snapshot (for unquantize toggle recovery)
 
 ### Open session menus
 
