@@ -153,7 +153,8 @@ Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locke
 
 ### Transport / Utility Buttons
 
-- `Copy` (no shift, main view): toggle velocity sensitivity on/off.
+- `Copy` (no shift, main view): toggle `Velocity Sens ON` / `Full Velocity ON`.
+- Default on fresh first launch is `Full Velocity ON`.
 - `Capture` (main view): randomize transients/chop starts for focused source bank.
 - `Shift + Vol touch + Copy` (main view): same transient randomize shortcut.
 

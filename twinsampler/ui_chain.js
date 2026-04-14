@@ -335,7 +335,7 @@ const s = {
 
     globalGain: 1.0,
     globalPitch: 0.0,
-    velocitySens: 1,
+    velocitySens: 0,
 
     recordMaxSeconds: 30,
     recording: 0,
@@ -614,7 +614,7 @@ function makeInitSessionPayload() {
         browserAssignMode: 'auto',
         globalGain: 1.0,
         globalPitch: 0.0,
-        velocitySens: 1,
+        velocitySens: 0,
         recordMaxSeconds: 30,
         sections: [
             {
@@ -2155,7 +2155,7 @@ function adjustGlobalPitch(delta) {
 function toggleVelocitySens() {
     s.velocitySens = s.velocitySens ? 0 : 1;
     spb('velocity_sens', String(s.velocitySens), 120);
-    showStatus('Velocity ' + (s.velocitySens ? 'On' : 'Off'), 80);
+    showStatus(s.velocitySens ? 'Velocity Sens ON' : 'Full Velocity ON', 80);
     markSessionChanged();
     s.dirty = true;
 }
@@ -2705,7 +2705,7 @@ function applyParsedSession(parsed, silent, label) {
 
     s.globalGain = clampFloat(parsed.globalGain, 0.0, 4.0, 1.0);
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
-    s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 1);
+    s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
 
     const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
@@ -3790,7 +3790,7 @@ function initFromDspDefaults() {
 
     s.globalGain = clampFloat(gp('global_gain', 1.0), 0.0, 4.0, 1.0);
     s.globalPitch = clampFloat(gp('global_pitch', 0.0), -48.0, 48.0, 0.0);
-    s.velocitySens = clampInt(gp('velocity_sens', 1), 0, 1, 1);
+    s.velocitySens = clampInt(gp('velocity_sens', 0), 0, 1, 0);
 
     const dspSel = clampInt(gp('selected_slice', 0), 0, TOTAL_PADS - 1, 0);
     s.selectedSlice = customSliceFromDspSlice(dspSel);
