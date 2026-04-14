@@ -2545,7 +2545,7 @@ function drawMain() {
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'L' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
+    else footer = 'Loop' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
     print(0, 50, shortText(footer, 21), 1);
 }
 

@@ -8,6 +8,18 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
 
 ▶️ Watch demo: https://youtu.be/dNPo0ITg-AQ
 
+## Essential Keys (read this first)
+
+- `Jog click`: open/confirm in browser.
+- `Jog turn`: browse items or adjust main value.
+- `Step 1-16`: banks (1-8 left section, 9-16 right section).
+- `K1-K8`: pad/bank parameters (attack, decay, trim, mode, pitch, gain, loop).
+- `Copy` (main): toggle velocity mode (`Velocity Sens ON` / `Full Velocity ON`).
+- `Rec`: arm/start/stop recording cycle.
+- `Shift + Loop`: toggle loop-pad mode.
+- `Shift + Copy`: session save menu.
+- `Shift + Menu`: session load menu.
+
 ### Loop pad mode (v0.1)
 
 - `Shift + Loop`: toggle loop-pad mode ON/OFF.
@@ -22,6 +34,13 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - record -> play -> overdub -> play
   - double press to stop
   - double press and hold to erase
+
+### Main screen legend
+
+- `L:SRC B1  R:PAD B1` = left/right section mode + current bank.
+- `F:S1B1P1` = current focus (Section/Bank/Pad).
+- `C16 T50` = chop count and transient sensitivity.
+- Footer `Loop1:PLAY` = active looper number + state (`OFF/REC/PLAY/OVD/STOP`).
 
 ## Install
 
