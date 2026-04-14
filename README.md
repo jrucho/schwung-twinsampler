@@ -47,7 +47,7 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
 
 Place this folder at:
 
-`modules/overtake/twinsampler`
+`modules/overtake/twinsampler_overtake`
 
 Required files: 
 - `dsp.so`
@@ -58,6 +58,7 @@ Required files:
 - `plugin_api_v1.h`
 - `ui.js`
 - `ui_chain.js`
+- `ui_chain_shared.js`
 
 ## Quick Start
 

@@ -10,390 +10,119 @@
  */
 
 import * as os from 'os';
-import * as moveConstants from '/data/UserData/schwung/shared/constants.mjs';
-import * as moveInputFilter from '/data/UserData/schwung/shared/input_filter.mjs';
+import {
+    MoveMainKnob,
+    MoveMainButton,
+    MoveKnob1,
+    MoveKnob2,
+    MoveKnob3,
+    MoveKnob4,
+    MoveKnob5,
+    MoveKnob6,
+    MoveKnob7,
+    MoveKnob8,
+    MoveShift,
+    MoveMenu,
+    MoveCopy,
+    MoveCapture,
+    MoveRec,
+    MoveRecord,
+    MoveLoop,
+    MoveMute,
+    MoveUndo,
+    MoveDelete,
+    MoveMaster,
+    MoveMasterTouch,
+    Black,
+    decodeDelta,
+    setLED,
+    setButtonLED,
+    USE_STEP_BANKS,
+    LEFT_GRID_ONLY,
+    MODULE_FLAVOR,
+    SAMPLES_DIR,
+    RECORDED_SAMPLES_ROOT,
+    SESSIONS_DIR,
+    LEGACY_SESSION_FILE,
+    AUTOSAVE_SESSION_FILE,
+    DEFAULT_SESSION_NAME,
+    INIT_SESSION_NAME,
+    SESSION_NAME_MAX,
+    SESSION_CHARS,
+    AUTOSAVE_DELAY_TICKS,
+    REALTIME_NONBLOCKING,
+    HISTORY_MAX,
+    GRID_SIZE,
+    GRID_COUNT,
+    BANK_COUNT,
+    TOTAL_PADS,
+    MIDI_FIXED_NOTES,
+    MIDI_OUT_POLY_AFTERTOUCH,
+    PAD_NOTE_MIN,
+    PAD_NOTE_MAX,
+    PAD_COLS,
+    PAD_ROWS,
+    SECTION_COLS,
+    STEP_NOTE_MIN,
+    STEP_NOTE_MAX,
+    MODE_SINGLE,
+    MODE_PER_SLOT,
+    SOURCE_CHOP_COUNT,
+    CHOP_OPTIONS,
+    LOOP_LABELS,
+    STATUS_TICKS,
+    LEDS_PER_TICK,
+    PREVIEW_DEBOUNCE_MS,
+    SOURCE_PITCH_LIVE_RETRIGGER,
+    RECORD_LED_BLINK_PERIOD_TICKS,
+    LED_RESYNC_INTERVAL_TICKS,
+    LED_RESYNC_PASSES,
+    LOOP_DOUBLE_PRESS_TICKS,
+    LOOP_ERASE_HOLD_TICKS,
+    PAD_PRESS_FLASH_TICKS,
+    PAD_PRESS_LED_COLOR,
+    RECORD_ACK_TIMEOUT_TICKS,
+    RECORD_INTENT_WINDOW_TICKS,
+    MIDI_ECHO_SUPPRESS_WINDOW_MS,
+    MIDI_MIN_NOTE_LENGTH_MS,
+    MIDI_DUPLICATE_NOTE_ON_GUARD_MS,
+    LOOP_PAD_NOTES,
+    LOOP_PAD_COLOR_OFF,
+    LOOP_PAD_COLOR_RECORD,
+    LOOP_PAD_COLOR_PLAY,
+    LOOP_PAD_COLOR_OVERDUB,
+    LOOP_PAD_COLOR_STOPPED,
+    TRIM_STEP_FINE,
+    TRIM_STEP_COARSE,
+    createLooperState,
+    BANK_COLOR_SEQUENCE,
+    COLOR_PALETTE,
+    PAD_COLOR_SEQUENCE,
+    clamp,
+    clampInt,
+    clampFloat,
+    normalizeChopCount,
+    normalizeTransientSensitivity,
+    chopIndex,
+    baseName,
+    shortText,
+    sectionFromSlice,
+    slotFromSlice,
+    sliceFromPadNote,
+    playableSliceFromPadNote,
+    dspSliceFromSecSlot,
+    dspSliceFromCustomSlice,
+    customSliceFromDspSlice,
+    defaultBankColor,
+    makeSlot,
+    cloneSlot,
+    makeBank,
+    cloneBank,
+    makeSection,
+    createInitialState,
+} from './ui_chain_shared.js';
 
-function pickConst(name, fallback) {
-    const v = moveConstants[name];
-    return Number.isFinite(v) ? v : fallback;
-}
-
-const MoveMainKnob = pickConst('MoveMainKnob', 14);
-const MoveMainButton = pickConst('MoveMainButton', 3);
-const MoveKnob1 = pickConst('MoveKnob1', 71);
-const MoveKnob2 = pickConst('MoveKnob2', 72);
-const MoveKnob3 = pickConst('MoveKnob3', 73);
-const MoveKnob4 = pickConst('MoveKnob4', 74);
-const MoveKnob5 = pickConst('MoveKnob5', 75);
-const MoveKnob6 = pickConst('MoveKnob6', 76);
-const MoveKnob7 = pickConst('MoveKnob7', 77);
-const MoveKnob8 = pickConst('MoveKnob8', 78);
-const MoveShift = pickConst('MoveShift', 49);
-const MoveMenu = pickConst('MoveMenu', 50);
-const MoveCopy = pickConst('MoveCopy', 60);
-const MoveCapture = pickConst('MoveCapture', 52);
-const MoveRec = pickConst('MoveRec', 86);
-const MoveRecord = pickConst('MoveRecord', 118);
-const MoveLoop = pickConst('MoveLoop', 87);
-const MoveMute = pickConst('MoveMute', 88);
-const MoveUndo = pickConst('MoveUndo', 56);
-const MoveDelete = pickConst('MoveDelete', 119);
-const MoveMaster = pickConst('MoveMaster', 79);
-const MoveMasterTouch = pickConst('MoveMasterTouch', 8);
-const Black = pickConst('Black', 0);
-const BrightRed = pickConst('BrightRed', 127);
-
-const decodeDelta = (typeof moveInputFilter.decodeDelta === 'function')
-    ? moveInputFilter.decodeDelta
-    : function(value) {
-        if (value === 0) return 0;
-        if (value >= 1 && value <= 63) return 1;
-        if (value >= 65 && value <= 127) return -1;
-        return 0;
-    };
-
-const setLED = (typeof moveInputFilter.setLED === 'function')
-    ? moveInputFilter.setLED
-    : function(note, color) {
-        try {
-            if (typeof move_midi_internal_send === 'function') {
-                move_midi_internal_send([0x09, 0x90, note, color]);
-            }
-        } catch (e) {}
-    };
-
-const setButtonLED = (typeof moveInputFilter.setButtonLED === 'function')
-    ? moveInputFilter.setButtonLED
-    : function(cc, color) {
-        try {
-            if (typeof move_midi_internal_send === 'function') {
-                move_midi_internal_send([0x0B, 0xB0, cc, color]);
-            }
-        } catch (e) {}
-    };
-
-const USE_STEP_BANKS = true; /* overtake: step buttons select banks */
-const LEFT_GRID_ONLY = false; /* dual-grid mode: left and right 4x4 sections active */
-const MODULE_FLAVOR = '';
-
-const SAMPLES_DIR = '/data/UserData/UserLibrary/Samples';
-const RECORDED_SAMPLES_ROOT = SAMPLES_DIR + '/TwinSamplerRecorded';
-const SESSIONS_DIR = '/data/UserData/UserLibrary/TwinSamplerSessions';
-const LEGACY_SESSION_FILE = '/data/UserData/UserLibrary/twinsampler-session-v2.json';
-const AUTOSAVE_SESSION_FILE = '/data/UserData/UserLibrary/twinsampler-autosave-v1.json';
-const DEFAULT_SESSION_NAME = 'SESSION01';
-const INIT_SESSION_NAME = 'INIT';
-const SESSION_NAME_MAX = 12;
-const SESSION_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-';
-const AUTOSAVE_DELAY_TICKS = 96;
-const REALTIME_NONBLOCKING = true;
-const HISTORY_MAX = 80;
-
-const GRID_SIZE = 16;
-const GRID_COUNT = 2;
-const BANK_COUNT = 8;
-const TOTAL_PADS = GRID_SIZE * GRID_COUNT;
-const MIDI_NOTE_BASE = 36; /* C1 in Drum Rack convention */
-const MIDI_FIXED_NOTES = Array.from({ length: GRID_SIZE }, (_, i) => MIDI_NOTE_BASE + i);
-const MIDI_OUT_POLY_AFTERTOUCH = false;
-
-const PAD_NOTE_MIN = 68;
-const PAD_NOTE_MAX = 99;
-const PAD_COLS = 8;
-const PAD_ROWS = 4;
-const SECTION_COLS = 4;
-const STEP_NOTE_MIN = 16;
-const STEP_NOTE_MAX = 31;
-
-const MODE_SINGLE = 0;
-const MODE_PER_SLOT = 1;
-const SOURCE_CHOP_COUNT = 16;
-const CHOP_OPTIONS = [SOURCE_CHOP_COUNT];
-
-const LOOP_LABELS = ['Off', 'Loop', 'Ping'];
-const STATUS_TICKS = 120;
-const LEDS_PER_TICK = 8;
-const PREVIEW_DEBOUNCE_MS = 250;
-const SOURCE_PITCH_LIVE_RETRIGGER = true;
-const RECORD_LED_BLINK_PERIOD_TICKS = 24;
-const LED_RESYNC_INTERVAL_TICKS = 18;
-const LED_RESYNC_PASSES = 3;
-const LOOP_DOUBLE_PRESS_TICKS = 90;
-const LOOP_ERASE_HOLD_TICKS = 36;
-const PAD_PRESS_FLASH_TICKS = 5;
-const PAD_PRESS_LED_COLOR = 122; /* dim white */
-const RECORD_ACK_TIMEOUT_TICKS = 72;
-const RECORD_INTENT_WINDOW_TICKS = 48;
-const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
-const MIDI_MIN_NOTE_LENGTH_MS = 8;
-const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
-const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
-const LOOP_PAD_COLOR_OFF = Black;
-const LOOP_PAD_COLOR_RECORD = BrightRed;
-const LOOP_PAD_COLOR_PLAY = 21;
-const LOOP_PAD_COLOR_OVERDUB = 9;
-const LOOP_PAD_COLOR_STOPPED = 118;
-const TRIM_STEP_FINE = 1.0;
-const TRIM_STEP_COARSE = 5.0;
-
-function createLooperState() {
-    return {
-        state: 'empty', /* empty|recording|playing|overdub|stopped */
-        events: [],
-        quantized: 0,
-        preQuantizeEvents: [],
-        loopLengthMs: 0,
-        recordStartMs: 0,
-        playStartMs: 0,
-        loopPosMs: 0,
-        lastLoopPosMs: 0,
-        layerStack: [],
-        buttonHeld: false,
-        buttonDownTick: -1,
-        lastPressTick: -9999,
-        eraseHoldTriggered: false,
-        holdEraseArmed: false
-    };
-}
-
-const BANK_COLOR_SEQUENCE = [8, 15, 3, 21, 7, 31, 47, 1];
-const COLOR_PALETTE = [120, 118, 8, 9, 11, 12, 14, 15, 16, 47, 48, 3, 7, 21, 1, 125, 127];
-const PAD_COLOR_SEQUENCE = [-1].concat(COLOR_PALETTE);
-
-function clamp(v, min, max) {
-    return Math.max(min, Math.min(max, v));
-}
-
-function clampInt(v, min, max, fallback) {
-    const n = parseInt(v, 10);
-    if (!Number.isFinite(n)) return fallback;
-    return clamp(n, min, max);
-}
-
-function clampFloat(v, min, max, fallback) {
-    const n = parseFloat(v);
-    if (!Number.isFinite(n)) return fallback;
-    return clamp(n, min, max);
-}
-
-function normalizeChopCount(v) {
-    void v;
-    return SOURCE_CHOP_COUNT;
-}
-
-function normalizeTransientSensitivity(v) {
-    return clampInt(v, 0, 100, 50);
-}
-
-function chopIndex(v) {
-    const c = normalizeChopCount(v);
-    const i = CHOP_OPTIONS.indexOf(c);
-    return i >= 0 ? i : 2;
-}
-
-function baseName(path) {
-    if (!path) return '';
-    const parts = String(path).split('/');
-    return parts[parts.length - 1] || '';
-}
-
-function shortText(text, max = 21) {
-    const s = String(text || '');
-    if (s.length <= max) return s;
-    return s.slice(0, Math.max(1, max - 1)) + '...';
-}
-
-function sectionFromSlice(slice) {
-    return slice < GRID_SIZE ? 0 : 1;
-}
-
-function slotFromSlice(slice) {
-    return slice % GRID_SIZE;
-}
-
-function sliceFromPadNote(note) {
-    const idx = note - PAD_NOTE_MIN;
-    if (idx < 0 || idx >= TOTAL_PADS) return -1;
-
-    const row = Math.floor(idx / PAD_COLS);
-    const col = idx % PAD_COLS;
-    if (row < 0 || row >= PAD_ROWS) return -1;
-    if (LEFT_GRID_ONLY && col >= SECTION_COLS) return -1;
-
-    const sec = col < SECTION_COLS ? 0 : 1;
-    const slot = row * SECTION_COLS + (col % SECTION_COLS);
-    return sec * GRID_SIZE + slot;
-}
-
-function playableSliceFromPadNote(note) {
-    /* Keep pad routing deterministic: never remap to legacy coordinates. */
-    return sliceFromPadNote(note);
-}
-
-function dspSliceFromSecSlot(sec, slot) {
-    const sSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
-    const sSlot = clampInt(slot, 0, GRID_SIZE - 1, 0);
-    return sSec * GRID_SIZE + sSlot;
-}
-
-function dspSliceFromCustomSlice(slice) {
-    const sec = sectionFromSlice(slice);
-    const slot = slotFromSlice(slice);
-    return dspSliceFromSecSlot(sec, slot);
-}
-
-function customSliceFromDspSlice(dspSlice) {
-    return clampInt(dspSlice, 0, TOTAL_PADS - 1, 0);
-}
-
-function defaultBankColor(bankIdx) {
-    return BANK_COLOR_SEQUENCE[clampInt(bankIdx, 0, BANK_COUNT - 1, 0) % BANK_COLOR_SEQUENCE.length];
-}
-
-function makeSlot() {
-    return {
-        path: '',
-        attack: 5.0,
-        decay: 500.0,
-        startTrim: 0.0,
-        endTrim: 0.0,
-        gain: 1.0,
-        pitch: 0.0,
-        modeGate: 0,
-        loop: 0,
-        color: -1,
-        muted: 0
-    };
-}
-
-function cloneSlot(s) {
-    return {
-        path: s.path,
-        attack: s.attack,
-        decay: s.decay,
-        startTrim: s.startTrim,
-        endTrim: s.endTrim,
-        gain: s.gain,
-        pitch: s.pitch,
-        modeGate: s.modeGate,
-        loop: s.loop,
-        color: s.color,
-        muted: s.muted ? 1 : 0
-    };
-}
-
-function makeBank(bankIdx = 0) {
-    const slots = [];
-    for (let i = 0; i < GRID_SIZE; i++) slots.push(makeSlot());
-    return {
-        sourcePath: '',
-        bankColor: defaultBankColor(bankIdx),
-        chopCount: SOURCE_CHOP_COUNT,
-        slicePage: 0,
-        transientSensitivity: 50,
-        sliceStarts: [],
-        slots
-    };
-}
-
-function cloneBank(b) {
-    return {
-        sourcePath: b.sourcePath,
-        bankColor: b.bankColor,
-        chopCount: normalizeChopCount(b.chopCount),
-        slicePage: clampInt(b.slicePage, 0, 7, 0),
-        transientSensitivity: normalizeTransientSensitivity(b.transientSensitivity),
-        sliceStarts: Array.isArray(b.sliceStarts) ? b.sliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
-        slots: b.slots.map((s) => cloneSlot(s))
-    };
-}
-
-function makeSection(defaultMode) {
-    const banks = [];
-    for (let i = 0; i < BANK_COUNT; i++) banks.push(makeBank(i));
-    return {
-        mode: defaultMode,
-        currentBank: 0,
-        banks
-    };
-}
-
-const s = {
-    view: 'main',
-    dirty: true,
-
-    shiftHeld: false,
-    volumeTouchHeld: false,
-    knobPage: 'A',
-    editScope: 'P', /* P=pad slot, G=focused section+bank */
-
-    selectedSlice: 0,
-    focusedSection: 0,
-
-    sections: [
-        makeSection(MODE_SINGLE),
-        makeSection(MODE_PER_SLOT)
-    ],
-
-    globalGain: 1.0,
-    globalPitch: 0.0,
-    velocitySens: 0,
-
-    recordMaxSeconds: 30,
-    recording: 0,
-    recordArmed: false,
-    recordState: 'idle', /* idle|armed|starting|recording|stopping */
-    recordStateTicks: 0,
-    recordLoadOnStop: false,
-    recordMonitorOn: false,
-    recordBlinkOn: false,
-    recordBlinkTicks: 0,
-    recTarget: { sec: 0, bank: 0, slot: 0 },
-    lastRecordedPath: '',
-
-    browserPath: SAMPLES_DIR,
-    browserEntries: [],
-    browserCursor: 0,
-    browserScroll: 0,
-    browserMode: 'samples', /* samples|sessions */
-    sessionBrowserIntent: 'load', /* load|save */
-    browserAssignMode: 'auto', /* auto|slot|source */
-    previewPendingPath: '',
-    previewPendingAt: 0,
-    previewCurrentPath: '',
-    sessionName: DEFAULT_SESSION_NAME,
-    sessionCharIndex: 0,
-
-    copySource: null,
-    stepCopySource: null,
-    activePadPress: {},
-    muteHeld: false,
-    lastPadTriggerTick: -9999,
-    midiEchoSuppression: true,
-    recentOutboundMidi: {},
-
-    transportTicks: 0,
-    padPressFlash: {},
-    midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
-    activeLooper: 0,
-    loopPadMode: false,
-
-    statusText: '',
-    statusTicks: 0,
-    ledsDirty: true,
-    ledQueue: [],
-    ledResyncTicks: 0,
-    ledResyncPasses: 0,
-
-    autosavePending: false,
-    autosaveTicks: 0,
-
-    undoHistory: [],
-    redoHistory: [],
-    historyTxnDepth: 0,
-    historyTxnDirty: false,
-    historyApplying: false,
-};
+const s = createInitialState();
 
 const editCursorCache = { sec: -1, bank: -1, slot: -1 };
 const playbackCompatCache = { sec: -1, bank: -1, slot: -1 };
