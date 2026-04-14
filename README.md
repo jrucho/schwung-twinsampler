@@ -34,6 +34,7 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - record -> play -> overdub -> play
   - double press to stop
   - double press and hold to erase
+- `Shift + looper pad` in loop-pad mode: quantize that looper's recorded note events to 1/16 grid.
 
 ### Main screen legend
 
@@ -179,6 +180,7 @@ Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locke
 
 - `Delete`:
 - In main view: clear focused pad audio.
+- In browser samples view: delete selected `.wav` file.
 - In browser sessions view: delete selected session file.
 
 - `Shift + Delete` (main view): clear all audio in focused bank.
@@ -260,6 +262,7 @@ Autosave file:
 
 - `Delete`:
 - Delete selected session file.
+- Session naming supports auto-increment far beyond 10 (`SESSION01`, `SESSION10`, `SESSION99999`).
 
 ### INIT baseline session
 

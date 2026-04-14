@@ -1197,6 +1197,10 @@ function currentLooper() {
     return s.midiLoopers[idx];
 }
 
+function looperByIndex(index) {
+    return s.midiLoopers[clampInt(index, 0, s.midiLoopers.length - 1, 0)];
+}
+
 function looperStateColor(state) {
     if (state === 'recording') return LOOP_PAD_COLOR_RECORD;
     if (state === 'playing') return LOOP_PAD_COLOR_PLAY;
@@ -2906,6 +2910,26 @@ function deleteSelectedSession() {
     s.dirty = true;
 }
 
+function deleteSelectedSampleFile() {
+    if (s.browserMode !== 'samples') return;
+    const e = s.browserEntries[s.browserCursor];
+    if (!e || e.dir || !e.path || !/\.wav$/i.test(String(e.path))) {
+        showStatus('Select WAV to delete', 100);
+        return;
+    }
+
+    const ok = deleteFilePath(e.path);
+    if (!ok) {
+        showStatus('Delete failed', 120);
+        return;
+    }
+
+    refreshBrowserList();
+    previewStop();
+    showStatus('Deleted ' + e.name, 100);
+    s.dirty = true;
+}
+
 function adjustSessionNameIndex(delta) {
     if (delta === 0) return;
     s.sessionName = sanitizeSessionName(s.sessionName);
@@ -3218,6 +3242,47 @@ function looperUndoLastLayer() {
     return true;
 }
 
+function looperQuantize(index, steps = 16) {
+    const l = looperByIndex(index);
+    if (!l || !Array.isArray(l.events) || !l.events.length || l.loopLengthMs <= 0) {
+        showStatus('Looper: nothing to quantize', 90);
+        return;
+    }
+    const safeSteps = clampInt(steps, 2, 64, 16);
+    const gridMs = Math.max(1, l.loopLengthMs / safeSteps);
+    const minNoteMs = Math.max(1, Math.floor(gridMs * 0.25));
+
+    const quantized = l.events.map((ev, idxEv) => {
+        const q = Math.round(clampFloat(ev.atMs, 0, Math.max(0, l.loopLengthMs - 1), 0) / gridMs) * gridMs;
+        return Object.assign({}, ev, { atMs: clampInt(q, 0, Math.max(0, l.loopLengthMs - 1), 0), _idx: idxEv });
+    });
+
+    const lastOnByKey = {};
+    for (let i = 0; i < quantized.length; i++) {
+        const ev = quantized[i];
+        const key = ev.sec + ':' + ev.bank + ':' + ev.slot;
+        if (ev.type === 'on') {
+            lastOnByKey[key] = ev.atMs;
+        } else {
+            const onAt = lastOnByKey[key];
+            if (Number.isFinite(onAt) && ev.atMs <= onAt) {
+                ev.atMs = clampInt(onAt + minNoteMs, 0, Math.max(0, l.loopLengthMs - 1), onAt);
+            }
+        }
+    }
+
+    quantized.sort((a, b) => {
+        if (a.atMs !== b.atMs) return a.atMs - b.atMs;
+        if (a.type !== b.type) return a.type === 'on' ? -1 : 1;
+        return a._idx - b._idx;
+    });
+    for (let i = 0; i < quantized.length; i++) delete quantized[i]._idx;
+
+    l.events = quantized;
+    showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': quantized 1/' + safeSteps, 100);
+    s.dirty = true;
+}
+
 function handleLoopButtonPress(fromPadTap = false) {
     const l = currentLooper();
     const now = s.transportTicks;
@@ -3285,6 +3350,10 @@ function selectLooper(index) {
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
     if (next !== s.activeLooper) selectLooper(next);
+    if (s.shiftHeld) {
+        looperQuantize(next, 16);
+        return;
+    }
     handleLoopButtonPress(false);
 }
 
@@ -3907,6 +3976,10 @@ function onMidiMessageInternal(data) {
         if (cc === MoveDelete && val > 0) {
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 deleteSelectedSession();
+                return;
+            }
+            if (s.view === 'browser' && s.browserMode === 'samples') {
+                deleteSelectedSampleFile();
                 return;
             }
             if (s.view === 'main') {
