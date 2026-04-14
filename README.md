@@ -8,6 +8,18 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
 
 ▶️ Watch demo: https://youtu.be/dNPo0ITg-AQ
 
+## Essential Keys (read this first)
+
+- `Jog click`: open/confirm in browser.
+- `Jog turn`: browse items or adjust main value.
+- `Step 1-16`: banks (1-8 left section, 9-16 right section).
+- `K1-K8`: pad/bank parameters (attack, decay, trim, mode, pitch, gain, loop).
+- `Copy` (main): toggle velocity mode (`Velocity Sens ON` / `Full Velocity ON`).
+- `Rec`: arm/start/stop recording cycle.
+- `Shift + Loop`: toggle loop-pad mode.
+- `Shift + Copy`: session save menu.
+- `Shift + Menu`: session load menu.
+
 ### Loop pad mode (v0.1)
 
 - `Shift + Loop`: toggle loop-pad mode ON/OFF.
@@ -22,6 +34,14 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - record -> play -> overdub -> play
   - double press to stop
   - double press and hold to erase
+- `Shift + looper pad` in loop-pad mode: toggle quantize ON/OFF for that looper's recorded note events (1/16 grid).
+
+### Main screen legend
+
+- `L:SRC B1  R:PAD B1` = left/right section mode + current bank.
+- `F:S1B1P1` = current focus (Section/Bank/Pad).
+- `C16 T50` = chop count and transient sensitivity.
+- Footer `Loop1:PLAY` = active looper number + state (`OFF/REC/PLAY/OVD/STOP`).
 
 ## Install
 
@@ -117,6 +137,7 @@ Default scope is pad (`P`).
 - `K6`: Pitch
 - `K7`: Gain
 - `K8`: Loop mode
+- Trim detail: `K3/K4` now use fine trim by default; hold `Shift` while turning for coarse trim.
 
 ### Knobs: Shift Edit Layer (Main view, no Vol touch)
 
@@ -148,20 +169,23 @@ When scope is `Bank` (`G`) in normal (non-shift) knob page:
 - `K8`: all-pad loop
 
 When scope is `Pad` (`P`), knobs edit focused slot only.
+Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locked to the selected pad.
 
 ### Transport / Utility Buttons
 
-- `Copy` (no shift, main view): toggle velocity sensitivity on/off.
+- `Copy` (no shift, main view): toggle `Velocity Sens ON` / `Full Velocity ON`.
+- Default on fresh first launch is `Full Velocity ON`.
 - `Capture` (main view): randomize transients/chop starts for focused source bank.
 - `Shift + Vol touch + Copy` (main view): same transient randomize shortcut.
 
 - `Delete`:
 - In main view: clear focused pad audio.
+- In browser samples view: delete selected `.wav` file.
 - In browser sessions view: delete selected session file.
 
 - `Shift + Delete` (main view): clear all audio in focused bank.
 
-- `Undo`: undo latest edit state.
+- `Undo`: if looper has a recorded overdub layer, undo that looper layer first; otherwise undo latest edit state.
 - `Shift + Undo`: redo latest undone state.
 
 - `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
@@ -208,6 +232,8 @@ Autosave file:
 - Colors (bank + pad)
 - Global settings (gain/pitch, velocity, etc.)
 - Source slice start map/transient state
+- Looper state (`activeLooper`, loop-pad mode, and recorded looper note events/length)
+- Looper quantize toggle state and pre-quantize event snapshot (for unquantize toggle recovery)
 
 ### Open session menus
 
@@ -238,6 +264,7 @@ Autosave file:
 
 - `Delete`:
 - Delete selected session file.
+- Session naming supports auto-increment far beyond 10 (`SESSION01`, `SESSION10`, `SESSION99999`).
 
 ### INIT baseline session
 
@@ -268,8 +295,10 @@ On init, TwinSampler attempts:
 1. first press: arm record + enable monitor (LED blinks)
 2. second press (while blinking): start recording (monitor remains on)
 3. third press: stop recording + disable monitor
-- `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the focused target.
-- While recording, wrapper DSP feeds the recorder with `Line In + Schwung audio bus` mixed together.
+- `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the target locked when recording started.
+- While recording, wrapper DSP feeds the recorder with `Line In + Schwung audio bus` mixed together when both are active (auto mode).
+- In auto mode, if only one source is active, recorder captures that source directly (clean `Line In` or clean `Schwung` bus).
+- Mixed capture uses float-domain summing with equal-power dual-source headroom and dithering on int16 handoff to reduce quantization artifacts without limiter coloration.
 - Monitoring remains `Line In` only (Schwung bus is added to record path, not monitor path).
 - Recording target is focused section/bank/slot.
 - In `Source` mode, load target is focused bank source.

@@ -133,11 +133,15 @@ const LOOP_PAD_COLOR_RECORD = BrightRed;
 const LOOP_PAD_COLOR_PLAY = 21;
 const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
+const TRIM_STEP_FINE = 1.0;
+const TRIM_STEP_COARSE = 5.0;
 
 function createLooperState() {
     return {
         state: 'empty', /* empty|recording|playing|overdub|stopped */
         events: [],
+        quantized: 0,
+        preQuantizeEvents: [],
         loopLengthMs: 0,
         recordStartMs: 0,
         playStartMs: 0,
@@ -333,7 +337,7 @@ const s = {
 
     globalGain: 1.0,
     globalPitch: 0.0,
-    velocitySens: 1,
+    velocitySens: 0,
 
     recordMaxSeconds: 30,
     recording: 0,
@@ -603,7 +607,7 @@ function makeInitSessionPayload() {
     const left = makeSection(MODE_SINGLE);
     const right = makeSection(MODE_PER_SLOT);
     return {
-        version: 4,
+        version: 5,
         sessionName: INIT_SESSION_NAME,
         selectedSlice: 0,
         focusedSection: 0,
@@ -612,8 +616,11 @@ function makeInitSessionPayload() {
         browserAssignMode: 'auto',
         globalGain: 1.0,
         globalPitch: 0.0,
-        velocitySens: 1,
+        velocitySens: 0,
         recordMaxSeconds: 30,
+        activeLooper: 0,
+        loopPadMode: false,
+        midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
         sections: [
             {
                 mode: left.mode,
@@ -1193,6 +1200,10 @@ function looperNowMs() {
 function currentLooper() {
     const idx = clampInt(s.activeLooper, 0, 3, 0);
     return s.midiLoopers[idx];
+}
+
+function looperByIndex(index) {
+    return s.midiLoopers[clampInt(index, 0, s.midiLoopers.length - 1, 0)];
 }
 
 function looperStateColor(state) {
@@ -2063,7 +2074,8 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
-    const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * 5.0;
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
+    const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
     setSlotStartTrim(a.sec, a.bank, a.slot, v);
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
@@ -2071,7 +2083,8 @@ function adjustPadStartTrim(delta) {
 
 function adjustPadEndTrim(delta) {
     const a = focusedAddr();
-    const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * 5.0;
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
+    const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * step;
     setSlotEndTrim(a.sec, a.bank, a.slot, v);
     showStatus('P' + (a.slot + 1) + ' End ' + Math.round(slotAt(a.sec, a.bank, a.slot).endTrim), 80);
     s.dirty = true;
@@ -2151,7 +2164,7 @@ function adjustGlobalPitch(delta) {
 function toggleVelocitySens() {
     s.velocitySens = s.velocitySens ? 0 : 1;
     spb('velocity_sens', String(s.velocitySens), 120);
-    showStatus('Velocity ' + (s.velocitySens ? 'On' : 'Off'), 80);
+    showStatus(s.velocitySens ? 'Velocity Sens ON' : 'Full Velocity ON', 80);
     markSessionChanged();
     s.dirty = true;
 }
@@ -2180,16 +2193,18 @@ function adjustAllDecay(delta) {
 }
 
 function adjustAllStartTrim(delta) {
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
-        const v = slotAt(sec, bank, slot).startTrim + delta * 5.0;
+        const v = slotAt(sec, bank, slot).startTrim + delta * step;
         setSlotStartTrim(sec, bank, slot, v);
     });
     showStatus('All start ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).startTrim), 80);
 }
 
 function adjustAllEndTrim(delta) {
+    const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
-        const v = slotAt(sec, bank, slot).endTrim + delta * 5.0;
+        const v = slotAt(sec, bank, slot).endTrim + delta * step;
         setSlotEndTrim(sec, bank, slot, v);
     });
     showStatus('All end ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).endTrim), 80);
@@ -2319,7 +2334,7 @@ function startFocusedRecording() {
     sp('record_capture_mode', 'auto');
     sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
     sp('monitor_policy', '1');
-    sp('debug_capture_logs', '1');
+    sp('debug_capture_logs', '0');
     const recDir = recordingsDayDir(Date.now());
     if (ensureDirRecursive(recDir)) sp('record_output_dir', recDir);
     sp('record_max_seconds', String(s.recordMaxSeconds));
@@ -2365,7 +2380,6 @@ function handleRecordButtonPress() {
     }
     if (s.recording) {
         if (s.shiftHeld) {
-            s.recTarget = captureFocusedRecordTarget();
             stopFocusedRecording(true);
             showStatus('Rec stop+load ' + recordTargetLabel(), 90);
         } else {
@@ -2539,7 +2553,7 @@ function drawMain() {
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'L' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
+    else footer = 'Loop' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
     print(0, 50, shortText(footer, 21), 1);
 }
 
@@ -2585,7 +2599,7 @@ function draw() {
 
 function serializeSession() {
     return {
-        version: 4,
+        version: 5,
         sessionName: s.sessionName,
         selectedSlice: s.selectedSlice,
         focusedSection: s.focusedSection,
@@ -2596,6 +2610,33 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
+        activeLooper: clampInt(s.activeLooper, 0, 3, 0),
+        loopPadMode: !!s.loopPadMode,
+        midiLoopers: s.midiLoopers.map((l) => ({
+            state: (l && (l.state === 'playing' || l.state === 'stopped' || l.state === 'empty')) ? l.state : (l && l.events && l.events.length ? 'stopped' : 'empty'),
+            quantized: (l && l.quantized) ? 1 : 0,
+            loopLengthMs: clampInt(l && l.loopLengthMs, 0, 600000, 0),
+            events: Array.isArray(l && l.events)
+                ? l.events.map((ev) => ({
+                    atMs: clampInt(ev && ev.atMs, 0, 600000, 0),
+                    type: (ev && ev.type === 'off') ? 'off' : 'on',
+                    sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+                    bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+                    slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+                    velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+                }))
+                : [],
+            preQuantizeEvents: Array.isArray(l && l.preQuantizeEvents)
+                ? l.preQuantizeEvents.map((ev) => ({
+                    atMs: clampInt(ev && ev.atMs, 0, 600000, 0),
+                    type: (ev && ev.type === 'off') ? 'off' : 'on',
+                    sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+                    bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+                    slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+                    velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+                }))
+                : []
+        })),
         sections: s.sections.map((sec) => ({
             mode: sec.mode,
             currentBank: sec.currentBank,
@@ -2658,6 +2699,60 @@ function sanitizeSection(raw, defaultMode) {
     };
 }
 
+function sanitizeLooperState(raw) {
+    const base = createLooperState();
+    if (!raw || typeof raw !== 'object') return base;
+
+    const len = clampInt(raw.loopLengthMs, 0, 600000, 0);
+    const srcEvents = Array.isArray(raw.events) ? raw.events : [];
+    const srcPreQuantizeEvents = Array.isArray(raw.preQuantizeEvents) ? raw.preQuantizeEvents : [];
+    const events = srcEvents
+        .map((ev) => ({
+            atMs: clampInt(ev && ev.atMs, 0, Math.max(0, len - 1), 0),
+            type: (ev && ev.type === 'off') ? 'off' : 'on',
+            sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+            bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+            slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+            velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+        }))
+        .sort((a, b) => a.atMs - b.atMs);
+    const preQuantizeEvents = srcPreQuantizeEvents
+        .map((ev) => ({
+            atMs: clampInt(ev && ev.atMs, 0, Math.max(0, len - 1), 0),
+            type: (ev && ev.type === 'off') ? 'off' : 'on',
+            sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+            bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+            slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+            velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+        }))
+        .sort((a, b) => a.atMs - b.atMs);
+
+    let state = 'empty';
+    if (events.length && len > 0) {
+        const inState = String(raw.state || '').toLowerCase();
+        if (inState === 'playing' || inState === 'stopped') state = inState;
+        else state = 'stopped';
+    }
+
+    return {
+        state,
+        events,
+        quantized: (raw.quantized && preQuantizeEvents.length) ? 1 : 0,
+        preQuantizeEvents: (raw.quantized && preQuantizeEvents.length) ? preQuantizeEvents : [],
+        loopLengthMs: events.length ? len : 0,
+        recordStartMs: 0,
+        playStartMs: looperNowMs(),
+        loopPosMs: 0,
+        lastLoopPosMs: 0,
+        layerStack: [],
+        buttonHeld: false,
+        buttonDownTick: -1,
+        lastPressTick: -9999,
+        eraseHoldTriggered: false,
+        holdEraseArmed: false
+    };
+}
+
 function applyAllStateToDsp() {
     sp('global_gain', s.globalGain.toFixed(3));
     sp('global_pitch', s.globalPitch.toFixed(2));
@@ -2699,8 +2794,12 @@ function applyParsedSession(parsed, silent, label) {
 
     s.globalGain = clampFloat(parsed.globalGain, 0.0, 4.0, 1.0);
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
-    s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 1);
+    s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
+    const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
+    s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
+    s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
+    s.loopPadMode = !!parsed.loopPadMode;
 
     const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
     s.sections = [
@@ -2713,6 +2812,8 @@ function applyParsedSession(parsed, silent, label) {
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) syncBankSliceState(sec, bank);
     }
+    updateUtilityButtonLeds();
+    markLedsDirty();
     s.autosavePending = false;
     s.autosaveTicks = 0;
     if (!silent) showStatus('Loaded ' + shortText(label || s.sessionName, 14), 120);
@@ -2896,6 +2997,26 @@ function deleteSelectedSession() {
     }
 
     refreshBrowserList();
+    showStatus('Deleted ' + e.name, 100);
+    s.dirty = true;
+}
+
+function deleteSelectedSampleFile() {
+    if (s.browserMode !== 'samples') return;
+    const e = s.browserEntries[s.browserCursor];
+    if (!e || e.dir || !e.path || !/\.wav$/i.test(String(e.path))) {
+        showStatus('Select WAV to delete', 100);
+        return;
+    }
+
+    const ok = deleteFilePath(e.path);
+    if (!ok) {
+        showStatus('Delete failed', 120);
+        return;
+    }
+
+    refreshBrowserList();
+    previewStop();
     showStatus('Deleted ' + e.name, 100);
     s.dirty = true;
 }
@@ -3102,6 +3223,8 @@ function looperReset(clearEvents) {
     const l = currentLooper();
     l.state = 'empty';
     if (clearEvents) l.events = [];
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     l.loopLengthMs = 0;
     l.recordStartMs = 0;
     l.playStartMs = 0;
@@ -3119,6 +3242,8 @@ function looperReset(clearEvents) {
 function looperRecordEvent(type, sec, bank, slot, velocity) {
     const l = currentLooper();
     if (l.state !== 'recording' && l.state !== 'overdub') return;
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     let atMs = 0;
     const now = looperNowMs();
     if (l.state === 'recording') atMs = Math.max(0, now - l.recordStartMs);
@@ -3137,6 +3262,8 @@ function looperBeginRecording() {
     const l = currentLooper();
     releaseVoicesByOwner('looper:', looperNowMs());
     l.events = [];
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     l.layerStack = [];
     l.recordStartMs = looperNowMs();
     l.playStartMs = l.recordStartMs;
@@ -3155,11 +3282,14 @@ function looperFinishRecordingStartPlayback() {
     const len = Math.max(80, now - l.recordStartMs);
     l.loopLengthMs = len;
     l.events = l.events.filter((e) => e.atMs >= 0 && e.atMs < len);
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     l.playStartMs = now;
     l.loopPosMs = 0;
     l.lastLoopPosMs = 0;
     l.state = l.events.length ? 'playing' : 'empty';
     showStatus(l.events.length ? ('Looper: play ' + len + 'ms') : 'Looper: empty', 100);
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3173,6 +3303,7 @@ function looperToggleOverdub() {
         l.state = 'playing';
         showStatus('Looper: play', 90);
     }
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3189,6 +3320,7 @@ function looperStopPlayback() {
     l.loopPosMs = 0;
     l.lastLoopPosMs = 0;
     showStatus('Looper: stopped', 80);
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3196,6 +3328,7 @@ function looperErase() {
     releaseVoicesByOwner('looper:', looperNowMs());
     looperReset(true);
     showStatus('Looper: erased', 100);
+    markSessionChanged();
     updateUtilityButtonLeds();
 }
 
@@ -3207,8 +3340,67 @@ function looperUndoLastLayer() {
     }
     const start = clampInt(l.layerStack.pop(), 0, l.events.length, 0);
     l.events = l.events.slice(0, start);
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
     showStatus('Looper: layer undo', 90);
+    markSessionChanged();
     updateUtilityButtonLeds();
+    return true;
+}
+
+function looperQuantize(index, steps = 16) {
+    const l = looperByIndex(index);
+    if (!l || !Array.isArray(l.events) || !l.events.length || l.loopLengthMs <= 0) {
+        showStatus('Looper: nothing to quantize', 90);
+        return false;
+    }
+
+    if (l.quantized && Array.isArray(l.preQuantizeEvents) && l.preQuantizeEvents.length) {
+        l.events = l.preQuantizeEvents.map((ev) => Object.assign({}, ev));
+        l.quantized = 0;
+        l.preQuantizeEvents = [];
+        showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': unquantized', 100);
+        markSessionChanged();
+        s.dirty = true;
+        return true;
+    }
+
+    l.preQuantizeEvents = l.events.map((ev) => Object.assign({}, ev));
+    const safeSteps = clampInt(steps, 2, 64, 16);
+    const gridMs = Math.max(1, l.loopLengthMs / safeSteps);
+    const minNoteMs = Math.max(1, Math.floor(gridMs * 0.25));
+
+    const quantized = l.events.map((ev, idxEv) => {
+        const q = Math.round(clampFloat(ev.atMs, 0, Math.max(0, l.loopLengthMs - 1), 0) / gridMs) * gridMs;
+        return Object.assign({}, ev, { atMs: clampInt(q, 0, Math.max(0, l.loopLengthMs - 1), 0), _idx: idxEv });
+    });
+
+    const lastOnByKey = {};
+    for (let i = 0; i < quantized.length; i++) {
+        const ev = quantized[i];
+        const key = ev.sec + ':' + ev.bank + ':' + ev.slot;
+        if (ev.type === 'on') {
+            lastOnByKey[key] = ev.atMs;
+        } else {
+            const onAt = lastOnByKey[key];
+            if (Number.isFinite(onAt) && ev.atMs <= onAt) {
+                ev.atMs = clampInt(onAt + minNoteMs, 0, Math.max(0, l.loopLengthMs - 1), onAt);
+            }
+        }
+    }
+
+    quantized.sort((a, b) => {
+        if (a.atMs !== b.atMs) return a.atMs - b.atMs;
+        if (a.type !== b.type) return a.type === 'on' ? -1 : 1;
+        return a._idx - b._idx;
+    });
+    for (let i = 0; i < quantized.length; i++) delete quantized[i]._idx;
+
+    l.events = quantized;
+    l.quantized = 1;
+    showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': quantized 1/' + safeSteps, 100);
+    markSessionChanged();
+    s.dirty = true;
     return true;
 }
 
@@ -3279,6 +3471,10 @@ function selectLooper(index) {
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
     if (next !== s.activeLooper) selectLooper(next);
+    if (s.shiftHeld) {
+        looperQuantize(next, 16);
+        return;
+    }
     handleLoopButtonPress(false);
 }
 
@@ -3528,7 +3724,8 @@ function handlePadNote(note, velocity) {
     if (!s.shiftHeld) {
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
-        setSelectedSlice(slice, false, true);
+        s.editScope = 'P';
+        setSelectedSlice(slice, false, false);
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
@@ -3783,7 +3980,7 @@ function initFromDspDefaults() {
 
     s.globalGain = clampFloat(gp('global_gain', 1.0), 0.0, 4.0, 1.0);
     s.globalPitch = clampFloat(gp('global_pitch', 0.0), -48.0, 48.0, 0.0);
-    s.velocitySens = clampInt(gp('velocity_sens', 1), 0, 1, 1);
+    s.velocitySens = clampInt(gp('velocity_sens', 0), 0, 1, 0);
 
     const dspSel = clampInt(gp('selected_slice', 0), 0, TOTAL_PADS - 1, 0);
     s.selectedSlice = customSliceFromDspSlice(dspSel);
@@ -3884,8 +4081,11 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveUndo && val > 0) {
-            if (s.shiftHeld) redoSessionState();
-            else undoSessionState();
+            if (s.shiftHeld) {
+                redoSessionState();
+            } else if (!looperUndoLastLayer()) {
+                undoSessionState();
+            }
             return;
         }
 
@@ -3900,6 +4100,10 @@ function onMidiMessageInternal(data) {
         if (cc === MoveDelete && val > 0) {
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 deleteSelectedSession();
+                return;
+            }
+            if (s.view === 'browser' && s.browserMode === 'samples') {
+                deleteSelectedSampleFile();
                 return;
             }
             if (s.view === 'main') {
