@@ -2378,7 +2378,6 @@ function handleRecordButtonPress() {
     }
     if (s.recording) {
         if (s.shiftHeld) {
-            s.recTarget = captureFocusedRecordTarget();
             stopFocusedRecording(true);
             showStatus('Rec stop+load ' + recordTargetLabel(), 90);
         } else {

@@ -294,7 +294,7 @@ On init, TwinSampler attempts:
 1. first press: arm record + enable monitor (LED blinks)
 2. second press (while blinking): start recording (monitor remains on)
 3. third press: stop recording + disable monitor
-- `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the focused target.
+- `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the target locked when recording started.
 - While recording, wrapper DSP feeds the recorder with `Line In + Schwung audio bus` mixed together when both are active (auto mode).
 - In auto mode, if only one source is active, recorder captures that source directly (clean `Line In` or clean `Schwung` bus).
 - Mixed capture uses float-domain summing with equal-power dual-source headroom and dithering on int16 handoff to reduce quantization artifacts without limiter coloration.

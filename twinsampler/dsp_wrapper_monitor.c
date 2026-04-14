@@ -393,9 +393,8 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             } else if (inst->record_capture_mode == 1) {
                 desired_capture_source = 1;
             } else {
-                if (inst->record_intent_internal && bus_active) desired_capture_source = 2;
-                else if (!input_active && bus_active) desired_capture_source = 2;
-                else if (input_active && bus_active) desired_capture_source = 3;
+                if (input_active && bus_active) desired_capture_source = 3;
+                else if (input_active) desired_capture_source = 1;
                 else if (bus_active) desired_capture_source = 2;
                 else desired_capture_source = 1;
             }
