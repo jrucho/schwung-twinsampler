@@ -197,8 +197,7 @@ Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locke
 - `Undo`: if looper has a recorded overdub layer, undo that looper layer first; otherwise undo latest edit state.
 - `Shift + Undo`: redo latest undone state.
 
-- `Master knob` in REC mode: adjusts line input capture gain.
-- `Shift + Master knob` in REC mode: adjusts bus/schwung capture gain.
+- `Master knob`: no capture-gain mapping inside TwinSampler (line/bus capture are fixed to 100%).
 
 ## Sampler Color Engine (Release 0.1)
 
@@ -367,7 +366,7 @@ On init, TwinSampler attempts:
 - TwinSampler is an `overtake` module (`component_type: overtake`).
 - Module audio passes through Schwung/Move output path.
 - Schwung master volume and master FX chain are host-level concerns.
-- TwinSampler internal loudness trim is available via `Shift + Master knob turn` (module gain).
+- TwinSampler does not map `Master knob` to internal gain.
 
 ## Files and Roles
 

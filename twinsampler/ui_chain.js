@@ -2310,29 +2310,23 @@ function isRecordModeActive() {
 }
 
 function setRecordInputGainPct(nextPct) {
-    s.recInputGainPct = clampInt(nextPct, 0, 100, s.recInputGainPct);
-    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
-    showStatus('Rec line in ' + s.recInputGainPct + '%', 80);
-    markSessionChanged();
-    s.dirty = true;
+    void nextPct;
+    s.recInputGainPct = 100;
+    sp('input_capture_gain', '1.000');
 }
 
 function setRecordSchwungGainPct(nextPct) {
-    s.recSchwungGainPct = clampInt(nextPct, 0, 100, s.recSchwungGainPct);
-    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    void nextPct;
+    s.recSchwungGainPct = 100;
+    sp('record_mix_gain', '1.000');
     pushSamplerEmuParams();
-    showStatus('Rec schwung ' + s.recSchwungGainPct + '%', 80);
-    markSessionChanged();
-    s.dirty = true;
 }
 
 function adjustRecordCaptureGain(delta, target) {
-    if (delta === 0) return;
-    const sign = delta > 0 ? 1 : -1;
-    const magnitude = clampInt(Math.abs(delta), 1, 127, 1);
-    const scaledStep = sign * clampInt(Math.max(2, Math.round(magnitude * 0.5)), 2, 12, 2);
-    if (target === 'schwung') setRecordSchwungGainPct(s.recSchwungGainPct + scaledStep);
-    else setRecordInputGainPct(s.recInputGainPct + scaledStep);
+    void delta;
+    void target;
+    setRecordInputGainPct(100);
+    setRecordSchwungGainPct(100);
 }
 
 function focusedEmuBank(sec = s.focusedSection) {
@@ -2967,8 +2961,10 @@ function applyAllStateToDsp() {
     sp('global_pitch', s.globalPitch.toFixed(2));
     sp('velocity_sens', String(s.velocitySens));
     sp('record_max_seconds', String(s.recordMaxSeconds));
-    sp('input_capture_gain', (clampInt(s.recInputGainPct, 0, 100, 100) / 100).toFixed(3));
-    sp('record_mix_gain', (clampInt(s.recSchwungGainPct, 0, 100, 100) / 100).toFixed(3));
+    s.recInputGainPct = 100;
+    s.recSchwungGainPct = 100;
+    sp('input_capture_gain', '1.000');
+    sp('record_mix_gain', '1.000');
     pushSamplerEmuParams();
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
@@ -3008,8 +3004,8 @@ function applyParsedSession(parsed, silent, label) {
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
-    s.recInputGainPct = clampInt(parsed.recInputGainPct, 0, 100, 100);
-    s.recSchwungGainPct = clampInt(parsed.recSchwungGainPct, 0, 100, 100);
+    s.recInputGainPct = 100;
+    s.recSchwungGainPct = 100;
     s.samplerEmuMode = clampInt(parsed.samplerEmuMode, 0, 4, 0);
     s.samplerEmuBitDepth = clampInt(parsed.samplerEmuBitDepth, 4, 16, 16);
     s.samplerEmuRateHz = clampInt(parsed.samplerEmuRateHz, 2000, 96000, 44100);
@@ -4306,8 +4302,8 @@ function initFromDspDefaults() {
     s.recordBlinkTicks = 0;
     updateRecordButtonLed();
 
-    s.recInputGainPct = clampInt(Math.round(clampFloat(gp('input_capture_gain', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
-    s.recSchwungGainPct = clampInt(Math.round(clampFloat(gp('record_mix_gain', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+    s.recInputGainPct = 100;
+    s.recSchwungGainPct = 100;
     s.captureInputPeak = clampFloat(gp('capture_input_peak', 0.0), 0.0, 2.0, 0.0);
     s.captureBusPeak = clampFloat(gp('capture_bus_peak', 0.0), 0.0, 2.0, 0.0);
     s.clipWarnTicks = 0;
@@ -4322,8 +4318,8 @@ function initFromDspDefaults() {
 
     sp('keyboard_section', String(s.focusedSection));
     sp('record_max_seconds', String(s.recordMaxSeconds));
-    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
-    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    sp('input_capture_gain', '1.000');
+    sp('record_mix_gain', '1.000');
     pushSamplerEmuParams();
 
     ensureEditCursor();
@@ -4415,13 +4411,7 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMaster) {
-            const delta = decodeMasterKnobDelta(val);
-            if (delta === 0) return;
-            if (!isRecordModeActive()) {
-                showStatus('Master disabled (use K7)', 40);
-                return;
-            }
-            adjustRecordCaptureGain(delta, s.shiftHeld ? 'schwung' : 'line');
+            void val;
             return;
         }
 
