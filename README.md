@@ -35,6 +35,9 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - double press to stop
   - double press and hold to erase
 - `Shift + looper pad` in loop-pad mode: toggle quantize ON/OFF for that looper's recorded note events (1/16 grid).
+- `Shift + looper pad` with another target looper: copy active looper MIDI to that looper.
+- While any looper is playing/recording/overdub, destructive erase is locked except:
+  - Hold `Delete` + tap looper pad to clear that looper's MIDI notes for re-recording.
 
 ### Main screen legend
 

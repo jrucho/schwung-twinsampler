@@ -699,8 +699,6 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         memset(out_interleaved_lr, 0, (size_t)frames * 2 * sizeof(int16_t));
     }
 
-    apply_sampler_emu(inst, out_interleaved_lr, frames);
-
     if (input_replaced && audio_in_rw) {
         memcpy(audio_in_rw, inst->input_backup, (size_t)total * sizeof(int16_t));
     }
@@ -718,6 +716,9 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;
         out_interleaved_lr[i] = (int16_t)clip_i32_to_i16(sum);
     }
+
+    /* Final stage coloration on full TwinSampler output (post monitor mix). */
+    apply_sampler_emu(inst, out_interleaved_lr, frames);
 }
 
 static plugin_api_v2_t g_wrapper_api_v2 = {

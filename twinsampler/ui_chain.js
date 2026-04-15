@@ -408,6 +408,7 @@ const s = {
     copySource: null,
     stepCopySource: null,
     masterKnobLast: -1,
+    deleteHeld: false,
     activePadPress: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
@@ -1248,6 +1249,54 @@ function currentLooper() {
 
 function looperByIndex(index) {
     return s.midiLoopers[clampInt(index, 0, s.midiLoopers.length - 1, 0)];
+}
+
+function looperIsActiveState(st) {
+    return st === 'playing' || st === 'recording' || st === 'overdub';
+}
+
+function anyLooperActive() {
+    for (let i = 0; i < s.midiLoopers.length; i++) {
+        const l = s.midiLoopers[i];
+        if (l && looperIsActiveState(l.state)) return true;
+    }
+    return false;
+}
+
+function copyLooperTo(srcIndex, dstIndex) {
+    const src = looperByIndex(srcIndex);
+    const dst = looperByIndex(dstIndex);
+    if (!src || !dst) return false;
+    if (!Array.isArray(src.events) || !src.events.length || src.loopLengthMs <= 0) {
+        showStatus('Looper: source empty', 80);
+        return false;
+    }
+
+    const safeLen = clampInt(src.loopLengthMs, 1, 600000, 1);
+    dst.events = src.events.map((ev) => ({
+        atMs: clampInt(ev && ev.atMs, 0, Math.max(0, safeLen - 1), 0),
+        type: (ev && ev.type === 'off') ? 'off' : 'on',
+        sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
+        bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
+        slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
+        velocity: clampInt(ev && ev.velocity, 0, 127, 0)
+    }));
+    dst.loopLengthMs = safeLen;
+    dst.quantized = src.quantized ? 1 : 0;
+    dst.preQuantizeEvents = Array.isArray(src.preQuantizeEvents)
+        ? src.preQuantizeEvents.map((ev) => Object.assign({}, ev))
+        : [];
+    dst.layerStack = Array.isArray(src.layerStack) ? src.layerStack.slice() : [];
+    dst.state = dst.events.length ? 'stopped' : 'empty';
+    dst.playStartMs = looperNowMs();
+    dst.loopPosMs = 0;
+    dst.lastLoopPosMs = 0;
+    dst.recordStartMs = 0;
+    updateUtilityButtonLeds();
+    markSessionChanged();
+    s.dirty = true;
+    showStatus('Looper ' + (clampInt(srcIndex, 0, 3, 0) + 1) + ' -> ' + (clampInt(dstIndex, 0, 3, 0) + 1), 100);
+    return true;
 }
 
 function looperStateColor(state) {
@@ -3398,6 +3447,10 @@ function handleStepBankNote(note, velocity) {
     if (LEFT_GRID_ONLY && t.sec !== 0) return true;
 
     if (s.shiftHeld && s.volumeTouchHeld) {
+        if (anyLooperActive()) {
+            showStatus('Erase locked while loop plays', 90);
+            return true;
+        }
         const keepColor = s.sections[t.sec].banks[t.bank].bankColor;
         s.sections[t.sec].banks[t.bank] = makeBank(t.bank);
         s.sections[t.sec].banks[t.bank].bankColor = keepColor;
@@ -3701,11 +3754,19 @@ function selectLooper(index) {
 
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
-    if (next !== s.activeLooper) selectLooper(next);
     if (s.shiftHeld) {
+        if (s.volumeTouchHeld) {
+            looperQuantize(next, 16);
+            return;
+        }
+        if (next !== s.activeLooper && copyLooperTo(s.activeLooper, next)) {
+            selectLooper(next);
+            return;
+        }
         looperQuantize(next, 16);
         return;
     }
+    if (next !== s.activeLooper) selectLooper(next);
     handleLoopButtonPress(false);
 }
 
@@ -3723,6 +3784,11 @@ function tickMidiLooperButtonHold() {
     if ((s.transportTicks - l.buttonDownTick) < LOOP_ERASE_HOLD_TICKS) return;
     l.eraseHoldTriggered = true;
     if (l.holdEraseArmed) {
+        if (anyLooperActive()) {
+            showStatus('Use Del+LoopPad erase', 90);
+            l.holdEraseArmed = false;
+            return;
+        }
         looperErase();
         l.holdEraseArmed = false;
         return;
@@ -3934,6 +4000,24 @@ function handlePadNote(note, velocity) {
     if (s.loopPadMode) {
         const lp = loopPadIndexFromPadNote(note);
         if (lp >= 0) {
+            if (s.deleteHeld && anyLooperActive()) {
+                const target = looperByIndex(lp);
+                if (target) {
+                    target.events = [];
+                    target.preQuantizeEvents = [];
+                    target.layerStack = [];
+                    target.loopLengthMs = 0;
+                    target.state = 'empty';
+                    target.playStartMs = looperNowMs();
+                    target.loopPosMs = 0;
+                    target.lastLoopPosMs = 0;
+                    showStatus('Looper ' + (lp + 1) + ' notes cleared', 100);
+                    updateUtilityButtonLeds();
+                    markSessionChanged();
+                    s.dirty = true;
+                }
+                return true;
+            }
             fireLooperPad(lp);
             return true;
         }
@@ -4415,7 +4499,13 @@ function onMidiMessageInternal(data) {
             return;
         }
 
-        if (cc === MoveDelete && val > 0) {
+        if (cc === MoveDelete) {
+            s.deleteHeld = val > 0;
+            if (val <= 0) return;
+            if (anyLooperActive()) {
+                showStatus('Del+LoopPad clears notes', 90);
+                return;
+            }
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 deleteSelectedSession();
                 return;
@@ -4500,6 +4590,7 @@ function init() {
     s.ledQueue = [];
     s.ledsDirty = true;
     s.activePadPress = {};
+    s.deleteHeld = false;
     s.masterKnobLast = -1;
     s.padPressFlash = {};
     runInternalSelfChecks();
@@ -4564,6 +4655,7 @@ function tick() {
 }
 
 function beforeExit() {
+    s.deleteHeld = false;
     const keys = Object.keys(activeVoicesByAddr);
     for (let i = 0; i < keys.length; i++) {
         const v = activeVoicesByAddr[keys[i]];

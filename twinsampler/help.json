@@ -186,6 +186,11 @@
         "(browser): close",
         "browser",
         "",
+        "LoopPad mode:",
+        "Shift+pad=copy",
+        "Del+pad erase",
+        "playing loop MIDI",
+        "",
         "Capture button:",
         "randomize focused",
         "source bank chops"
