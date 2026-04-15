@@ -483,7 +483,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
     const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
     if (!audio_in) return;
 
-    const float gain = inst->monitor_gain;
+    const float gain = inst->monitor_gain * inst->input_capture_gain;
     for (int i = 0; i < total; i++) {
         const int32_t mon = (int32_t)((float)audio_in[i] * gain);
         const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;
