@@ -1263,6 +1263,14 @@ function anyLooperActive() {
     return false;
 }
 
+function firstActiveLooperIndex() {
+    for (let i = 0; i < s.midiLoopers.length; i++) {
+        const l = s.midiLoopers[i];
+        if (l && looperIsActiveState(l.state)) return i;
+    }
+    return -1;
+}
+
 function copyLooperTo(srcIndex, dstIndex) {
     const src = looperByIndex(srcIndex);
     const dst = looperByIndex(dstIndex);
@@ -2031,6 +2039,13 @@ function stepNoteFor(sec, bank) {
     return 24 + clampInt(bank, 0, BANK_COUNT - 1, 0);
 }
 
+function focusSectionPreservingSlot(sec) {
+    const nextSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const slot = focusedSlotIndex();
+    const nextSlice = dspSliceFromSecSlot(nextSec, slot);
+    setSelectedSlice(nextSlice, true);
+}
+
 function effectivePadColor(sec, bankIdx, slotIdx) {
     const bank = s.sections[sec].banks[bankIdx];
     const slot = bank.slots[slotIdx];
@@ -2556,9 +2571,11 @@ function startFocusedRecording() {
     s.recordBlinkTicks = 0;
     setRecordMonitorEnabled(true);
 
+    const preferInternal = shouldPreferInternalCapture();
     sp('record_target', a.sec + ':' + a.bank + ':' + a.slot);
-    sp('record_capture_mode', 'auto');
-    sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
+    /* Force stereo line-input path when not intentionally capturing internal/bus content. */
+    sp('record_capture_mode', preferInternal ? 'auto' : 'input');
+    sp('record_intent_internal', preferInternal ? '1' : '0');
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '0');
     const recDir = recordingsDayDir(Date.now());
@@ -3498,8 +3515,8 @@ function handleStepBankNote(note, velocity) {
     }
 
     s.stepCopySource = null;
-    if (t.sec === 0) setSectionBank(0, t.bank);
-    else setSectionBank(1, t.bank);
+    focusSectionPreservingSlot(t.sec);
+    setSectionBank(t.sec, t.bank);
     return true;
 }
 
@@ -4063,12 +4080,17 @@ function handlePadNote(note, velocity) {
     const triggerNote = padNoteFor(sec, slot);
 
     if (s.muteHeld && !s.shiftHeld) {
-        const active = currentLooper();
+        let looperIndex = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
+        if (!looperIsActiveState(looperByIndex(looperIndex).state)) {
+            const fallback = firstActiveLooperIndex();
+            if (fallback >= 0) looperIndex = fallback;
+        }
+        const active = looperByIndex(looperIndex);
         if (active && looperIsActiveState(active.state)) {
-            const erased = looperErasePadNotes(s.activeLooper, sec, bank, slot);
+            const erased = looperErasePadNotes(looperIndex, sec, bank, slot);
             if (erased) {
                 showStatus(
-                    'Looper ' + (clampInt(s.activeLooper, 0, 3, 0) + 1) +
+                    'Looper ' + (clampInt(looperIndex, 0, 3, 0) + 1) +
                     ': cleared P' + (slot + 1) + ' S' + (sec + 1) + 'B' + (bank + 1),
                     100
                 );
