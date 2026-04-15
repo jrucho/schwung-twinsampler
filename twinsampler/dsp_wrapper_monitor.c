@@ -491,13 +491,26 @@ static sampler_emu_preset_t preset_for_mode(int mode) {
 
 static void apply_sampler_emu(wrapper_instance_t *inst, int16_t *out_interleaved_lr, int frames) {
     if (!inst || !out_interleaved_lr || frames <= 0) return;
-    if (inst->sampler_emu_mode <= 0) return;
+    int mode = inst->sampler_emu_mode;
+    if (mode < 0) mode = 0;
+    if (mode > 4) mode = 4;
 
-    const sampler_emu_preset_t preset = preset_for_mode(inst->sampler_emu_mode);
+    const sampler_emu_preset_t preset = preset_for_mode(mode);
     const float wet = clip_f32(inst->sampler_emu_wet, 0.0f, 1.0f);
     if (wet <= 0.0001f) return;
 
     const int sr = (g_host && g_host->sample_rate > 1000) ? g_host->sample_rate : MOVE_SAMPLE_RATE;
+    if (mode == 0) {
+        const int neutral_bits = (inst->sampler_emu_bit_depth >= 16);
+        const int neutral_rate = (inst->sampler_emu_resample_hz >= (float)(sr - 1));
+        const float neutral_drive = fabsf(inst->sampler_emu_drive - 1.0f);
+        const int near_clean = neutral_bits && neutral_rate &&
+            neutral_drive < 0.01f &&
+            fabsf(inst->sampler_emu_noise) < 0.0005f &&
+            fabsf(inst->sampler_emu_comp) < 0.0005f;
+        if (near_clean) return;
+    }
+
     float target_rate = clip_f32(inst->sampler_emu_resample_hz, 2000.0f, 96000.0f);
     if (target_rate > preset.sample_rate) target_rate = preset.sample_rate;
     if (target_rate > (float)sr) target_rate = (float)sr;

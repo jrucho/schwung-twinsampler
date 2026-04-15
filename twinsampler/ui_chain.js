@@ -2408,7 +2408,7 @@ function adjustSamplerEmuDrive(delta) {
     s.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct + (delta > 0 ? 5 : -5), 25, 400, 100);
     s.samplerEmuCompPct = clampInt(Math.round(s.samplerEmuDrivePct * 0.35), 0, 100, s.samplerEmuCompPct);
     pushSamplerEmuParams();
-    showStatus('EMU drive ' + s.samplerEmuDrivePct + '% comp ' + s.samplerEmuCompPct + '%', 90);
+    showStatus('EMU drv ' + s.samplerEmuDrivePct + '% c' + s.samplerEmuCompPct + '%', 90);
     markSessionChanged();
     s.dirty = true;
 }
@@ -3302,7 +3302,7 @@ function knobTouchActionLabel(note) {
         if (idx === 0) return 'EMU mode';
         if (idx === 1) return 'EMU bit depth';
         if (idx === 2) return 'EMU sample rate';
-        if (idx === 3) return 'EMU drive+comp';
+        if (idx === 3) return 'EMU drv+comp';
         if (idx === 4) return 'Edit scope';
         if (idx === 5) return 'Source -> banks';
         if (idx === 6) return 'Bank color';
