@@ -10,6 +10,7 @@ const impl = (globalThis && globalThis.twinsampler_chain_ui && globalThis.twinsa
 let exitRequested = false;
 let shiftHeld = false;
 let volumeTouchHeld = false;
+let backgrounded = false;
 
 function safeInvoke(label, fn, arg) {
     if (typeof fn !== 'function') return;
@@ -27,6 +28,7 @@ globalThis.init = function() {
     exitRequested = false;
     shiftHeld = false;
     volumeTouchHeld = false;
+    backgrounded = false;
     if (typeof impl.init !== 'function') {
         try {
             console.log('TwinSampler init error: twinsampler_chain_ui missing or invalid');
@@ -36,10 +38,12 @@ globalThis.init = function() {
 };
 
 globalThis.tick = function() {
+    if (backgrounded) return;
     safeInvoke('tick', impl.tick);
 };
 
 globalThis.onMidiMessageInternal = function(data) {
+    if (backgrounded) return;
     const status = data[0] & 0xF0;
     const b1 = data[1] & 0x7F;
     const b2 = data[2] & 0x7F;
@@ -64,6 +68,7 @@ globalThis.onMidiMessageInternal = function(data) {
 };
 
 function requestBackgroundMode() {
+    backgrounded = true;
     safeInvoke('beforeExit', impl.beforeExit);
     try {
         if (typeof shadow_set_overtake_mode === 'function') {
@@ -83,6 +88,7 @@ function requestBackgroundMode() {
 }
 
 globalThis.onMidiMessageExternal = function(data) {
+    if (backgrounded) return;
     safeInvoke('onMidiMessageExternal', impl.onMidiMessageExternal, data);
 };
 
