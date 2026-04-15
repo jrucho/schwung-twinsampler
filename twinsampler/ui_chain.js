@@ -3770,7 +3770,8 @@ function handlePadNote(note, velocity) {
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         s.editScope = 'P';
-        setSelectedSlice(slice, false, false);
+        /* Use blocking cursor sync so immediate knob turns always target the newly selected chop/slot. */
+        setSelectedSlice(slice, true, false);
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
