@@ -124,6 +124,7 @@ const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
 const RECORD_INTENT_WINDOW_TICKS = 48;
+const INPUT_CLIP_WARN_THRESHOLD = 0.985;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
@@ -135,6 +136,8 @@ const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
 const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
+const SAMPLER_EMU_MODE_LABELS = ['Clean', 'Crunch 12', 'Punch 16', 'Dusty 26', 'Vintage 26'];
+const SAMPLER_EMU_RATE_OPTIONS = [8000, 11025, 16000, 22050, 26040, 32000, 40000, 44100];
 
 function createLooperState() {
     return {
@@ -348,6 +351,18 @@ const s = {
     recordMonitorOn: false,
     recordBlinkOn: false,
     recordBlinkTicks: 0,
+    recInputGainPct: 100,
+    recSchwungGainPct: 100,
+    captureInputPeak: 0.0,
+    captureBusPeak: 0.0,
+    clipWarnTicks: 0,
+    samplerEmuMode: 0,
+    samplerEmuBitDepth: 16,
+    samplerEmuRateHz: 44100,
+    samplerEmuDrivePct: 100,
+    samplerEmuNoisePct: 0,
+    samplerEmuTonePct: 80,
+    samplerEmuWetPct: 100,
     recTarget: { sec: 0, bank: 0, slot: 0 },
     lastRecordedPath: '',
 
@@ -366,6 +381,7 @@ const s = {
 
     copySource: null,
     stepCopySource: null,
+    masterKnobLast: -1,
     activePadPress: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
@@ -2257,6 +2273,90 @@ function adjustRecordMaxSeconds(delta) {
     s.dirty = true;
 }
 
+function isRecordModeActive() {
+    return s.recordArmed || s.recording || s.recordState === 'starting' || s.recordState === 'stopping';
+}
+
+function setRecordInputGainPct(nextPct) {
+    s.recInputGainPct = clampInt(nextPct, 0, 100, s.recInputGainPct);
+    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
+    showStatus('Rec line in ' + s.recInputGainPct + '%', 80);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function setRecordSchwungGainPct(nextPct) {
+    s.recSchwungGainPct = clampInt(nextPct, 0, 100, s.recSchwungGainPct);
+    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    pushSamplerEmuParams();
+    showStatus('Rec schwung ' + s.recSchwungGainPct + '%', 80);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustRecordCaptureGain(delta, target) {
+    const step = delta > 0 ? 1 : -1;
+    if (target === 'schwung') setRecordSchwungGainPct(s.recSchwungGainPct + step);
+    else setRecordInputGainPct(s.recInputGainPct + step);
+}
+
+function pushSamplerEmuParams() {
+    sp('sampler_emu_mode', String(clampInt(s.samplerEmuMode, 0, 4, 0)));
+    sp('sampler_emu_bit_depth', String(clampInt(s.samplerEmuBitDepth, 4, 16, 16)));
+    sp('sampler_emu_resample_hz', String(clampInt(s.samplerEmuRateHz, 2000, 96000, 44100)));
+    sp('sampler_emu_drive', (clampInt(s.samplerEmuDrivePct, 25, 400, 100) / 100).toFixed(3));
+    sp('sampler_emu_noise', (clampInt(s.samplerEmuNoisePct, 0, 100, 0) / 100).toFixed(3));
+    sp('sampler_emu_tone', (clampInt(s.samplerEmuTonePct, 2, 100, 80) / 100).toFixed(3));
+    sp('sampler_emu_wet', (clampInt(s.samplerEmuWetPct, 0, 100, 100) / 100).toFixed(3));
+}
+
+function adjustSamplerEmuMode(delta) {
+    s.samplerEmuMode = clampInt(s.samplerEmuMode + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_MODE_LABELS.length - 1, 0);
+    pushSamplerEmuParams();
+    showStatus('EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode], 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustSamplerEmuBitDepth(delta) {
+    s.samplerEmuBitDepth = clampInt(s.samplerEmuBitDepth + (delta > 0 ? 1 : -1), 4, 16, 16);
+    pushSamplerEmuParams();
+    showStatus('EMU bits ' + s.samplerEmuBitDepth, 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustSamplerEmuRate(delta) {
+    const cur = clampInt(s.samplerEmuRateHz, 2000, 96000, 44100);
+    let idx = SAMPLER_EMU_RATE_OPTIONS.indexOf(cur);
+    if (idx < 0) {
+        let best = 0;
+        let bestDist = 1e9;
+        for (let i = 0; i < SAMPLER_EMU_RATE_OPTIONS.length; i++) {
+            const d = Math.abs(SAMPLER_EMU_RATE_OPTIONS[i] - cur);
+            if (d < bestDist) {
+                best = i;
+                bestDist = d;
+            }
+        }
+        idx = best;
+    }
+    idx = clampInt(idx + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_RATE_OPTIONS.length - 1, idx);
+    s.samplerEmuRateHz = SAMPLER_EMU_RATE_OPTIONS[idx];
+    pushSamplerEmuParams();
+    showStatus('EMU rate ' + s.samplerEmuRateHz + 'Hz', 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustSamplerEmuDrive(delta) {
+    s.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct + (delta > 0 ? 5 : -5), 25, 400, 100);
+    pushSamplerEmuParams();
+    showStatus('EMU drive ' + s.samplerEmuDrivePct + '%', 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
 function setRecordMonitorEnabled(enabled) {
     const on = enabled ? '1' : '0';
     s.recordMonitorOn = !!enabled;
@@ -2533,7 +2633,13 @@ function drawMain() {
     print(0, 20, shortText('F:S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' C' + chops + ' T' + trans, 21), 1);
     print(0, 30, shortText((s.sections[sec].mode === MODE_SINGLE ? 'Src: ' : 'Smp: ') + (baseName(currentEffectivePath()) || '--'), 21), 1);
 
-    if (s.knobPage === 'A') {
+    if (isRecordModeActive()) {
+        const inPct = String(s.recInputGainPct).padStart(3, ' ');
+        const swPct = String(s.recSchwungGainPct).padStart(3, ' ');
+        const inPk = Math.round(clampFloat(s.captureInputPeak, 0.0, 1.99, 0.0) * 100);
+        const busPk = Math.round(clampFloat(s.captureBusPeak, 0.0, 1.99, 0.0) * 100);
+        print(0, 40, shortText('IN:' + inPct + '% SW:' + swPct + '% P:' + inPk + '/' + busPk, 21), 1);
+    } else if (s.knobPage === 'A') {
         if (s.editScope === 'P') {
             print(0, 40, shortText('A:' + Math.round(sl.attack) + ' D:' + Math.round(sl.decay) + ' S:' + Math.round(sl.startTrim) + ' E:' + Math.round(sl.endTrim), 21), 1);
         } else {
@@ -2549,11 +2655,12 @@ function drawMain() {
     }
 
     let footer = '';
-    if (s.statusTicks > 0) footer = s.statusText;
+    if (s.clipWarnTicks > 0) footer = 'CLIP! lower IN/SW gain';
+    else if (s.statusTicks > 0) footer = s.statusText;
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'Loop' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
+    else footer = 'EMU:' + SAMPLER_EMU_MODE_LABELS[clampInt(s.samplerEmuMode, 0, 4, 0)] + ' Loop' + (s.activeLooper + 1);
     print(0, 50, shortText(footer, 21), 1);
 }
 
@@ -2610,6 +2717,15 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
+        recInputGainPct: s.recInputGainPct,
+        recSchwungGainPct: s.recSchwungGainPct,
+        samplerEmuMode: s.samplerEmuMode,
+        samplerEmuBitDepth: s.samplerEmuBitDepth,
+        samplerEmuRateHz: s.samplerEmuRateHz,
+        samplerEmuDrivePct: s.samplerEmuDrivePct,
+        samplerEmuNoisePct: s.samplerEmuNoisePct,
+        samplerEmuTonePct: s.samplerEmuTonePct,
+        samplerEmuWetPct: s.samplerEmuWetPct,
         activeLooper: clampInt(s.activeLooper, 0, 3, 0),
         loopPadMode: !!s.loopPadMode,
         midiLoopers: s.midiLoopers.map((l) => ({
@@ -2758,6 +2874,9 @@ function applyAllStateToDsp() {
     sp('global_pitch', s.globalPitch.toFixed(2));
     sp('velocity_sens', String(s.velocitySens));
     sp('record_max_seconds', String(s.recordMaxSeconds));
+    sp('input_capture_gain', (clampInt(s.recInputGainPct, 0, 100, 100) / 100).toFixed(3));
+    sp('record_mix_gain', (clampInt(s.recSchwungGainPct, 0, 100, 100) / 100).toFixed(3));
+    pushSamplerEmuParams();
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         spb('section_mode', sec + ':' + s.sections[sec].mode, 200);
@@ -2796,6 +2915,15 @@ function applyParsedSession(parsed, silent, label) {
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
+    s.recInputGainPct = clampInt(parsed.recInputGainPct, 0, 100, 100);
+    s.recSchwungGainPct = clampInt(parsed.recSchwungGainPct, 0, 100, 100);
+    s.samplerEmuMode = clampInt(parsed.samplerEmuMode, 0, 4, 0);
+    s.samplerEmuBitDepth = clampInt(parsed.samplerEmuBitDepth, 4, 16, 16);
+    s.samplerEmuRateHz = clampInt(parsed.samplerEmuRateHz, 2000, 96000, 44100);
+    s.samplerEmuDrivePct = clampInt(parsed.samplerEmuDrivePct, 25, 400, 100);
+    s.samplerEmuNoisePct = clampInt(parsed.samplerEmuNoisePct, 0, 100, 0);
+    s.samplerEmuTonePct = clampInt(parsed.samplerEmuTonePct, 2, 100, 80);
+    s.samplerEmuWetPct = clampInt(parsed.samplerEmuWetPct, 0, 100, 100);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
     s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
     s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
@@ -3103,6 +3231,10 @@ function knobTouchActionLabel(note) {
     if (s.view !== 'main') return 'No action';
 
     if (s.shiftHeld && s.volumeTouchHeld) {
+        if (idx === 0) return 'EMU mode';
+        if (idx === 1) return 'EMU bit depth';
+        if (idx === 2) return 'EMU sample rate';
+        if (idx === 3) return 'EMU drive';
         if (idx === 4) return 'Edit scope';
         if (idx === 5) return 'Source -> banks';
         if (idx === 6) return 'Bank color';
@@ -3725,7 +3857,8 @@ function handlePadNote(note, velocity) {
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         s.editScope = 'P';
-        setSelectedSlice(slice, false, false);
+        /* Use blocking cursor sync so immediate knob turns always target the newly selected chop/slot. */
+        setSelectedSlice(slice, true, false);
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
@@ -3844,6 +3977,39 @@ function handleMainKnob(delta) {
     adjustRecordMaxSeconds(delta);
 }
 
+function computeAbsoluteKnobDelta(prevValue, nextValue) {
+    const prev = clampInt(prevValue, -1, 127, -1);
+    const next = clampInt(nextValue, 0, 127, 0);
+    if (prev < 0 || next === prev) return 0;
+    return next > prev ? 1 : -1;
+}
+
+function decodeMasterKnobDelta(value) {
+    const v = clampInt(value, 0, 127, 0);
+    const prev = s.masterKnobLast;
+    s.masterKnobLast = v;
+    return computeAbsoluteKnobDelta(prev, v);
+}
+
+function runInternalSelfChecks() {
+    const checks = [
+        { prev: -1, next: 80, want: 0 },
+        { prev: 80, next: 90, want: 1 },
+        { prev: 90, next: 10, want: -1 },
+        { prev: 40, next: 40, want: 0 }
+    ];
+    for (let i = 0; i < checks.length; i++) {
+        const c = checks[i];
+        const got = computeAbsoluteKnobDelta(c.prev, c.next);
+        if (got !== c.want) {
+            showStatus('Self-check fail M' + i, 60);
+            try { console.log('TwinSampler self-check failed at ' + i + ' got=' + got + ' want=' + c.want); } catch (e) {}
+            return false;
+        }
+    }
+    return true;
+}
+
 function handleParamKnob(cc, delta) {
     if (delta === 0) return;
 
@@ -3860,6 +4026,22 @@ function handleParamKnob(cc, delta) {
     if (!inA && !inB) return;
 
     if (s.shiftHeld && s.volumeTouchHeld) {
+        if (cc === MoveKnob1) {
+            adjustSamplerEmuMode(delta);
+            return;
+        }
+        if (cc === MoveKnob2) {
+            adjustSamplerEmuBitDepth(delta);
+            return;
+        }
+        if (cc === MoveKnob3) {
+            adjustSamplerEmuRate(delta);
+            return;
+        }
+        if (cc === MoveKnob4) {
+            adjustSamplerEmuDrive(delta);
+            return;
+        }
         if (cc === MoveKnob5) {
             toggleEditScope();
             return;
@@ -3957,7 +4139,30 @@ function syncFromDsp() {
     pollRecordingState();
     tickRecordStateMachine();
     tickRecordButtonBlink();
+    syncCaptureMeters();
     syncFocusedSlotPlaybackCompat();
+}
+
+function syncCaptureMeters() {
+    const inputPeak = clampFloat(gp('capture_input_peak', s.captureInputPeak), 0.0, 2.0, s.captureInputPeak);
+    const busPeak = clampFloat(gp('capture_bus_peak', s.captureBusPeak), 0.0, 2.0, s.captureBusPeak);
+    const changed = Math.abs(inputPeak - s.captureInputPeak) > 0.0005 || Math.abs(busPeak - s.captureBusPeak) > 0.0005;
+    s.captureInputPeak = inputPeak;
+    s.captureBusPeak = busPeak;
+
+    const clipped = inputPeak >= INPUT_CLIP_WARN_THRESHOLD || busPeak >= INPUT_CLIP_WARN_THRESHOLD;
+    if (clipped) {
+        s.clipWarnTicks = 30;
+        s.dirty = true;
+        return;
+    }
+
+    if (s.clipWarnTicks > 0) {
+        s.clipWarnTicks--;
+        if (s.clipWarnTicks === 0) s.dirty = true;
+    }
+
+    if (changed && isRecordModeActive()) s.dirty = true;
 }
 
 function initFromDspDefaults() {
@@ -3998,8 +4203,24 @@ function initFromDspDefaults() {
     s.recordBlinkTicks = 0;
     updateRecordButtonLed();
 
+    s.recInputGainPct = clampInt(Math.round(clampFloat(gp('input_capture_gain', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+    s.recSchwungGainPct = clampInt(Math.round(clampFloat(gp('record_mix_gain', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+    s.captureInputPeak = clampFloat(gp('capture_input_peak', 0.0), 0.0, 2.0, 0.0);
+    s.captureBusPeak = clampFloat(gp('capture_bus_peak', 0.0), 0.0, 2.0, 0.0);
+    s.clipWarnTicks = 0;
+    s.samplerEmuMode = clampInt(gp('sampler_emu_mode', 0), 0, 4, 0);
+    s.samplerEmuBitDepth = clampInt(gp('sampler_emu_bit_depth', 16), 4, 16, 16);
+    s.samplerEmuRateHz = clampInt(gp('sampler_emu_resample_hz', 44100), 2000, 96000, 44100);
+    s.samplerEmuDrivePct = clampInt(Math.round(clampFloat(gp('sampler_emu_drive', 1.0), 0.25, 4.0, 1.0) * 100), 25, 400, 100);
+    s.samplerEmuNoisePct = clampInt(Math.round(clampFloat(gp('sampler_emu_noise', 0.0), 0.0, 1.0, 0.0) * 100), 0, 100, 0);
+    s.samplerEmuTonePct = clampInt(Math.round(clampFloat(gp('sampler_emu_tone', 0.8), 0.02, 1.0, 0.8) * 100), 2, 100, 80);
+    s.samplerEmuWetPct = clampInt(Math.round(clampFloat(gp('sampler_emu_wet', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+
     sp('keyboard_section', String(s.focusedSection));
     sp('record_max_seconds', String(s.recordMaxSeconds));
+    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
+    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    pushSamplerEmuParams();
 
     ensureEditCursor();
     markLedsDirty();
@@ -4090,10 +4311,13 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMaster) {
-            const delta = decodeDelta(val);
-            if (delta !== 0 && s.shiftHeld) {
-                adjustGlobalGain(delta);
+            const delta = decodeMasterKnobDelta(val);
+            if (delta === 0) return;
+            if (!isRecordModeActive()) {
+                showStatus('Master disabled (use K7)', 40);
+                return;
             }
+            adjustRecordCaptureGain(delta, s.shiftHeld ? 'schwung' : 'line');
             return;
         }
 
@@ -4182,7 +4406,9 @@ function init() {
     s.ledQueue = [];
     s.ledsDirty = true;
     s.activePadPress = {};
+    s.masterKnobLast = -1;
     s.padPressFlash = {};
+    runInternalSelfChecks();
     s.sections = [
         makeSection(MODE_SINGLE),
         makeSection(MODE_PER_SLOT)

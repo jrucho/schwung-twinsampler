@@ -154,6 +154,10 @@ Default scope is pad (`P`).
 
 ### Knobs: Shift + Vol Touch Layer
 
+- `Shift + Vol touch + K1`: color mode (`Clean`, `Crunch 12`, `Punch 16`, `Dusty 26`, `Vintage 26`)
+- `Shift + Vol touch + K2`: color bit depth
+- `Shift + Vol touch + K3`: color sample rate
+- `Shift + Vol touch + K4`: color drive
 - `Shift + Vol touch + K5`: toggle edit scope (`Pad` / `Bank`)
 - `Shift + Vol touch + K6`: propagate focused source bank to all banks in focused section
 - `Shift + Vol touch + K7`: bank color
@@ -188,7 +192,46 @@ Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locke
 - `Undo`: if looper has a recorded overdub layer, undo that looper layer first; otherwise undo latest edit state.
 - `Shift + Undo`: redo latest undone state.
 
-- `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
+- `Master knob` in REC mode: adjusts line input capture gain.
+- `Shift + Master knob` in REC mode: adjusts bus/schwung capture gain.
+
+## Sampler Color Engine (Release 0.1)
+
+TwinSampler includes a real DSP coloration stage (not just UI cosmetics).  
+It is designed for classic hardware-style character while keeping controls simple and musical.
+
+### Modes (renamed for release)
+
+- `Clean`: bypass coloration
+- `Crunch 12`: gritty 12-bit flavor with moderate high-end rolloff
+- `Punch 16`: cleaner 16-bit punch with subtle saturation/noise
+- `Dusty 26`: darker, noisier, low-rate texture
+- `Vintage 26`: punchy low-bandwidth crunch with tighter top end
+
+### How the color processing works
+
+The DSP color stage runs post-core render and applies:
+
+1. **Resampling behavior**  
+   Sample-and-hold style downsampling to emulate reduced playback-rate character.
+2. **Tone filtering**  
+   One-pole low-pass style smoothing to shape top-end response.
+3. **Noise floor**  
+   Controlled low-level noise injection for texture.
+4. **Saturation/drive**  
+   Nonlinear soft clipping for transient rounding and harmonic emphasis.
+5. **Bit-depth quantization**  
+   Bit reduction/quantization for grain and alias texture.
+6. **Wet/dry blend**  
+   Final mix control between clean and colored signals.
+
+### Control intent
+
+- K1-K4 under `Shift + Vol touch` are the fast “hardware color” macros for performance.
+- The mode selects a tuned preset profile.
+- Bit depth / sample rate / drive let you push or tame the preset in real time.
+
+This combination is intended to be release-ready for `0.1`: musical defaults, performable controls, and audible DSP behavior.
 
 ### Sample Browser Manual
 
