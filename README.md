@@ -35,6 +35,11 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
   - double press to stop
   - double press and hold to erase
 - `Shift + looper pad` in loop-pad mode: toggle quantize ON/OFF for that looper's recorded note events (1/16 grid).
+- `Shift + looper pad` with another target looper: copy active looper MIDI to that looper.
+- While any looper is playing/recording/overdub, destructive erase is locked except:
+  - Hold `Delete` + tap looper pad to clear that looper's MIDI notes for re-recording.
+- While the selected looper is playing/recording/overdub:
+  - Hold `Mute` + tap any sampler pad to erase only that pad's recorded MIDI notes from the selected looper.
 
 ### Main screen legend
 
@@ -95,6 +100,9 @@ Required files:
 - In browser: selects/enters item.
 - With `Shift` in browser: close browser.
 - With `Shift+Vol touch`: opens session load browser.
+- `Back`:
+- Back alone: sends TwinSampler to background (keeps audio running).
+- `Shift + Vol touch + Back`: exits module cleanly.
 
 - `Jog turn`:
 - In main view: record max length (seconds).
@@ -154,6 +162,12 @@ Default scope is pad (`P`).
 
 ### Knobs: Shift + Vol Touch Layer
 
+- `Shift + Vol touch + K1`: color mode (`Clean`, `Crunch 12`, `Punch 16`, `Dusty 26`, `Vintage 26`)
+- `Shift + Vol touch + K2`: color bit depth
+- `Shift + Vol touch + K3`: color sample rate
+- `Shift + Vol touch + K4`: color drive+compression (one-knob macro)
+- Touching `K1..K4` while holding `Shift + Vol touch` shows current value immediately (no turn needed).
+- Turning `K1` (mode) now loads mode defaults right away (bit depth/rate/drive/noise/tone/comp).
 - `Shift + Vol touch + K5`: toggle edit scope (`Pad` / `Bank`)
 - `Shift + Vol touch + K6`: propagate focused source bank to all banks in focused section
 - `Shift + Vol touch + K7`: bank color
@@ -188,7 +202,46 @@ Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locke
 - `Undo`: if looper has a recorded overdub layer, undo that looper layer first; otherwise undo latest edit state.
 - `Shift + Undo`: redo latest undone state.
 
-- `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
+- `Master knob`: no capture-gain mapping inside TwinSampler (line/bus capture are fixed to 100%).
+
+## Sampler Color Engine (Release 0.1)
+
+TwinSampler includes a real DSP coloration stage (not just UI cosmetics).  
+It is designed for classic hardware-style character while keeping controls simple and musical.
+
+### Modes (renamed for release)
+
+- `Clean`: bypass coloration
+- `Crunch 12`: gritty 12-bit flavor with moderate high-end rolloff
+- `Punch 16`: cleaner 16-bit punch with subtle saturation/noise
+- `Dusty 26`: darker, noisier, low-rate texture
+- `Vintage 26`: punchy low-bandwidth crunch with tighter top end
+
+### How the color processing works
+
+The DSP color stage runs post-core render and applies:
+
+1. **Resampling behavior**  
+   Sample-and-hold style downsampling to emulate reduced playback-rate character.
+2. **Tone filtering**  
+   One-pole low-pass style smoothing to shape top-end response.
+3. **Noise floor**  
+   Controlled low-level noise injection for texture.
+4. **Saturation/drive**  
+   Nonlinear soft clipping for transient rounding and harmonic emphasis.
+5. **Bit-depth quantization**  
+   Bit reduction/quantization for grain and alias texture.
+6. **Wet/dry blend**  
+   Final mix control between clean and colored signals.
+
+### Control intent
+
+- K1-K4 under `Shift + Vol touch` are the fast “hardware color” macros for performance.
+- The mode selects a tuned preset profile.
+- Bit depth / sample rate / drive+comp let you push or tame the preset in real time.
+- Color settings are now stored **per bank** and auto-switch when bank changes.
+
+This combination is intended to be release-ready for `0.1`: musical defaults, performable controls, and audible DSP behavior.
 
 ### Sample Browser Manual
 
@@ -318,7 +371,7 @@ On init, TwinSampler attempts:
 - TwinSampler is an `overtake` module (`component_type: overtake`).
 - Module audio passes through Schwung/Move output path.
 - Schwung master volume and master FX chain are host-level concerns.
-- TwinSampler internal loudness trim is available via `Shift + Master knob turn` (module gain).
+- TwinSampler does not map `Master knob` to internal gain.
 
 ## Files and Roles
 
