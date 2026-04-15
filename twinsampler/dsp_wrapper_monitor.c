@@ -40,6 +40,7 @@ typedef struct wrapper_instance {
     float sampler_emu_wet;
     float sampler_emu_noise;
     float sampler_emu_tone;
+    float sampler_emu_comp;
     int sampler_emu_bit_depth;
     float sampler_emu_resample_hz;
     int sampler_emu_hold_counter;
@@ -47,6 +48,7 @@ typedef struct wrapper_instance {
     float sampler_emu_hold_r;
     float sampler_emu_lp_l;
     float sampler_emu_lp_r;
+    float sampler_emu_comp_env;
 } wrapper_instance_t;
 
 static const host_api_v1_t *g_host = NULL;
@@ -214,6 +216,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->sampler_emu_wet = 1.0f;
     inst->sampler_emu_noise = 0.0f;
     inst->sampler_emu_tone = 0.8f;
+    inst->sampler_emu_comp = 0.30f;
     inst->sampler_emu_bit_depth = 16;
     inst->sampler_emu_resample_hz = 44100.0f;
     inst->sampler_emu_hold_counter = 0;
@@ -221,6 +224,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->sampler_emu_hold_r = 0.0f;
     inst->sampler_emu_lp_l = 0.0f;
     inst->sampler_emu_lp_r = 0.0f;
+    inst->sampler_emu_comp_env = 0.0f;
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
@@ -358,6 +362,10 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->sampler_emu_tone = parse_float_clamped(val, 0.02f, 1.0f, inst->sampler_emu_tone);
         return;
     }
+    if (!strcmp(key, "sampler_emu_comp")) {
+        inst->sampler_emu_comp = parse_float_clamped(val, 0.0f, 1.0f, inst->sampler_emu_comp);
+        return;
+    }
     if (!strcmp(key, "sampler_emu_bit_depth")) {
         inst->sampler_emu_bit_depth = parse_int_or_default(val, inst->sampler_emu_bit_depth);
         if (inst->sampler_emu_bit_depth < 4) inst->sampler_emu_bit_depth = 4;
@@ -433,6 +441,9 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     if (!strcmp(key, "sampler_emu_tone")) {
         return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->sampler_emu_tone);
     }
+    if (!strcmp(key, "sampler_emu_comp")) {
+        return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->sampler_emu_comp);
+    }
     if (!strcmp(key, "sampler_emu_bit_depth")) {
         return snprintf(buf, (size_t)buf_len, "%d", inst->sampler_emu_bit_depth);
     }
@@ -501,12 +512,18 @@ static void apply_sampler_emu(wrapper_instance_t *inst, int16_t *out_interleaved
     const float drive = clip_f32(inst->sampler_emu_drive * preset.drive, 0.25f, 8.0f);
     const float noise_amp = clip_f32(inst->sampler_emu_noise + preset.noise, 0.0f, 1.0f) * (1.0f / 32768.0f) * 18.0f;
     const float tone = clip_f32(inst->sampler_emu_tone * preset.tone, 0.02f, 1.0f);
+    const float comp = clip_f32(inst->sampler_emu_comp, 0.0f, 1.0f);
+    const float comp_threshold = 0.42f - (comp * 0.18f);
+    const float comp_ratio = 1.0f + (comp * 9.0f);
+    const float comp_attack = 0.25f + (comp * 0.35f);
+    const float comp_release = 0.025f + (comp * 0.035f);
 
     int hold_counter = inst->sampler_emu_hold_counter;
     float hold_l = inst->sampler_emu_hold_l;
     float hold_r = inst->sampler_emu_hold_r;
     float lp_l = inst->sampler_emu_lp_l;
     float lp_r = inst->sampler_emu_lp_r;
+    float comp_env = inst->sampler_emu_comp_env;
 
     for (int f = 0; f < frames; f++) {
         const int idx = f * 2;
@@ -532,8 +549,21 @@ static void apply_sampler_emu(wrapper_instance_t *inst, int16_t *out_interleaved
         const float crushed_l = roundf(sat_l * q_levels) / q_levels;
         const float crushed_r = roundf(sat_r * q_levels) / q_levels;
 
-        const float mixed_l = dry_l * (1.0f - wet) + crushed_l * wet;
-        const float mixed_r = dry_r * (1.0f - wet) + crushed_r * wet;
+        float mixed_l = dry_l * (1.0f - wet) + crushed_l * wet;
+        float mixed_r = dry_r * (1.0f - wet) + crushed_r * wet;
+
+        if (comp > 0.0001f) {
+            const float level = fmaxf(fabsf(mixed_l), fabsf(mixed_r));
+            if (level > comp_env) comp_env += (level - comp_env) * comp_attack;
+            else comp_env += (level - comp_env) * comp_release;
+
+            if (comp_env > comp_threshold) {
+                const float over = comp_env / fmaxf(comp_threshold, 1.0e-6f);
+                const float gain = powf(over, -(1.0f - (1.0f / comp_ratio)));
+                mixed_l *= gain;
+                mixed_r *= gain;
+            }
+        }
 
         const int32_t out_l = (int32_t)lrintf(clip_f32(mixed_l, -1.0f, 0.9999695f) * 32767.0f);
         const int32_t out_r = (int32_t)lrintf(clip_f32(mixed_r, -1.0f, 0.9999695f) * 32767.0f);
@@ -546,6 +576,7 @@ static void apply_sampler_emu(wrapper_instance_t *inst, int16_t *out_interleaved
     inst->sampler_emu_hold_r = hold_r;
     inst->sampler_emu_lp_l = lp_l;
     inst->sampler_emu_lp_r = lp_r;
+    inst->sampler_emu_comp_env = comp_env;
 }
 
 static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {

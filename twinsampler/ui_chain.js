@@ -294,6 +294,14 @@ function makeBank(bankIdx = 0) {
         chopCount: SOURCE_CHOP_COUNT,
         slicePage: 0,
         transientSensitivity: 50,
+        samplerEmuMode: 0,
+        samplerEmuBitDepth: 16,
+        samplerEmuRateHz: 44100,
+        samplerEmuDrivePct: 100,
+        samplerEmuNoisePct: 0,
+        samplerEmuTonePct: 80,
+        samplerEmuWetPct: 100,
+        samplerEmuCompPct: 30,
         sliceStarts: [],
         slots
     };
@@ -306,6 +314,14 @@ function cloneBank(b) {
         chopCount: normalizeChopCount(b.chopCount),
         slicePage: clampInt(b.slicePage, 0, 7, 0),
         transientSensitivity: normalizeTransientSensitivity(b.transientSensitivity),
+        samplerEmuMode: clampInt(b.samplerEmuMode, 0, 4, 0),
+        samplerEmuBitDepth: clampInt(b.samplerEmuBitDepth, 4, 16, 16),
+        samplerEmuRateHz: clampInt(b.samplerEmuRateHz, 2000, 96000, 44100),
+        samplerEmuDrivePct: clampInt(b.samplerEmuDrivePct, 25, 400, 100),
+        samplerEmuNoisePct: clampInt(b.samplerEmuNoisePct, 0, 100, 0),
+        samplerEmuTonePct: clampInt(b.samplerEmuTonePct, 2, 100, 80),
+        samplerEmuWetPct: clampInt(b.samplerEmuWetPct, 0, 100, 100),
+        samplerEmuCompPct: clampInt(b.samplerEmuCompPct, 0, 100, 30),
         sliceStarts: Array.isArray(b.sliceStarts) ? b.sliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
         slots: b.slots.map((s) => cloneSlot(s))
     };
@@ -363,6 +379,7 @@ const s = {
     samplerEmuNoisePct: 0,
     samplerEmuTonePct: 80,
     samplerEmuWetPct: 100,
+    samplerEmuCompPct: 30,
     recTarget: { sec: 0, bank: 0, slot: 0 },
     lastRecordedPath: '',
 
@@ -1131,6 +1148,8 @@ function setSelectedSlice(sliceIdx, blocking = false, skipPlaybackCompat = false
     const slice = LEFT_GRID_ONLY ? slotFromSlice(rawSlice) : rawSlice;
     s.selectedSlice = slice;
     s.focusedSection = sectionFromSlice(slice);
+    loadSamplerEmuFromBank(s.focusedSection);
+    pushSamplerEmuParams();
     const dspSlice = dspSliceFromCustomSlice(slice);
 
     const send = (blocking || !REALTIME_NONBLOCKING) ? spb : sp;
@@ -1536,6 +1555,10 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
+    if (sec === s.focusedSection) {
+        loadSamplerEmuFromBank(sec);
+        pushSamplerEmuParams();
+    }
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
@@ -2300,7 +2323,38 @@ function adjustRecordCaptureGain(delta, target) {
     else setRecordInputGainPct(s.recInputGainPct + step);
 }
 
+function focusedEmuBank(sec = s.focusedSection) {
+    const safeSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const bank = focusedBankIndex(safeSec);
+    return s.sections[safeSec].banks[bank];
+}
+
+function loadSamplerEmuFromBank(sec = s.focusedSection) {
+    const b = focusedEmuBank(sec);
+    s.samplerEmuMode = clampInt(b.samplerEmuMode, 0, 4, 0);
+    s.samplerEmuBitDepth = clampInt(b.samplerEmuBitDepth, 4, 16, 16);
+    s.samplerEmuRateHz = clampInt(b.samplerEmuRateHz, 2000, 96000, 44100);
+    s.samplerEmuDrivePct = clampInt(b.samplerEmuDrivePct, 25, 400, 100);
+    s.samplerEmuNoisePct = clampInt(b.samplerEmuNoisePct, 0, 100, 0);
+    s.samplerEmuTonePct = clampInt(b.samplerEmuTonePct, 2, 100, 80);
+    s.samplerEmuWetPct = clampInt(b.samplerEmuWetPct, 0, 100, 100);
+    s.samplerEmuCompPct = clampInt(b.samplerEmuCompPct, 0, 100, 30);
+}
+
+function storeSamplerEmuToBank(sec = s.focusedSection) {
+    const b = focusedEmuBank(sec);
+    b.samplerEmuMode = clampInt(s.samplerEmuMode, 0, 4, 0);
+    b.samplerEmuBitDepth = clampInt(s.samplerEmuBitDepth, 4, 16, 16);
+    b.samplerEmuRateHz = clampInt(s.samplerEmuRateHz, 2000, 96000, 44100);
+    b.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct, 25, 400, 100);
+    b.samplerEmuNoisePct = clampInt(s.samplerEmuNoisePct, 0, 100, 0);
+    b.samplerEmuTonePct = clampInt(s.samplerEmuTonePct, 2, 100, 80);
+    b.samplerEmuWetPct = clampInt(s.samplerEmuWetPct, 0, 100, 100);
+    b.samplerEmuCompPct = clampInt(s.samplerEmuCompPct, 0, 100, 30);
+}
+
 function pushSamplerEmuParams() {
+    storeSamplerEmuToBank();
     sp('sampler_emu_mode', String(clampInt(s.samplerEmuMode, 0, 4, 0)));
     sp('sampler_emu_bit_depth', String(clampInt(s.samplerEmuBitDepth, 4, 16, 16)));
     sp('sampler_emu_resample_hz', String(clampInt(s.samplerEmuRateHz, 2000, 96000, 44100)));
@@ -2308,6 +2362,7 @@ function pushSamplerEmuParams() {
     sp('sampler_emu_noise', (clampInt(s.samplerEmuNoisePct, 0, 100, 0) / 100).toFixed(3));
     sp('sampler_emu_tone', (clampInt(s.samplerEmuTonePct, 2, 100, 80) / 100).toFixed(3));
     sp('sampler_emu_wet', (clampInt(s.samplerEmuWetPct, 0, 100, 100) / 100).toFixed(3));
+    sp('sampler_emu_comp', (clampInt(s.samplerEmuCompPct, 0, 100, 30) / 100).toFixed(3));
 }
 
 function adjustSamplerEmuMode(delta) {
@@ -2351,8 +2406,9 @@ function adjustSamplerEmuRate(delta) {
 
 function adjustSamplerEmuDrive(delta) {
     s.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct + (delta > 0 ? 5 : -5), 25, 400, 100);
+    s.samplerEmuCompPct = clampInt(Math.round(s.samplerEmuDrivePct * 0.35), 0, 100, s.samplerEmuCompPct);
     pushSamplerEmuParams();
-    showStatus('EMU drive ' + s.samplerEmuDrivePct + '%', 90);
+    showStatus('EMU drive ' + s.samplerEmuDrivePct + '% comp ' + s.samplerEmuCompPct + '%', 90);
     markSessionChanged();
     s.dirty = true;
 }
@@ -2726,6 +2782,7 @@ function serializeSession() {
         samplerEmuNoisePct: s.samplerEmuNoisePct,
         samplerEmuTonePct: s.samplerEmuTonePct,
         samplerEmuWetPct: s.samplerEmuWetPct,
+        samplerEmuCompPct: s.samplerEmuCompPct,
         activeLooper: clampInt(s.activeLooper, 0, 3, 0),
         loopPadMode: !!s.loopPadMode,
         midiLoopers: s.midiLoopers.map((l) => ({
@@ -2793,6 +2850,14 @@ function sanitizeBank(raw, bankIdx) {
         chopCount,
         slicePage: clampInt(raw.slicePage, 0, maxPages - 1, 0),
         transientSensitivity: normalizeTransientSensitivity(raw.transientSensitivity),
+        samplerEmuMode: clampInt(raw.samplerEmuMode, 0, 4, base.samplerEmuMode),
+        samplerEmuBitDepth: clampInt(raw.samplerEmuBitDepth, 4, 16, base.samplerEmuBitDepth),
+        samplerEmuRateHz: clampInt(raw.samplerEmuRateHz, 2000, 96000, base.samplerEmuRateHz),
+        samplerEmuDrivePct: clampInt(raw.samplerEmuDrivePct, 25, 400, base.samplerEmuDrivePct),
+        samplerEmuNoisePct: clampInt(raw.samplerEmuNoisePct, 0, 100, base.samplerEmuNoisePct),
+        samplerEmuTonePct: clampInt(raw.samplerEmuTonePct, 2, 100, base.samplerEmuTonePct),
+        samplerEmuWetPct: clampInt(raw.samplerEmuWetPct, 0, 100, base.samplerEmuWetPct),
+        samplerEmuCompPct: clampInt(raw.samplerEmuCompPct, 0, 100, base.samplerEmuCompPct),
         sliceStarts: parseSliceStartsString(Array.isArray(raw.sliceStarts) ? raw.sliceStarts.join(',') : raw.sliceStarts, chopCount),
         slots: []
     };
@@ -2924,6 +2989,7 @@ function applyParsedSession(parsed, silent, label) {
     s.samplerEmuNoisePct = clampInt(parsed.samplerEmuNoisePct, 0, 100, 0);
     s.samplerEmuTonePct = clampInt(parsed.samplerEmuTonePct, 2, 100, 80);
     s.samplerEmuWetPct = clampInt(parsed.samplerEmuWetPct, 0, 100, 100);
+    s.samplerEmuCompPct = clampInt(parsed.samplerEmuCompPct, 0, 100, 30);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
     s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
     s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
@@ -2934,6 +3000,7 @@ function applyParsedSession(parsed, silent, label) {
         sanitizeSection(rawSections[0], MODE_SINGLE),
         sanitizeSection(rawSections[1], MODE_PER_SLOT)
     ];
+    loadSamplerEmuFromBank(s.focusedSection);
 
     invalidatePlaybackCompat();
     applyAllStateToDsp();
@@ -3234,7 +3301,7 @@ function knobTouchActionLabel(note) {
         if (idx === 0) return 'EMU mode';
         if (idx === 1) return 'EMU bit depth';
         if (idx === 2) return 'EMU sample rate';
-        if (idx === 3) return 'EMU drive';
+        if (idx === 3) return 'EMU drive+comp';
         if (idx === 4) return 'Edit scope';
         if (idx === 5) return 'Source -> banks';
         if (idx === 6) return 'Bank color';
@@ -4215,6 +4282,7 @@ function initFromDspDefaults() {
     s.samplerEmuNoisePct = clampInt(Math.round(clampFloat(gp('sampler_emu_noise', 0.0), 0.0, 1.0, 0.0) * 100), 0, 100, 0);
     s.samplerEmuTonePct = clampInt(Math.round(clampFloat(gp('sampler_emu_tone', 0.8), 0.02, 1.0, 0.8) * 100), 2, 100, 80);
     s.samplerEmuWetPct = clampInt(Math.round(clampFloat(gp('sampler_emu_wet', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+    s.samplerEmuCompPct = clampInt(Math.round(clampFloat(gp('sampler_emu_comp', 0.30), 0.0, 1.0, 0.30) * 100), 0, 100, 30);
 
     sp('keyboard_section', String(s.focusedSection));
     sp('record_max_seconds', String(s.recordMaxSeconds));

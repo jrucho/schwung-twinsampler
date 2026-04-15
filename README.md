@@ -157,7 +157,7 @@ Default scope is pad (`P`).
 - `Shift + Vol touch + K1`: color mode (`Clean`, `Crunch 12`, `Punch 16`, `Dusty 26`, `Vintage 26`)
 - `Shift + Vol touch + K2`: color bit depth
 - `Shift + Vol touch + K3`: color sample rate
-- `Shift + Vol touch + K4`: color drive
+- `Shift + Vol touch + K4`: color drive+compression (one-knob macro)
 - `Shift + Vol touch + K5`: toggle edit scope (`Pad` / `Bank`)
 - `Shift + Vol touch + K6`: propagate focused source bank to all banks in focused section
 - `Shift + Vol touch + K7`: bank color
@@ -229,7 +229,8 @@ The DSP color stage runs post-core render and applies:
 
 - K1-K4 under `Shift + Vol touch` are the fast “hardware color” macros for performance.
 - The mode selects a tuned preset profile.
-- Bit depth / sample rate / drive let you push or tame the preset in real time.
+- Bit depth / sample rate / drive+comp let you push or tame the preset in real time.
+- Color settings are now stored **per bank** and auto-switch when bank changes.
 
 This combination is intended to be release-ready for `0.1`: musical defaults, performable controls, and audible DSP behavior.
 
