@@ -38,6 +38,8 @@ It provides two independent 4x4 pad sections (left/right), each with 8 banks, wi
 - `Shift + looper pad` with another target looper: copy active looper MIDI to that looper.
 - While any looper is playing/recording/overdub, destructive erase is locked except:
   - Hold `Delete` + tap looper pad to clear that looper's MIDI notes for re-recording.
+- While the selected looper is playing/recording/overdub:
+  - Hold `Mute` + tap any sampler pad to erase only that pad's recorded MIDI notes from the selected looper.
 
 ### Main screen legend
 

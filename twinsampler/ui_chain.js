@@ -3616,6 +3616,37 @@ function looperErase() {
     updateUtilityButtonLeds();
 }
 
+function looperErasePadNotes(index, sec, bank, slot) {
+    const looperIndex = clampInt(index, 0, s.midiLoopers.length - 1, 0);
+    const l = looperByIndex(looperIndex);
+    if (!l || !Array.isArray(l.events) || !l.events.length) return false;
+
+    const safeSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const safeBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
+    const safeSlot = clampInt(slot, 0, GRID_SIZE - 1, 0);
+    const beforeCount = l.events.length;
+    l.events = l.events.filter((ev) => (
+        clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0) !== safeSec ||
+        clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0) !== safeBank ||
+        clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0) !== safeSlot
+    ));
+    if (l.events.length === beforeCount) return false;
+
+    if (!l.events.length) {
+        releaseVoicesByOwner('looper:' + String(looperIndex), looperNowMs());
+        l.state = 'empty';
+        l.loopPosMs = 0;
+        l.lastLoopPosMs = 0;
+    }
+
+    l.quantized = 0;
+    l.preQuantizeEvents = [];
+    l.layerStack = [];
+    markSessionChanged();
+    s.dirty = true;
+    return true;
+}
+
 function looperUndoLastLayer() {
     const l = currentLooper();
     if (!Array.isArray(l.layerStack) || !l.layerStack.length) {
@@ -4032,6 +4063,21 @@ function handlePadNote(note, velocity) {
     const triggerNote = padNoteFor(sec, slot);
 
     if (s.muteHeld && !s.shiftHeld) {
+        const active = currentLooper();
+        if (active && looperIsActiveState(active.state)) {
+            const erased = looperErasePadNotes(s.activeLooper, sec, bank, slot);
+            if (erased) {
+                showStatus(
+                    'Looper ' + (clampInt(s.activeLooper, 0, 3, 0) + 1) +
+                    ': cleared P' + (slot + 1) + ' S' + (sec + 1) + 'B' + (bank + 1),
+                    100
+                );
+                updateUtilityButtonLeds();
+            } else {
+                showStatus('Looper: no notes on touched pad', 90);
+            }
+            return true;
+        }
         togglePadMute(sec, bank, slot);
         return true;
     }
@@ -4465,7 +4511,10 @@ function onMidiMessageInternal(data) {
 
         if (cc === MoveMute) {
             s.muteHeld = val > 0;
-            if (s.muteHeld) showStatus('Mute hold: tap pad', 70);
+            if (s.muteHeld) {
+                if (looperIsActiveState(currentLooper().state)) showStatus('Mute hold: tap pad clears looper pad-notes', 90);
+                else showStatus('Mute hold: tap pad', 70);
+            }
             updateUtilityButtonLeds();
             return;
         }
