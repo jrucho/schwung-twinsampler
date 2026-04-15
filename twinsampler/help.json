@@ -42,8 +42,10 @@
         "clear focused bank",
         "Undo / Shift+Undo:",
         "undo / redo",
-        "Shift+Master turn:",
-        "module gain"
+        "Master knob:",
+        "only active in REC",
+        "Master=LineIn gain",
+        "Shift+Master=Bus gain"
       ]
     },
     {

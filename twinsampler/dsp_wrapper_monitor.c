@@ -17,6 +17,7 @@ typedef struct wrapper_instance {
     float monitor_gain;
     int record_mix_schwung;
     float record_mix_gain;
+    float input_capture_gain;
     int record_intent_internal;
     int record_capture_mode; /* 0=auto 1=input 2=bus 3=mix */
     int monitor_policy; /* 0=always 1=auto-dedupe */
@@ -169,6 +170,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->monitor_gain = 1.0f;
     inst->record_mix_schwung = 1;
     inst->record_mix_gain = 1.0f;
+    inst->input_capture_gain = 1.0f;
     inst->record_intent_internal = 0;
     inst->record_capture_mode = 0;
     inst->monitor_policy = 1;
@@ -276,6 +278,10 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->record_mix_gain = parse_float_clamped(val, 0.0f, 2.0f, inst->record_mix_gain);
         return;
     }
+    if (!strcmp(key, "input_capture_gain")) {
+        inst->input_capture_gain = parse_float_clamped(val, 0.0f, 1.0f, inst->input_capture_gain);
+        return;
+    }
     if (!strcmp(key, "record_intent_internal")) {
         inst->record_intent_internal = parse_bool(val);
         return;
@@ -323,6 +329,9 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     }
     if (!strcmp(key, "record_mix_gain")) {
         return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->record_mix_gain);
+    }
+    if (!strcmp(key, "input_capture_gain")) {
+        return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->input_capture_gain);
     }
     if (!strcmp(key, "record_intent_internal")) {
         return snprintf(buf, (size_t)buf_len, "%d", inst->record_intent_internal ? 1 : 0);
@@ -420,11 +429,22 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
                 }
                 memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
                 input_replaced = 1;
+            } else if (capture_source == 1) {
+                const float in_gain = inst->input_capture_gain;
+                if (in_gain < 0.9995f) {
+                    for (int i = 0; i < total; i++) {
+                        const float in_f = (float)audio_in_rw[i] * in_gain;
+                        inst->input_mix[i] = float_to_i16_dithered(in_f, &inst->dither_state);
+                    }
+                    memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
+                    input_replaced = 1;
+                }
             } else if (capture_source == 3 && inst->record_mix_schwung) {
                 const float rec_gain = inst->record_mix_gain;
+                const float in_gain = inst->input_capture_gain;
                 const float dual_mix_gain = 0.70710678f;
                 for (int i = 0; i < total; i++) {
-                    const float in_f = (float)audio_in_rw[i] * dual_mix_gain;
+                    const float in_f = ((float)audio_in_rw[i] * in_gain) * dual_mix_gain;
                     const float bus_f = ((float)schwung_bus[i] * rec_gain) * dual_mix_gain;
                     const float rec_mix = in_f + bus_f;
                     inst->input_mix[i] = float_to_i16_dithered(rec_mix, &inst->dither_state);

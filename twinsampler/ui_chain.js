@@ -124,6 +124,7 @@ const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
 const RECORD_INTENT_WINDOW_TICKS = 48;
+const INPUT_CLIP_WARN_THRESHOLD = 0.985;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
@@ -348,6 +349,11 @@ const s = {
     recordMonitorOn: false,
     recordBlinkOn: false,
     recordBlinkTicks: 0,
+    recInputGainPct: 100,
+    recSchwungGainPct: 100,
+    captureInputPeak: 0.0,
+    captureBusPeak: 0.0,
+    clipWarnTicks: 0,
     recTarget: { sec: 0, bank: 0, slot: 0 },
     lastRecordedPath: '',
 
@@ -2257,6 +2263,32 @@ function adjustRecordMaxSeconds(delta) {
     s.dirty = true;
 }
 
+function isRecordModeActive() {
+    return s.recordArmed || s.recording || s.recordState === 'starting' || s.recordState === 'stopping';
+}
+
+function setRecordInputGainPct(nextPct) {
+    s.recInputGainPct = clampInt(nextPct, 0, 100, s.recInputGainPct);
+    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
+    showStatus('Rec line in ' + s.recInputGainPct + '%', 80);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function setRecordSchwungGainPct(nextPct) {
+    s.recSchwungGainPct = clampInt(nextPct, 0, 100, s.recSchwungGainPct);
+    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    showStatus('Rec schwung ' + s.recSchwungGainPct + '%', 80);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustRecordCaptureGain(delta, target) {
+    const step = delta > 0 ? 1 : -1;
+    if (target === 'schwung') setRecordSchwungGainPct(s.recSchwungGainPct + step);
+    else setRecordInputGainPct(s.recInputGainPct + step);
+}
+
 function setRecordMonitorEnabled(enabled) {
     const on = enabled ? '1' : '0';
     s.recordMonitorOn = !!enabled;
@@ -2533,7 +2565,13 @@ function drawMain() {
     print(0, 20, shortText('F:S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' C' + chops + ' T' + trans, 21), 1);
     print(0, 30, shortText((s.sections[sec].mode === MODE_SINGLE ? 'Src: ' : 'Smp: ') + (baseName(currentEffectivePath()) || '--'), 21), 1);
 
-    if (s.knobPage === 'A') {
+    if (isRecordModeActive()) {
+        const inPct = String(s.recInputGainPct).padStart(3, ' ');
+        const swPct = String(s.recSchwungGainPct).padStart(3, ' ');
+        const inPk = Math.round(clampFloat(s.captureInputPeak, 0.0, 1.99, 0.0) * 100);
+        const busPk = Math.round(clampFloat(s.captureBusPeak, 0.0, 1.99, 0.0) * 100);
+        print(0, 40, shortText('IN:' + inPct + '% SW:' + swPct + '% P:' + inPk + '/' + busPk, 21), 1);
+    } else if (s.knobPage === 'A') {
         if (s.editScope === 'P') {
             print(0, 40, shortText('A:' + Math.round(sl.attack) + ' D:' + Math.round(sl.decay) + ' S:' + Math.round(sl.startTrim) + ' E:' + Math.round(sl.endTrim), 21), 1);
         } else {
@@ -2549,7 +2587,8 @@ function drawMain() {
     }
 
     let footer = '';
-    if (s.statusTicks > 0) footer = s.statusText;
+    if (s.clipWarnTicks > 0) footer = 'CLIP! lower IN/SW gain';
+    else if (s.statusTicks > 0) footer = s.statusText;
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
@@ -2610,6 +2649,8 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
+        recInputGainPct: s.recInputGainPct,
+        recSchwungGainPct: s.recSchwungGainPct,
         activeLooper: clampInt(s.activeLooper, 0, 3, 0),
         loopPadMode: !!s.loopPadMode,
         midiLoopers: s.midiLoopers.map((l) => ({
@@ -2758,6 +2799,8 @@ function applyAllStateToDsp() {
     sp('global_pitch', s.globalPitch.toFixed(2));
     sp('velocity_sens', String(s.velocitySens));
     sp('record_max_seconds', String(s.recordMaxSeconds));
+    sp('input_capture_gain', (clampInt(s.recInputGainPct, 0, 100, 100) / 100).toFixed(3));
+    sp('record_mix_gain', (clampInt(s.recSchwungGainPct, 0, 100, 100) / 100).toFixed(3));
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         spb('section_mode', sec + ':' + s.sections[sec].mode, 200);
@@ -2796,6 +2839,8 @@ function applyParsedSession(parsed, silent, label) {
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
+    s.recInputGainPct = clampInt(parsed.recInputGainPct, 0, 100, 100);
+    s.recSchwungGainPct = clampInt(parsed.recSchwungGainPct, 0, 100, 100);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
     s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
     s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
@@ -3957,7 +4002,30 @@ function syncFromDsp() {
     pollRecordingState();
     tickRecordStateMachine();
     tickRecordButtonBlink();
+    syncCaptureMeters();
     syncFocusedSlotPlaybackCompat();
+}
+
+function syncCaptureMeters() {
+    const inputPeak = clampFloat(gp('capture_input_peak', s.captureInputPeak), 0.0, 2.0, s.captureInputPeak);
+    const busPeak = clampFloat(gp('capture_bus_peak', s.captureBusPeak), 0.0, 2.0, s.captureBusPeak);
+    const changed = Math.abs(inputPeak - s.captureInputPeak) > 0.0005 || Math.abs(busPeak - s.captureBusPeak) > 0.0005;
+    s.captureInputPeak = inputPeak;
+    s.captureBusPeak = busPeak;
+
+    const clipped = inputPeak >= INPUT_CLIP_WARN_THRESHOLD || busPeak >= INPUT_CLIP_WARN_THRESHOLD;
+    if (clipped) {
+        s.clipWarnTicks = 30;
+        s.dirty = true;
+        return;
+    }
+
+    if (s.clipWarnTicks > 0) {
+        s.clipWarnTicks--;
+        if (s.clipWarnTicks === 0) s.dirty = true;
+    }
+
+    if (changed && isRecordModeActive()) s.dirty = true;
 }
 
 function initFromDspDefaults() {
@@ -3998,8 +4066,16 @@ function initFromDspDefaults() {
     s.recordBlinkTicks = 0;
     updateRecordButtonLed();
 
+    s.recInputGainPct = clampInt(Math.round(clampFloat(gp('input_capture_gain', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+    s.recSchwungGainPct = clampInt(Math.round(clampFloat(gp('record_mix_gain', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
+    s.captureInputPeak = clampFloat(gp('capture_input_peak', 0.0), 0.0, 2.0, 0.0);
+    s.captureBusPeak = clampFloat(gp('capture_bus_peak', 0.0), 0.0, 2.0, 0.0);
+    s.clipWarnTicks = 0;
+
     sp('keyboard_section', String(s.focusedSection));
     sp('record_max_seconds', String(s.recordMaxSeconds));
+    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
+    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
 
     ensureEditCursor();
     markLedsDirty();
@@ -4091,9 +4167,12 @@ function onMidiMessageInternal(data) {
 
         if (cc === MoveMaster) {
             const delta = decodeDelta(val);
-            if (delta !== 0 && s.shiftHeld) {
-                adjustGlobalGain(delta);
+            if (delta === 0) return;
+            if (!isRecordModeActive()) {
+                showStatus('Master disabled (use K7)', 40);
+                return;
             }
+            adjustRecordCaptureGain(delta, s.shiftHeld ? 'schwung' : 'line');
             return;
         }
 
