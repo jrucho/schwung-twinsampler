@@ -161,6 +161,8 @@ Default scope is pad (`P`).
 - `Shift + Vol touch + K2`: color bit depth
 - `Shift + Vol touch + K3`: color sample rate
 - `Shift + Vol touch + K4`: color drive+compression (one-knob macro)
+- Touching `K1..K4` while holding `Shift + Vol touch` shows current value immediately (no turn needed).
+- Turning `K1` (mode) now loads mode defaults right away (bit depth/rate/drive/noise/tone/comp).
 - `Shift + Vol touch + K5`: toggle edit scope (`Pad` / `Bank`)
 - `Shift + Vol touch + K6`: propagate focused source bank to all banks in focused section
 - `Shift + Vol touch + K7`: bank color

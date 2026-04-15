@@ -139,6 +139,15 @@ const TRIM_STEP_COARSE = 5.0;
 const SAMPLER_EMU_MODE_LABELS = ['Clean', 'Crunch 12', 'Punch 16', 'Dusty 26', 'Vintage 26'];
 const SAMPLER_EMU_RATE_OPTIONS = [8000, 11025, 16000, 22050, 26040, 32000, 40000, 44100];
 
+function samplerEmuModeDefaults(mode) {
+    const m = clampInt(mode, 0, 4, 0);
+    if (m === 1) return { bits: 12, rate: 40000, drive: 120, noise: 2, tone: 42, comp: 35 };
+    if (m === 2) return { bits: 16, rate: 44100, drive: 110, noise: 1, tone: 62, comp: 25 };
+    if (m === 3) return { bits: 12, rate: 26000, drive: 155, noise: 3, tone: 28, comp: 48 };
+    if (m === 4) return { bits: 12, rate: 26040, drive: 130, noise: 2, tone: 22, comp: 40 };
+    return { bits: 16, rate: 44100, drive: 100, noise: 0, tone: 80, comp: 0 };
+}
+
 function createLooperState() {
     return {
         state: 'empty', /* empty|recording|playing|overdub|stopped */
@@ -2367,8 +2376,15 @@ function pushSamplerEmuParams() {
 
 function adjustSamplerEmuMode(delta) {
     s.samplerEmuMode = clampInt(s.samplerEmuMode + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_MODE_LABELS.length - 1, 0);
+    const d = samplerEmuModeDefaults(s.samplerEmuMode);
+    s.samplerEmuBitDepth = d.bits;
+    s.samplerEmuRateHz = d.rate;
+    s.samplerEmuDrivePct = d.drive;
+    s.samplerEmuNoisePct = d.noise;
+    s.samplerEmuTonePct = d.tone;
+    s.samplerEmuCompPct = d.comp;
     pushSamplerEmuParams();
-    showStatus('EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode], 90);
+    showStatus('EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode] + ' ' + d.bits + 'b ' + d.rate + 'Hz', 100);
     markSessionChanged();
     s.dirty = true;
 }
@@ -2411,6 +2427,14 @@ function adjustSamplerEmuDrive(delta) {
     showStatus('EMU drv ' + s.samplerEmuDrivePct + '% c' + s.samplerEmuCompPct + '%', 90);
     markSessionChanged();
     s.dirty = true;
+}
+
+function samplerEmuTouchStatus(idx) {
+    if (idx === 0) return 'EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode];
+    if (idx === 1) return 'EMU bits ' + s.samplerEmuBitDepth;
+    if (idx === 2) return 'EMU rate ' + s.samplerEmuRateHz + 'Hz';
+    if (idx === 3) return 'EMU drv ' + s.samplerEmuDrivePct + '% c' + s.samplerEmuCompPct + '%';
+    return '';
 }
 
 function setRecordMonitorEnabled(enabled) {
@@ -3351,6 +3375,14 @@ function handleKnobTouch(note, velocity) {
         setSectionBank(s.focusedSection, note);
         s.knobPage = note < 4 ? 'A' : 'B';
         showStatus('K' + (note + 1) + ' Bank ' + (note + 1), 60);
+        return true;
+    }
+
+    if (s.shiftHeld && s.volumeTouchHeld && s.view === 'main' && note >= 0 && note <= 3) {
+        const msg = samplerEmuTouchStatus(note);
+        showStatus(msg || ('K' + (note + 1)), 80);
+        s.knobPage = note < 4 ? 'A' : 'B';
+        s.dirty = true;
         return true;
     }
 

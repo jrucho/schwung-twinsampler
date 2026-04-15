@@ -64,6 +64,7 @@ globalThis.onMidiMessageInternal = function(data) {
 };
 
 function requestBackgroundMode() {
+    safeInvoke('beforeExit', impl.beforeExit);
     try {
         if (typeof shadow_set_overtake_mode === 'function') {
             shadow_set_overtake_mode(0);
@@ -72,6 +73,11 @@ function requestBackgroundMode() {
     try {
         if (typeof shadow_request_background === 'function') {
             shadow_request_background();
+        }
+    } catch (e) {}
+    try {
+        if (typeof shadow_request_exit === 'function') {
+            shadow_request_exit();
         }
     } catch (e) {}
 }
