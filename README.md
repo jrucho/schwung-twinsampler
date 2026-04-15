@@ -95,6 +95,9 @@ Required files:
 - In browser: selects/enters item.
 - With `Shift` in browser: close browser.
 - With `Shift+Vol touch`: opens session load browser.
+- `Back`:
+- Back alone: sends TwinSampler to background (keeps audio running).
+- `Shift + Vol touch + Back`: exits module cleanly.
 
 - `Jog turn`:
 - In main view: record max length (seconds).

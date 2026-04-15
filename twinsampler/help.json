@@ -45,7 +45,11 @@
         "Master knob:",
         "only active in REC",
         "Master=LineIn gain",
-        "Shift+Master=Bus gain"
+        "Shift+Master=Bus gain",
+        "",
+        "Back=background",
+        "Shift+Vol+Back",
+        "exit module"
       ]
     },
     {

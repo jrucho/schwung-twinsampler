@@ -2716,7 +2716,8 @@ function drawMain() {
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'EMU:' + SAMPLER_EMU_MODE_LABELS[clampInt(s.samplerEmuMode, 0, 4, 0)] + ' Loop' + (s.activeLooper + 1);
+    else footer = 'EMU:B' + (focusedBankIndex(s.focusedSection) + 1) + ' ' +
+        SAMPLER_EMU_MODE_LABELS[clampInt(s.samplerEmuMode, 0, 4, 0)] + ' L' + (s.activeLooper + 1);
     print(0, 50, shortText(footer, 21), 1);
 }
 
