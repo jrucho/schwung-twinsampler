@@ -3891,12 +3891,37 @@ function handleMainKnob(delta) {
     adjustRecordMaxSeconds(delta);
 }
 
+function computeAbsoluteKnobDelta(prevValue, nextValue) {
+    const prev = clampInt(prevValue, -1, 127, -1);
+    const next = clampInt(nextValue, 0, 127, 0);
+    if (prev < 0 || next === prev) return 0;
+    return next > prev ? 1 : -1;
+}
+
 function decodeMasterKnobDelta(value) {
     const v = clampInt(value, 0, 127, 0);
-    const prev = clampInt(s.masterKnobLast, -1, 127, -1);
+    const prev = s.masterKnobLast;
     s.masterKnobLast = v;
-    if (prev < 0 || v === prev) return 0;
-    return v > prev ? 1 : -1;
+    return computeAbsoluteKnobDelta(prev, v);
+}
+
+function runInternalSelfChecks() {
+    const checks = [
+        { prev: -1, next: 80, want: 0 },
+        { prev: 80, next: 90, want: 1 },
+        { prev: 90, next: 10, want: -1 },
+        { prev: 40, next: 40, want: 0 }
+    ];
+    for (let i = 0; i < checks.length; i++) {
+        const c = checks[i];
+        const got = computeAbsoluteKnobDelta(c.prev, c.next);
+        if (got !== c.want) {
+            showStatus('Self-check fail M' + i, 60);
+            try { console.log('TwinSampler self-check failed at ' + i + ' got=' + got + ' want=' + c.want); } catch (e) {}
+            return false;
+        }
+    }
+    return true;
 }
 
 function handleParamKnob(cc, delta) {
@@ -4273,6 +4298,7 @@ function init() {
     s.activePadPress = {};
     s.masterKnobLast = -1;
     s.padPressFlash = {};
+    runInternalSelfChecks();
     s.sections = [
         makeSection(MODE_SINGLE),
         makeSection(MODE_PER_SLOT)

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "plugin_api_v1.h"
 
@@ -72,8 +73,9 @@ static int16_t float_to_i16_dithered(float x, uint32_t *state) {
 static int parse_bool(const char *val) {
     if (!val) return 0;
     if (!strcmp(val, "1")) return 1;
-    if (!strcmp(val, "true")) return 1;
-    if (!strcmp(val, "on")) return 1;
+    if (!strcasecmp(val, "true")) return 1;
+    if (!strcasecmp(val, "on")) return 1;
+    if (!strcasecmp(val, "yes")) return 1;
     return 0;
 }
 
