@@ -372,6 +372,7 @@ const s = {
 
     copySource: null,
     stepCopySource: null,
+    masterKnobLast: -1,
     activePadPress: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
@@ -3890,6 +3891,14 @@ function handleMainKnob(delta) {
     adjustRecordMaxSeconds(delta);
 }
 
+function decodeMasterKnobDelta(value) {
+    const v = clampInt(value, 0, 127, 0);
+    const prev = clampInt(s.masterKnobLast, -1, 127, -1);
+    s.masterKnobLast = v;
+    if (prev < 0 || v === prev) return 0;
+    return v > prev ? 1 : -1;
+}
+
 function handleParamKnob(cc, delta) {
     if (delta === 0) return;
 
@@ -4167,7 +4176,7 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMaster) {
-            const delta = decodeDelta(val);
+            const delta = decodeMasterKnobDelta(val);
             if (delta === 0) return;
             if (!isRecordModeActive()) {
                 showStatus('Master disabled (use K7)', 40);
@@ -4262,6 +4271,7 @@ function init() {
     s.ledQueue = [];
     s.ledsDirty = true;
     s.activePadPress = {};
+    s.masterKnobLast = -1;
     s.padPressFlash = {};
     s.sections = [
         makeSection(MODE_SINGLE),
