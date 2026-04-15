@@ -2327,9 +2327,12 @@ function setRecordSchwungGainPct(nextPct) {
 }
 
 function adjustRecordCaptureGain(delta, target) {
-    const step = delta > 0 ? 1 : -1;
-    if (target === 'schwung') setRecordSchwungGainPct(s.recSchwungGainPct + step);
-    else setRecordInputGainPct(s.recInputGainPct + step);
+    if (delta === 0) return;
+    const sign = delta > 0 ? 1 : -1;
+    const magnitude = clampInt(Math.abs(delta), 1, 127, 1);
+    const scaledStep = sign * clampInt(Math.max(2, Math.round(magnitude * 0.5)), 2, 12, 2);
+    if (target === 'schwung') setRecordSchwungGainPct(s.recSchwungGainPct + scaledStep);
+    else setRecordInputGainPct(s.recInputGainPct + scaledStep);
 }
 
 function focusedEmuBank(sec = s.focusedSection) {
@@ -4081,7 +4084,7 @@ function computeAbsoluteKnobDelta(prevValue, nextValue) {
     const prev = clampInt(prevValue, -1, 127, -1);
     const next = clampInt(nextValue, 0, 127, 0);
     if (prev < 0 || next === prev) return 0;
-    return next > prev ? 1 : -1;
+    return next - prev;
 }
 
 function decodeMasterKnobDelta(value) {
@@ -4094,8 +4097,8 @@ function decodeMasterKnobDelta(value) {
 function runInternalSelfChecks() {
     const checks = [
         { prev: -1, next: 80, want: 0 },
-        { prev: 80, next: 90, want: 1 },
-        { prev: 90, next: 10, want: -1 },
+        { prev: 80, next: 90, want: 10 },
+        { prev: 90, next: 10, want: -80 },
         { prev: 40, next: 40, want: 0 }
     ];
     for (let i = 0; i < checks.length; i++) {
