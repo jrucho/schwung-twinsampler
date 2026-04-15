@@ -136,6 +136,8 @@ const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
 const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
+const SAMPLER_EMU_MODE_LABELS = ['Clean', 'MPC60', 'MPC3K', 'SP303', 'SP1200'];
+const SAMPLER_EMU_RATE_OPTIONS = [8000, 11025, 16000, 22050, 26040, 32000, 40000, 44100];
 
 function createLooperState() {
     return {
@@ -354,6 +356,13 @@ const s = {
     captureInputPeak: 0.0,
     captureBusPeak: 0.0,
     clipWarnTicks: 0,
+    samplerEmuMode: 0,
+    samplerEmuBitDepth: 16,
+    samplerEmuRateHz: 44100,
+    samplerEmuDrivePct: 100,
+    samplerEmuNoisePct: 0,
+    samplerEmuTonePct: 80,
+    samplerEmuWetPct: 100,
     recTarget: { sec: 0, bank: 0, slot: 0 },
     lastRecordedPath: '',
 
@@ -2279,6 +2288,7 @@ function setRecordInputGainPct(nextPct) {
 function setRecordSchwungGainPct(nextPct) {
     s.recSchwungGainPct = clampInt(nextPct, 0, 100, s.recSchwungGainPct);
     sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    pushSamplerEmuParams();
     showStatus('Rec schwung ' + s.recSchwungGainPct + '%', 80);
     markSessionChanged();
     s.dirty = true;
@@ -2288,6 +2298,63 @@ function adjustRecordCaptureGain(delta, target) {
     const step = delta > 0 ? 1 : -1;
     if (target === 'schwung') setRecordSchwungGainPct(s.recSchwungGainPct + step);
     else setRecordInputGainPct(s.recInputGainPct + step);
+}
+
+function pushSamplerEmuParams() {
+    sp('sampler_emu_mode', String(clampInt(s.samplerEmuMode, 0, 4, 0)));
+    sp('sampler_emu_bit_depth', String(clampInt(s.samplerEmuBitDepth, 4, 16, 16)));
+    sp('sampler_emu_resample_hz', String(clampInt(s.samplerEmuRateHz, 2000, 96000, 44100)));
+    sp('sampler_emu_drive', (clampInt(s.samplerEmuDrivePct, 25, 400, 100) / 100).toFixed(3));
+    sp('sampler_emu_noise', (clampInt(s.samplerEmuNoisePct, 0, 100, 0) / 100).toFixed(3));
+    sp('sampler_emu_tone', (clampInt(s.samplerEmuTonePct, 2, 100, 80) / 100).toFixed(3));
+    sp('sampler_emu_wet', (clampInt(s.samplerEmuWetPct, 0, 100, 100) / 100).toFixed(3));
+}
+
+function adjustSamplerEmuMode(delta) {
+    s.samplerEmuMode = clampInt(s.samplerEmuMode + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_MODE_LABELS.length - 1, 0);
+    pushSamplerEmuParams();
+    showStatus('EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode], 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustSamplerEmuBitDepth(delta) {
+    s.samplerEmuBitDepth = clampInt(s.samplerEmuBitDepth + (delta > 0 ? 1 : -1), 4, 16, 16);
+    pushSamplerEmuParams();
+    showStatus('EMU bits ' + s.samplerEmuBitDepth, 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustSamplerEmuRate(delta) {
+    const cur = clampInt(s.samplerEmuRateHz, 2000, 96000, 44100);
+    let idx = SAMPLER_EMU_RATE_OPTIONS.indexOf(cur);
+    if (idx < 0) {
+        let best = 0;
+        let bestDist = 1e9;
+        for (let i = 0; i < SAMPLER_EMU_RATE_OPTIONS.length; i++) {
+            const d = Math.abs(SAMPLER_EMU_RATE_OPTIONS[i] - cur);
+            if (d < bestDist) {
+                best = i;
+                bestDist = d;
+            }
+        }
+        idx = best;
+    }
+    idx = clampInt(idx + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_RATE_OPTIONS.length - 1, idx);
+    s.samplerEmuRateHz = SAMPLER_EMU_RATE_OPTIONS[idx];
+    pushSamplerEmuParams();
+    showStatus('EMU rate ' + s.samplerEmuRateHz + 'Hz', 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustSamplerEmuDrive(delta) {
+    s.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct + (delta > 0 ? 5 : -5), 25, 400, 100);
+    pushSamplerEmuParams();
+    showStatus('EMU drive ' + s.samplerEmuDrivePct + '%', 90);
+    markSessionChanged();
+    s.dirty = true;
 }
 
 function setRecordMonitorEnabled(enabled) {
@@ -2593,7 +2660,7 @@ function drawMain() {
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'Loop' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
+    else footer = 'EMU:' + SAMPLER_EMU_MODE_LABELS[clampInt(s.samplerEmuMode, 0, 4, 0)] + ' Loop' + (s.activeLooper + 1);
     print(0, 50, shortText(footer, 21), 1);
 }
 
@@ -2652,6 +2719,13 @@ function serializeSession() {
         recordMaxSeconds: s.recordMaxSeconds,
         recInputGainPct: s.recInputGainPct,
         recSchwungGainPct: s.recSchwungGainPct,
+        samplerEmuMode: s.samplerEmuMode,
+        samplerEmuBitDepth: s.samplerEmuBitDepth,
+        samplerEmuRateHz: s.samplerEmuRateHz,
+        samplerEmuDrivePct: s.samplerEmuDrivePct,
+        samplerEmuNoisePct: s.samplerEmuNoisePct,
+        samplerEmuTonePct: s.samplerEmuTonePct,
+        samplerEmuWetPct: s.samplerEmuWetPct,
         activeLooper: clampInt(s.activeLooper, 0, 3, 0),
         loopPadMode: !!s.loopPadMode,
         midiLoopers: s.midiLoopers.map((l) => ({
@@ -2802,6 +2876,7 @@ function applyAllStateToDsp() {
     sp('record_max_seconds', String(s.recordMaxSeconds));
     sp('input_capture_gain', (clampInt(s.recInputGainPct, 0, 100, 100) / 100).toFixed(3));
     sp('record_mix_gain', (clampInt(s.recSchwungGainPct, 0, 100, 100) / 100).toFixed(3));
+    pushSamplerEmuParams();
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         spb('section_mode', sec + ':' + s.sections[sec].mode, 200);
@@ -2842,6 +2917,13 @@ function applyParsedSession(parsed, silent, label) {
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
     s.recInputGainPct = clampInt(parsed.recInputGainPct, 0, 100, 100);
     s.recSchwungGainPct = clampInt(parsed.recSchwungGainPct, 0, 100, 100);
+    s.samplerEmuMode = clampInt(parsed.samplerEmuMode, 0, 4, 0);
+    s.samplerEmuBitDepth = clampInt(parsed.samplerEmuBitDepth, 4, 16, 16);
+    s.samplerEmuRateHz = clampInt(parsed.samplerEmuRateHz, 2000, 96000, 44100);
+    s.samplerEmuDrivePct = clampInt(parsed.samplerEmuDrivePct, 25, 400, 100);
+    s.samplerEmuNoisePct = clampInt(parsed.samplerEmuNoisePct, 0, 100, 0);
+    s.samplerEmuTonePct = clampInt(parsed.samplerEmuTonePct, 2, 100, 80);
+    s.samplerEmuWetPct = clampInt(parsed.samplerEmuWetPct, 0, 100, 100);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
     s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
     s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
@@ -3149,6 +3231,10 @@ function knobTouchActionLabel(note) {
     if (s.view !== 'main') return 'No action';
 
     if (s.shiftHeld && s.volumeTouchHeld) {
+        if (idx === 0) return 'EMU mode';
+        if (idx === 1) return 'EMU bit depth';
+        if (idx === 2) return 'EMU sample rate';
+        if (idx === 3) return 'EMU drive';
         if (idx === 4) return 'Edit scope';
         if (idx === 5) return 'Source -> banks';
         if (idx === 6) return 'Bank color';
@@ -3940,6 +4026,22 @@ function handleParamKnob(cc, delta) {
     if (!inA && !inB) return;
 
     if (s.shiftHeld && s.volumeTouchHeld) {
+        if (cc === MoveKnob1) {
+            adjustSamplerEmuMode(delta);
+            return;
+        }
+        if (cc === MoveKnob2) {
+            adjustSamplerEmuBitDepth(delta);
+            return;
+        }
+        if (cc === MoveKnob3) {
+            adjustSamplerEmuRate(delta);
+            return;
+        }
+        if (cc === MoveKnob4) {
+            adjustSamplerEmuDrive(delta);
+            return;
+        }
         if (cc === MoveKnob5) {
             toggleEditScope();
             return;
@@ -4106,11 +4208,19 @@ function initFromDspDefaults() {
     s.captureInputPeak = clampFloat(gp('capture_input_peak', 0.0), 0.0, 2.0, 0.0);
     s.captureBusPeak = clampFloat(gp('capture_bus_peak', 0.0), 0.0, 2.0, 0.0);
     s.clipWarnTicks = 0;
+    s.samplerEmuMode = clampInt(gp('sampler_emu_mode', 0), 0, 4, 0);
+    s.samplerEmuBitDepth = clampInt(gp('sampler_emu_bit_depth', 16), 4, 16, 16);
+    s.samplerEmuRateHz = clampInt(gp('sampler_emu_resample_hz', 44100), 2000, 96000, 44100);
+    s.samplerEmuDrivePct = clampInt(Math.round(clampFloat(gp('sampler_emu_drive', 1.0), 0.25, 4.0, 1.0) * 100), 25, 400, 100);
+    s.samplerEmuNoisePct = clampInt(Math.round(clampFloat(gp('sampler_emu_noise', 0.0), 0.0, 1.0, 0.0) * 100), 0, 100, 0);
+    s.samplerEmuTonePct = clampInt(Math.round(clampFloat(gp('sampler_emu_tone', 0.8), 0.02, 1.0, 0.8) * 100), 2, 100, 80);
+    s.samplerEmuWetPct = clampInt(Math.round(clampFloat(gp('sampler_emu_wet', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
 
     sp('keyboard_section', String(s.focusedSection));
     sp('record_max_seconds', String(s.recordMaxSeconds));
     sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
     sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
+    pushSamplerEmuParams();
 
     ensureEditCursor();
     markLedsDirty();

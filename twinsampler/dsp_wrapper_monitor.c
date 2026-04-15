@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,6 +35,18 @@ typedef struct wrapper_instance {
     int bus_active_prev;
     int auto_hold_blocks;
     uint32_t dither_state;
+    int sampler_emu_mode; /* 0=off 1=mpc60 2=mpc3000 3=sp303 4=sp1200 */
+    float sampler_emu_drive;
+    float sampler_emu_wet;
+    float sampler_emu_noise;
+    float sampler_emu_tone;
+    int sampler_emu_bit_depth;
+    float sampler_emu_resample_hz;
+    int sampler_emu_hold_counter;
+    float sampler_emu_hold_l;
+    float sampler_emu_hold_r;
+    float sampler_emu_lp_l;
+    float sampler_emu_lp_r;
 } wrapper_instance_t;
 
 static const host_api_v1_t *g_host = NULL;
@@ -46,6 +59,17 @@ static int clip_i32_to_i16(int32_t x) {
     if (x > 32767) return 32767;
     if (x < -32768) return -32768;
     return (int)x;
+}
+
+static float clip_f32(float x, float min_v, float max_v) {
+    if (x < min_v) return min_v;
+    if (x > max_v) return max_v;
+    return x;
+}
+
+static float soft_clip(float x) {
+    const float ax = fabsf(x);
+    return x / (1.0f + ax);
 }
 
 static uint32_t xorshift32(uint32_t *state) {
@@ -185,6 +209,18 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->bus_active_prev = 0;
     inst->auto_hold_blocks = 0;
     inst->dither_state = 0x6d2b79f5u;
+    inst->sampler_emu_mode = 0;
+    inst->sampler_emu_drive = 1.0f;
+    inst->sampler_emu_wet = 1.0f;
+    inst->sampler_emu_noise = 0.0f;
+    inst->sampler_emu_tone = 0.8f;
+    inst->sampler_emu_bit_depth = 16;
+    inst->sampler_emu_resample_hz = 44100.0f;
+    inst->sampler_emu_hold_counter = 0;
+    inst->sampler_emu_hold_l = 0.0f;
+    inst->sampler_emu_hold_r = 0.0f;
+    inst->sampler_emu_lp_l = 0.0f;
+    inst->sampler_emu_lp_r = 0.0f;
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
@@ -300,6 +336,38 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->debug_capture_logs = parse_bool(val);
         return;
     }
+    if (!strcmp(key, "sampler_emu_mode")) {
+        inst->sampler_emu_mode = parse_int_or_default(val, inst->sampler_emu_mode);
+        if (inst->sampler_emu_mode < 0) inst->sampler_emu_mode = 0;
+        if (inst->sampler_emu_mode > 4) inst->sampler_emu_mode = 4;
+        return;
+    }
+    if (!strcmp(key, "sampler_emu_drive")) {
+        inst->sampler_emu_drive = parse_float_clamped(val, 0.25f, 4.0f, inst->sampler_emu_drive);
+        return;
+    }
+    if (!strcmp(key, "sampler_emu_wet")) {
+        inst->sampler_emu_wet = parse_float_clamped(val, 0.0f, 1.0f, inst->sampler_emu_wet);
+        return;
+    }
+    if (!strcmp(key, "sampler_emu_noise")) {
+        inst->sampler_emu_noise = parse_float_clamped(val, 0.0f, 1.0f, inst->sampler_emu_noise);
+        return;
+    }
+    if (!strcmp(key, "sampler_emu_tone")) {
+        inst->sampler_emu_tone = parse_float_clamped(val, 0.02f, 1.0f, inst->sampler_emu_tone);
+        return;
+    }
+    if (!strcmp(key, "sampler_emu_bit_depth")) {
+        inst->sampler_emu_bit_depth = parse_int_or_default(val, inst->sampler_emu_bit_depth);
+        if (inst->sampler_emu_bit_depth < 4) inst->sampler_emu_bit_depth = 4;
+        if (inst->sampler_emu_bit_depth > 16) inst->sampler_emu_bit_depth = 16;
+        return;
+    }
+    if (!strcmp(key, "sampler_emu_resample_hz")) {
+        inst->sampler_emu_resample_hz = parse_float_clamped(val, 2000.0f, 96000.0f, inst->sampler_emu_resample_hz);
+        return;
+    }
 
     if (!strcmp(key, "record_start")) {
         if (parse_bool(val)) inst->recording_cached = 1;
@@ -350,6 +418,27 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     if (!strcmp(key, "capture_bus_peak")) {
         return snprintf(buf, (size_t)buf_len, "%.4f", (double)inst->bus_peak_last);
     }
+    if (!strcmp(key, "sampler_emu_mode")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->sampler_emu_mode);
+    }
+    if (!strcmp(key, "sampler_emu_drive")) {
+        return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->sampler_emu_drive);
+    }
+    if (!strcmp(key, "sampler_emu_wet")) {
+        return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->sampler_emu_wet);
+    }
+    if (!strcmp(key, "sampler_emu_noise")) {
+        return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->sampler_emu_noise);
+    }
+    if (!strcmp(key, "sampler_emu_tone")) {
+        return snprintf(buf, (size_t)buf_len, "%.3f", (double)inst->sampler_emu_tone);
+    }
+    if (!strcmp(key, "sampler_emu_bit_depth")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->sampler_emu_bit_depth);
+    }
+    if (!strcmp(key, "sampler_emu_resample_hz")) {
+        return snprintf(buf, (size_t)buf_len, "%.1f", (double)inst->sampler_emu_resample_hz);
+    }
 
     if (inst->core_api_v2 && inst->core_api_v2->get_param && inst->core_instance) {
         return inst->core_api_v2->get_param(inst->core_instance, key, buf, buf_len);
@@ -365,6 +454,98 @@ static int wrapper_get_error(void *instance, char *buf, int buf_len) {
         return inst->core_api_v2->get_error(inst->core_instance, buf, buf_len);
     }
     return 0;
+}
+
+typedef struct sampler_emu_preset {
+    float drive;
+    float tone;
+    float noise;
+    int bit_depth;
+    float sample_rate;
+} sampler_emu_preset_t;
+
+static sampler_emu_preset_t preset_for_mode(int mode) {
+    sampler_emu_preset_t p = { 1.0f, 0.85f, 0.0f, 16, 44100.0f };
+    if (mode == 1) { /* MPC60-ish */
+        p.drive = 1.20f; p.tone = 0.42f; p.noise = 0.015f; p.bit_depth = 12; p.sample_rate = 40000.0f;
+    } else if (mode == 2) { /* MPC3000-ish */
+        p.drive = 1.10f; p.tone = 0.62f; p.noise = 0.009f; p.bit_depth = 16; p.sample_rate = 44100.0f;
+    } else if (mode == 3) { /* SP-303-ish */
+        p.drive = 1.55f; p.tone = 0.28f; p.noise = 0.020f; p.bit_depth = 12; p.sample_rate = 26000.0f;
+    } else if (mode == 4) { /* SP-1200-ish */
+        p.drive = 1.30f; p.tone = 0.22f; p.noise = 0.013f; p.bit_depth = 12; p.sample_rate = 26040.0f;
+    }
+    return p;
+}
+
+static void apply_sampler_emu(wrapper_instance_t *inst, int16_t *out_interleaved_lr, int frames) {
+    if (!inst || !out_interleaved_lr || frames <= 0) return;
+    if (inst->sampler_emu_mode <= 0) return;
+
+    const sampler_emu_preset_t preset = preset_for_mode(inst->sampler_emu_mode);
+    const float wet = clip_f32(inst->sampler_emu_wet, 0.0f, 1.0f);
+    if (wet <= 0.0001f) return;
+
+    const int sr = (g_host && g_host->sample_rate > 1000) ? g_host->sample_rate : MOVE_SAMPLE_RATE;
+    float target_rate = clip_f32(inst->sampler_emu_resample_hz, 2000.0f, 96000.0f);
+    if (target_rate > preset.sample_rate) target_rate = preset.sample_rate;
+    if (target_rate > (float)sr) target_rate = (float)sr;
+    int hold_samples = (int)roundf((float)sr / target_rate);
+    if (hold_samples < 1) hold_samples = 1;
+
+    int bit_depth = inst->sampler_emu_bit_depth;
+    if (bit_depth > preset.bit_depth) bit_depth = preset.bit_depth;
+    if (bit_depth < 4) bit_depth = 4;
+    const float q_levels = (float)(1 << (bit_depth - 1));
+
+    const float drive = clip_f32(inst->sampler_emu_drive * preset.drive, 0.25f, 8.0f);
+    const float noise_amp = clip_f32(inst->sampler_emu_noise + preset.noise, 0.0f, 1.0f) * (1.0f / 32768.0f) * 18.0f;
+    const float tone = clip_f32(inst->sampler_emu_tone * preset.tone, 0.02f, 1.0f);
+
+    int hold_counter = inst->sampler_emu_hold_counter;
+    float hold_l = inst->sampler_emu_hold_l;
+    float hold_r = inst->sampler_emu_hold_r;
+    float lp_l = inst->sampler_emu_lp_l;
+    float lp_r = inst->sampler_emu_lp_r;
+
+    for (int f = 0; f < frames; f++) {
+        const int idx = f * 2;
+        const float dry_l = (float)out_interleaved_lr[idx] * (1.0f / 32768.0f);
+        const float dry_r = (float)out_interleaved_lr[idx + 1] * (1.0f / 32768.0f);
+
+        if (hold_counter <= 0) {
+            hold_l = dry_l;
+            hold_r = dry_r;
+            hold_counter = hold_samples - 1;
+        } else {
+            hold_counter--;
+        }
+
+        lp_l += tone * (hold_l - lp_l);
+        lp_r += tone * (hold_r - lp_r);
+
+        const float n_l = tpdf_dither_1lsb(&inst->dither_state) * noise_amp;
+        const float n_r = tpdf_dither_1lsb(&inst->dither_state) * noise_amp;
+
+        const float sat_l = soft_clip((lp_l + n_l) * drive);
+        const float sat_r = soft_clip((lp_r + n_r) * drive);
+        const float crushed_l = roundf(sat_l * q_levels) / q_levels;
+        const float crushed_r = roundf(sat_r * q_levels) / q_levels;
+
+        const float mixed_l = dry_l * (1.0f - wet) + crushed_l * wet;
+        const float mixed_r = dry_r * (1.0f - wet) + crushed_r * wet;
+
+        const int32_t out_l = (int32_t)lrintf(clip_f32(mixed_l, -1.0f, 0.9999695f) * 32767.0f);
+        const int32_t out_r = (int32_t)lrintf(clip_f32(mixed_r, -1.0f, 0.9999695f) * 32767.0f);
+        out_interleaved_lr[idx] = (int16_t)clip_i32_to_i16(out_l);
+        out_interleaved_lr[idx + 1] = (int16_t)clip_i32_to_i16(out_r);
+    }
+
+    inst->sampler_emu_hold_counter = hold_counter;
+    inst->sampler_emu_hold_l = hold_l;
+    inst->sampler_emu_hold_r = hold_r;
+    inst->sampler_emu_lp_l = lp_l;
+    inst->sampler_emu_lp_r = lp_r;
 }
 
 static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
@@ -473,6 +654,8 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
     } else {
         memset(out_interleaved_lr, 0, (size_t)frames * 2 * sizeof(int16_t));
     }
+
+    apply_sampler_emu(inst, out_interleaved_lr, frames);
 
     if (input_replaced && audio_in_rw) {
         memcpy(audio_in_rw, inst->input_backup, (size_t)total * sizeof(int16_t));
