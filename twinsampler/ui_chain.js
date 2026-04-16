@@ -127,6 +127,7 @@ const RECORD_INTENT_WINDOW_TICKS = 48;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
+const COPY_TAP_MAX_TICKS = 18;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -367,6 +368,8 @@ const s = {
 
     copySource: null,
     copyHeld: false,
+    copyPressTick: -1,
+    copyConsumed: false,
     deleteHeld: false,
     stepCopySource: null,
     activePadPress: {},
@@ -3571,6 +3574,7 @@ function fireLooperPad(index) {
         return;
     }
     if (s.copyHeld) {
+        s.copyConsumed = true;
         copyActiveLooperTo(next);
         return;
     }
@@ -4289,8 +4293,24 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveCopy) {
-            s.copyHeld = val > 0;
-            if (val <= 0) return;
+            if (val > 0) {
+                s.copyHeld = true;
+                s.copyPressTick = s.transportTicks;
+                s.copyConsumed = false;
+            } else {
+                const heldTicks = s.copyPressTick < 0 ? 9999 : (s.transportTicks - s.copyPressTick);
+                const quickTap = heldTicks >= 0 && heldTicks <= COPY_TAP_MAX_TICKS;
+                const allowVelocityToggle = quickTap &&
+                    !s.copyConsumed &&
+                    s.view === 'main' &&
+                    !s.shiftHeld &&
+                    !s.volumeTouchHeld;
+                s.copyHeld = false;
+                s.copyPressTick = -1;
+                s.copyConsumed = false;
+                if (allowVelocityToggle) toggleVelocitySens();
+                return;
+            }
             if (s.view === 'main' && s.shiftHeld && s.volumeTouchHeld) {
                 randomizeFocusedTransientSlices();
                 return;
@@ -4306,8 +4326,6 @@ function onMidiMessageInternal(data) {
                 else setSessionNameFromSelected();
             } else if (s.shiftHeld) {
                 openSessionBrowser('save', true);
-            } else {
-                toggleVelocitySens();
             }
             return;
         }
@@ -4354,6 +4372,8 @@ function init() {
     browserOpen(SAMPLES_DIR, 'samples');
     s.copySource = null;
     s.copyHeld = false;
+    s.copyPressTick = -1;
+    s.copyConsumed = false;
     s.deleteHeld = false;
     s.sessionBrowserIntent = 'load';
     s.sessionName = sanitizeSessionName(s.sessionName);
