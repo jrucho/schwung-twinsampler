@@ -2452,6 +2452,9 @@ function pollRecordingState() {
         } else {
             showStatus('Recording stopped', 80);
         }
+        /* Defensive persistence: ensure the latest post-record state is on disk
+           even if we exit before delayed autosave ticks elapse. */
+        saveAutosaveSession(true);
     } else if (rec === 1) {
         s.recordArmed = true;
         setRecordState('recording');
