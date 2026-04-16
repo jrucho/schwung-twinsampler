@@ -124,7 +124,6 @@ const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
 const RECORD_INTENT_WINDOW_TICKS = 48;
-const INPUT_CLIP_WARN_THRESHOLD = 0.985;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
@@ -136,17 +135,6 @@ const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
 const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
-const SAMPLER_EMU_MODE_LABELS = ['Clean', 'Crunch 12', 'Punch 16', 'Dusty 26', 'Vintage 26'];
-const SAMPLER_EMU_RATE_OPTIONS = [8000, 11025, 16000, 22050, 26040, 32000, 40000, 44100];
-
-function samplerEmuModeDefaults(mode) {
-    const m = clampInt(mode, 0, 4, 0);
-    if (m === 1) return { bits: 12, rate: 40000, drive: 120, noise: 2, tone: 42, comp: 35 };
-    if (m === 2) return { bits: 16, rate: 44100, drive: 110, noise: 1, tone: 62, comp: 25 };
-    if (m === 3) return { bits: 12, rate: 26000, drive: 155, noise: 3, tone: 28, comp: 48 };
-    if (m === 4) return { bits: 12, rate: 26040, drive: 130, noise: 2, tone: 22, comp: 40 };
-    return { bits: 16, rate: 44100, drive: 100, noise: 0, tone: 80, comp: 0 };
-}
 
 function createLooperState() {
     return {
@@ -303,14 +291,6 @@ function makeBank(bankIdx = 0) {
         chopCount: SOURCE_CHOP_COUNT,
         slicePage: 0,
         transientSensitivity: 50,
-        samplerEmuMode: 0,
-        samplerEmuBitDepth: 16,
-        samplerEmuRateHz: 44100,
-        samplerEmuDrivePct: 100,
-        samplerEmuNoisePct: 0,
-        samplerEmuTonePct: 80,
-        samplerEmuWetPct: 100,
-        samplerEmuCompPct: 30,
         sliceStarts: [],
         slots
     };
@@ -323,14 +303,6 @@ function cloneBank(b) {
         chopCount: normalizeChopCount(b.chopCount),
         slicePage: clampInt(b.slicePage, 0, 7, 0),
         transientSensitivity: normalizeTransientSensitivity(b.transientSensitivity),
-        samplerEmuMode: clampInt(b.samplerEmuMode, 0, 4, 0),
-        samplerEmuBitDepth: clampInt(b.samplerEmuBitDepth, 4, 16, 16),
-        samplerEmuRateHz: clampInt(b.samplerEmuRateHz, 2000, 96000, 44100),
-        samplerEmuDrivePct: clampInt(b.samplerEmuDrivePct, 25, 400, 100),
-        samplerEmuNoisePct: clampInt(b.samplerEmuNoisePct, 0, 100, 0),
-        samplerEmuTonePct: clampInt(b.samplerEmuTonePct, 2, 100, 80),
-        samplerEmuWetPct: clampInt(b.samplerEmuWetPct, 0, 100, 100),
-        samplerEmuCompPct: clampInt(b.samplerEmuCompPct, 0, 100, 30),
         sliceStarts: Array.isArray(b.sliceStarts) ? b.sliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
         slots: b.slots.map((s) => cloneSlot(s))
     };
@@ -376,19 +348,6 @@ const s = {
     recordMonitorOn: false,
     recordBlinkOn: false,
     recordBlinkTicks: 0,
-    recInputGainPct: 100,
-    recSchwungGainPct: 100,
-    captureInputPeak: 0.0,
-    captureBusPeak: 0.0,
-    clipWarnTicks: 0,
-    samplerEmuMode: 0,
-    samplerEmuBitDepth: 16,
-    samplerEmuRateHz: 44100,
-    samplerEmuDrivePct: 100,
-    samplerEmuNoisePct: 0,
-    samplerEmuTonePct: 80,
-    samplerEmuWetPct: 100,
-    samplerEmuCompPct: 30,
     recTarget: { sec: 0, bank: 0, slot: 0 },
     lastRecordedPath: '',
 
@@ -407,8 +366,6 @@ const s = {
 
     copySource: null,
     stepCopySource: null,
-    masterKnobLast: -1,
-    deleteHeld: false,
     activePadPress: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
@@ -1158,8 +1115,6 @@ function setSelectedSlice(sliceIdx, blocking = false, skipPlaybackCompat = false
     const slice = LEFT_GRID_ONLY ? slotFromSlice(rawSlice) : rawSlice;
     s.selectedSlice = slice;
     s.focusedSection = sectionFromSlice(slice);
-    loadSamplerEmuFromBank(s.focusedSection);
-    pushSamplerEmuParams();
     const dspSlice = dspSliceFromCustomSlice(slice);
 
     const send = (blocking || !REALTIME_NONBLOCKING) ? spb : sp;
@@ -1249,54 +1204,6 @@ function currentLooper() {
 
 function looperByIndex(index) {
     return s.midiLoopers[clampInt(index, 0, s.midiLoopers.length - 1, 0)];
-}
-
-function looperIsActiveState(st) {
-    return st === 'playing' || st === 'recording' || st === 'overdub';
-}
-
-function anyLooperActive() {
-    for (let i = 0; i < s.midiLoopers.length; i++) {
-        const l = s.midiLoopers[i];
-        if (l && looperIsActiveState(l.state)) return true;
-    }
-    return false;
-}
-
-function copyLooperTo(srcIndex, dstIndex) {
-    const src = looperByIndex(srcIndex);
-    const dst = looperByIndex(dstIndex);
-    if (!src || !dst) return false;
-    if (!Array.isArray(src.events) || !src.events.length || src.loopLengthMs <= 0) {
-        showStatus('Looper: source empty', 80);
-        return false;
-    }
-
-    const safeLen = clampInt(src.loopLengthMs, 1, 600000, 1);
-    dst.events = src.events.map((ev) => ({
-        atMs: clampInt(ev && ev.atMs, 0, Math.max(0, safeLen - 1), 0),
-        type: (ev && ev.type === 'off') ? 'off' : 'on',
-        sec: clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0),
-        bank: clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0),
-        slot: clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0),
-        velocity: clampInt(ev && ev.velocity, 0, 127, 0)
-    }));
-    dst.loopLengthMs = safeLen;
-    dst.quantized = src.quantized ? 1 : 0;
-    dst.preQuantizeEvents = Array.isArray(src.preQuantizeEvents)
-        ? src.preQuantizeEvents.map((ev) => Object.assign({}, ev))
-        : [];
-    dst.layerStack = Array.isArray(src.layerStack) ? src.layerStack.slice() : [];
-    dst.state = dst.events.length ? 'stopped' : 'empty';
-    dst.playStartMs = looperNowMs();
-    dst.loopPosMs = 0;
-    dst.lastLoopPosMs = 0;
-    dst.recordStartMs = 0;
-    updateUtilityButtonLeds();
-    markSessionChanged();
-    s.dirty = true;
-    showStatus('Looper ' + (clampInt(srcIndex, 0, 3, 0) + 1) + ' -> ' + (clampInt(dstIndex, 0, 3, 0) + 1), 100);
-    return true;
 }
 
 function looperStateColor(state) {
@@ -1613,10 +1520,6 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
-    if (sec === s.focusedSection) {
-        loadSamplerEmuFromBank(sec);
-        pushSamplerEmuParams();
-    }
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
@@ -2354,135 +2257,6 @@ function adjustRecordMaxSeconds(delta) {
     s.dirty = true;
 }
 
-function isRecordModeActive() {
-    return s.recordArmed || s.recording || s.recordState === 'starting' || s.recordState === 'stopping';
-}
-
-function setRecordInputGainPct(nextPct) {
-    void nextPct;
-    s.recInputGainPct = 100;
-    sp('input_capture_gain', '1.000');
-}
-
-function setRecordSchwungGainPct(nextPct) {
-    void nextPct;
-    s.recSchwungGainPct = 100;
-    sp('record_mix_gain', '1.000');
-    pushSamplerEmuParams();
-}
-
-function adjustRecordCaptureGain(delta, target) {
-    void delta;
-    void target;
-    setRecordInputGainPct(100);
-    setRecordSchwungGainPct(100);
-}
-
-function focusedEmuBank(sec = s.focusedSection) {
-    const safeSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
-    const bank = focusedBankIndex(safeSec);
-    return s.sections[safeSec].banks[bank];
-}
-
-function loadSamplerEmuFromBank(sec = s.focusedSection) {
-    const b = focusedEmuBank(sec);
-    s.samplerEmuMode = clampInt(b.samplerEmuMode, 0, 4, 0);
-    s.samplerEmuBitDepth = clampInt(b.samplerEmuBitDepth, 4, 16, 16);
-    s.samplerEmuRateHz = clampInt(b.samplerEmuRateHz, 2000, 96000, 44100);
-    s.samplerEmuDrivePct = clampInt(b.samplerEmuDrivePct, 25, 400, 100);
-    s.samplerEmuNoisePct = clampInt(b.samplerEmuNoisePct, 0, 100, 0);
-    s.samplerEmuTonePct = clampInt(b.samplerEmuTonePct, 2, 100, 80);
-    s.samplerEmuWetPct = clampInt(b.samplerEmuWetPct, 0, 100, 100);
-    s.samplerEmuCompPct = clampInt(b.samplerEmuCompPct, 0, 100, 30);
-}
-
-function storeSamplerEmuToBank(sec = s.focusedSection) {
-    const b = focusedEmuBank(sec);
-    b.samplerEmuMode = clampInt(s.samplerEmuMode, 0, 4, 0);
-    b.samplerEmuBitDepth = clampInt(s.samplerEmuBitDepth, 4, 16, 16);
-    b.samplerEmuRateHz = clampInt(s.samplerEmuRateHz, 2000, 96000, 44100);
-    b.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct, 25, 400, 100);
-    b.samplerEmuNoisePct = clampInt(s.samplerEmuNoisePct, 0, 100, 0);
-    b.samplerEmuTonePct = clampInt(s.samplerEmuTonePct, 2, 100, 80);
-    b.samplerEmuWetPct = clampInt(s.samplerEmuWetPct, 0, 100, 100);
-    b.samplerEmuCompPct = clampInt(s.samplerEmuCompPct, 0, 100, 30);
-}
-
-function pushSamplerEmuParams() {
-    storeSamplerEmuToBank();
-    sp('sampler_emu_mode', String(clampInt(s.samplerEmuMode, 0, 4, 0)));
-    sp('sampler_emu_bit_depth', String(clampInt(s.samplerEmuBitDepth, 4, 16, 16)));
-    sp('sampler_emu_resample_hz', String(clampInt(s.samplerEmuRateHz, 2000, 96000, 44100)));
-    sp('sampler_emu_drive', (clampInt(s.samplerEmuDrivePct, 25, 400, 100) / 100).toFixed(3));
-    sp('sampler_emu_noise', (clampInt(s.samplerEmuNoisePct, 0, 100, 0) / 100).toFixed(3));
-    sp('sampler_emu_tone', (clampInt(s.samplerEmuTonePct, 2, 100, 80) / 100).toFixed(3));
-    sp('sampler_emu_wet', (clampInt(s.samplerEmuWetPct, 0, 100, 100) / 100).toFixed(3));
-    sp('sampler_emu_comp', (clampInt(s.samplerEmuCompPct, 0, 100, 30) / 100).toFixed(3));
-}
-
-function adjustSamplerEmuMode(delta) {
-    s.samplerEmuMode = clampInt(s.samplerEmuMode + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_MODE_LABELS.length - 1, 0);
-    const d = samplerEmuModeDefaults(s.samplerEmuMode);
-    s.samplerEmuBitDepth = d.bits;
-    s.samplerEmuRateHz = d.rate;
-    s.samplerEmuDrivePct = d.drive;
-    s.samplerEmuNoisePct = d.noise;
-    s.samplerEmuTonePct = d.tone;
-    s.samplerEmuCompPct = d.comp;
-    pushSamplerEmuParams();
-    showStatus('EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode] + ' ' + d.bits + 'b ' + d.rate + 'Hz', 100);
-    markSessionChanged();
-    s.dirty = true;
-}
-
-function adjustSamplerEmuBitDepth(delta) {
-    s.samplerEmuBitDepth = clampInt(s.samplerEmuBitDepth + (delta > 0 ? 1 : -1), 4, 16, 16);
-    pushSamplerEmuParams();
-    showStatus('EMU bits ' + s.samplerEmuBitDepth, 90);
-    markSessionChanged();
-    s.dirty = true;
-}
-
-function adjustSamplerEmuRate(delta) {
-    const cur = clampInt(s.samplerEmuRateHz, 2000, 96000, 44100);
-    let idx = SAMPLER_EMU_RATE_OPTIONS.indexOf(cur);
-    if (idx < 0) {
-        let best = 0;
-        let bestDist = 1e9;
-        for (let i = 0; i < SAMPLER_EMU_RATE_OPTIONS.length; i++) {
-            const d = Math.abs(SAMPLER_EMU_RATE_OPTIONS[i] - cur);
-            if (d < bestDist) {
-                best = i;
-                bestDist = d;
-            }
-        }
-        idx = best;
-    }
-    idx = clampInt(idx + (delta > 0 ? 1 : -1), 0, SAMPLER_EMU_RATE_OPTIONS.length - 1, idx);
-    s.samplerEmuRateHz = SAMPLER_EMU_RATE_OPTIONS[idx];
-    pushSamplerEmuParams();
-    showStatus('EMU rate ' + s.samplerEmuRateHz + 'Hz', 90);
-    markSessionChanged();
-    s.dirty = true;
-}
-
-function adjustSamplerEmuDrive(delta) {
-    s.samplerEmuDrivePct = clampInt(s.samplerEmuDrivePct + (delta > 0 ? 5 : -5), 25, 400, 100);
-    s.samplerEmuCompPct = clampInt(Math.round(s.samplerEmuDrivePct * 0.35), 0, 100, s.samplerEmuCompPct);
-    pushSamplerEmuParams();
-    showStatus('EMU drv ' + s.samplerEmuDrivePct + '% c' + s.samplerEmuCompPct + '%', 90);
-    markSessionChanged();
-    s.dirty = true;
-}
-
-function samplerEmuTouchStatus(idx) {
-    if (idx === 0) return 'EMU ' + SAMPLER_EMU_MODE_LABELS[s.samplerEmuMode];
-    if (idx === 1) return 'EMU bits ' + s.samplerEmuBitDepth;
-    if (idx === 2) return 'EMU rate ' + s.samplerEmuRateHz + 'Hz';
-    if (idx === 3) return 'EMU drv ' + s.samplerEmuDrivePct + '% c' + s.samplerEmuCompPct + '%';
-    return '';
-}
-
 function setRecordMonitorEnabled(enabled) {
     const on = enabled ? '1' : '0';
     s.recordMonitorOn = !!enabled;
@@ -2515,22 +2289,8 @@ function recordTargetLabel(target = s.recTarget) {
 }
 
 function captureFocusedRecordTarget() {
-    /*
-     * Deterministic record-lock snapshot:
-     * force UI->DSP cursor sync before freezing section/bank/slot target.
-     */
-    setSelectedSlice(s.selectedSlice, true, true);
-    ensureEditCursor(true);
     const a = focusedAddr();
     return { sec: a.sec, bank: a.bank, slot: a.slot };
-}
-
-function resolveRecordCaptureMode() {
-    /*
-     * Prefer direct line-in capture unless an intentional internal capture
-     * context is detected (active pad/looper activity).
-     */
-    return shouldPreferInternalCapture() ? 'auto' : 'input';
 }
 
 function armFocusedRecording() {
@@ -2570,8 +2330,8 @@ function startFocusedRecording() {
     s.recordBlinkTicks = 0;
     setRecordMonitorEnabled(true);
 
-    spb('record_target', a.sec + ':' + a.bank + ':' + a.slot, 160);
-    sp('record_capture_mode', resolveRecordCaptureMode());
+    sp('record_target', a.sec + ':' + a.bank + ':' + a.slot);
+    sp('record_capture_mode', 'auto');
     sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '0');
@@ -2773,13 +2533,7 @@ function drawMain() {
     print(0, 20, shortText('F:S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' C' + chops + ' T' + trans, 21), 1);
     print(0, 30, shortText((s.sections[sec].mode === MODE_SINGLE ? 'Src: ' : 'Smp: ') + (baseName(currentEffectivePath()) || '--'), 21), 1);
 
-    if (isRecordModeActive()) {
-        const inPct = String(s.recInputGainPct).padStart(3, ' ');
-        const swPct = String(s.recSchwungGainPct).padStart(3, ' ');
-        const inPk = Math.round(clampFloat(s.captureInputPeak, 0.0, 1.99, 0.0) * 100);
-        const busPk = Math.round(clampFloat(s.captureBusPeak, 0.0, 1.99, 0.0) * 100);
-        print(0, 40, shortText('IN:' + inPct + '% SW:' + swPct + '% P:' + inPk + '/' + busPk, 21), 1);
-    } else if (s.knobPage === 'A') {
+    if (s.knobPage === 'A') {
         if (s.editScope === 'P') {
             print(0, 40, shortText('A:' + Math.round(sl.attack) + ' D:' + Math.round(sl.decay) + ' S:' + Math.round(sl.startTrim) + ' E:' + Math.round(sl.endTrim), 21), 1);
         } else {
@@ -2795,13 +2549,11 @@ function drawMain() {
     }
 
     let footer = '';
-    if (s.clipWarnTicks > 0) footer = 'CLIP! lower IN/SW gain';
-    else if (s.statusTicks > 0) footer = s.statusText;
+    if (s.statusTicks > 0) footer = s.statusText;
     else if (s.recording || s.recordState === 'starting' || s.recordState === 'stopping') {
         footer = 'REC->' + recordTargetLabel() + ' ' + s.recordState.toUpperCase();
     } else if (s.copySource) footer = 'Copy armed: tap dest pad';
-    else footer = 'EMU:B' + (focusedBankIndex(s.focusedSection) + 1) + ' ' +
-        SAMPLER_EMU_MODE_LABELS[clampInt(s.samplerEmuMode, 0, 4, 0)] + ' L' + (s.activeLooper + 1);
+    else footer = 'Loop' + (s.activeLooper + 1) + ':' + looperTag + ' M:' + (s.muteHeld ? 'ON' : 'OFF');
     print(0, 50, shortText(footer, 21), 1);
 }
 
@@ -2858,16 +2610,6 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
-        recInputGainPct: s.recInputGainPct,
-        recSchwungGainPct: s.recSchwungGainPct,
-        samplerEmuMode: s.samplerEmuMode,
-        samplerEmuBitDepth: s.samplerEmuBitDepth,
-        samplerEmuRateHz: s.samplerEmuRateHz,
-        samplerEmuDrivePct: s.samplerEmuDrivePct,
-        samplerEmuNoisePct: s.samplerEmuNoisePct,
-        samplerEmuTonePct: s.samplerEmuTonePct,
-        samplerEmuWetPct: s.samplerEmuWetPct,
-        samplerEmuCompPct: s.samplerEmuCompPct,
         activeLooper: clampInt(s.activeLooper, 0, 3, 0),
         loopPadMode: !!s.loopPadMode,
         midiLoopers: s.midiLoopers.map((l) => ({
@@ -2935,14 +2677,6 @@ function sanitizeBank(raw, bankIdx) {
         chopCount,
         slicePage: clampInt(raw.slicePage, 0, maxPages - 1, 0),
         transientSensitivity: normalizeTransientSensitivity(raw.transientSensitivity),
-        samplerEmuMode: clampInt(raw.samplerEmuMode, 0, 4, base.samplerEmuMode),
-        samplerEmuBitDepth: clampInt(raw.samplerEmuBitDepth, 4, 16, base.samplerEmuBitDepth),
-        samplerEmuRateHz: clampInt(raw.samplerEmuRateHz, 2000, 96000, base.samplerEmuRateHz),
-        samplerEmuDrivePct: clampInt(raw.samplerEmuDrivePct, 25, 400, base.samplerEmuDrivePct),
-        samplerEmuNoisePct: clampInt(raw.samplerEmuNoisePct, 0, 100, base.samplerEmuNoisePct),
-        samplerEmuTonePct: clampInt(raw.samplerEmuTonePct, 2, 100, base.samplerEmuTonePct),
-        samplerEmuWetPct: clampInt(raw.samplerEmuWetPct, 0, 100, base.samplerEmuWetPct),
-        samplerEmuCompPct: clampInt(raw.samplerEmuCompPct, 0, 100, base.samplerEmuCompPct),
         sliceStarts: parseSliceStartsString(Array.isArray(raw.sliceStarts) ? raw.sliceStarts.join(',') : raw.sliceStarts, chopCount),
         slots: []
     };
@@ -3024,11 +2758,6 @@ function applyAllStateToDsp() {
     sp('global_pitch', s.globalPitch.toFixed(2));
     sp('velocity_sens', String(s.velocitySens));
     sp('record_max_seconds', String(s.recordMaxSeconds));
-    s.recInputGainPct = 100;
-    s.recSchwungGainPct = 100;
-    sp('input_capture_gain', '1.000');
-    sp('record_mix_gain', '1.000');
-    pushSamplerEmuParams();
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         spb('section_mode', sec + ':' + s.sections[sec].mode, 200);
@@ -3067,16 +2796,6 @@ function applyParsedSession(parsed, silent, label) {
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
-    s.recInputGainPct = 100;
-    s.recSchwungGainPct = 100;
-    s.samplerEmuMode = clampInt(parsed.samplerEmuMode, 0, 4, 0);
-    s.samplerEmuBitDepth = clampInt(parsed.samplerEmuBitDepth, 4, 16, 16);
-    s.samplerEmuRateHz = clampInt(parsed.samplerEmuRateHz, 2000, 96000, 44100);
-    s.samplerEmuDrivePct = clampInt(parsed.samplerEmuDrivePct, 25, 400, 100);
-    s.samplerEmuNoisePct = clampInt(parsed.samplerEmuNoisePct, 0, 100, 0);
-    s.samplerEmuTonePct = clampInt(parsed.samplerEmuTonePct, 2, 100, 80);
-    s.samplerEmuWetPct = clampInt(parsed.samplerEmuWetPct, 0, 100, 100);
-    s.samplerEmuCompPct = clampInt(parsed.samplerEmuCompPct, 0, 100, 30);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
     s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
     s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
@@ -3087,7 +2806,6 @@ function applyParsedSession(parsed, silent, label) {
         sanitizeSection(rawSections[0], MODE_SINGLE),
         sanitizeSection(rawSections[1], MODE_PER_SLOT)
     ];
-    loadSamplerEmuFromBank(s.focusedSection);
 
     invalidatePlaybackCompat();
     applyAllStateToDsp();
@@ -3385,10 +3103,6 @@ function knobTouchActionLabel(note) {
     if (s.view !== 'main') return 'No action';
 
     if (s.shiftHeld && s.volumeTouchHeld) {
-        if (idx === 0) return 'EMU mode';
-        if (idx === 1) return 'EMU bit depth';
-        if (idx === 2) return 'EMU sample rate';
-        if (idx === 3) return 'EMU drv+comp';
         if (idx === 4) return 'Edit scope';
         if (idx === 5) return 'Source -> banks';
         if (idx === 6) return 'Bank color';
@@ -3440,14 +3154,6 @@ function handleKnobTouch(note, velocity) {
         return true;
     }
 
-    if (s.shiftHeld && s.volumeTouchHeld && s.view === 'main' && note >= 0 && note <= 3) {
-        const msg = samplerEmuTouchStatus(note);
-        showStatus(msg || ('K' + (note + 1)), 80);
-        s.knobPage = note < 4 ? 'A' : 'B';
-        s.dirty = true;
-        return true;
-    }
-
     s.knobPage = note < 4 ? 'A' : 'B';
     showStatus('K' + (note + 1) + ': ' + knobTouchActionLabel(note), 60);
     s.dirty = true;
@@ -3461,10 +3167,6 @@ function handleStepBankNote(note, velocity) {
     if (LEFT_GRID_ONLY && t.sec !== 0) return true;
 
     if (s.shiftHeld && s.volumeTouchHeld) {
-        if (anyLooperActive()) {
-            showStatus('Erase locked while loop plays', 90);
-            return true;
-        }
         const keepColor = s.sections[t.sec].banks[t.bank].bankColor;
         s.sections[t.sec].banks[t.bank] = makeBank(t.bank);
         s.sections[t.sec].banks[t.bank].bankColor = keepColor;
@@ -3630,48 +3332,6 @@ function looperErase() {
     updateUtilityButtonLeds();
 }
 
-function looperErasePadNotes(index, sec, bank, slot) {
-    const looperIndex = clampInt(index, 0, s.midiLoopers.length - 1, 0);
-    const l = looperByIndex(looperIndex);
-    if (!l || !Array.isArray(l.events) || !l.events.length) return false;
-
-    const safeSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
-    const safeBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
-    const safeSlot = clampInt(slot, 0, GRID_SIZE - 1, 0);
-    const beforeCount = l.events.length;
-    l.events = l.events.filter((ev) => (
-        clampInt(ev && ev.sec, 0, GRID_COUNT - 1, 0) !== safeSec ||
-        clampInt(ev && ev.bank, 0, BANK_COUNT - 1, 0) !== safeBank ||
-        clampInt(ev && ev.slot, 0, GRID_SIZE - 1, 0) !== safeSlot
-    ));
-    if (l.events.length === beforeCount) return false;
-
-    if (!l.events.length) {
-        releaseVoicesByOwner('looper:' + String(looperIndex), looperNowMs());
-        l.state = 'empty';
-        l.loopPosMs = 0;
-        l.lastLoopPosMs = 0;
-    }
-
-    l.quantized = 0;
-    l.preQuantizeEvents = [];
-    l.layerStack = [];
-    markSessionChanged();
-    s.dirty = true;
-    return true;
-}
-
-function resolveLooperIndexForPadErase() {
-    const activeIdx = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
-    const active = looperByIndex(activeIdx);
-    if (active && looperIsActiveState(active.state)) return activeIdx;
-    for (let i = 0; i < s.midiLoopers.length; i++) {
-        const l = looperByIndex(i);
-        if (l && looperIsActiveState(l.state)) return i;
-    }
-    return -1;
-}
-
 function looperUndoLastLayer() {
     const l = currentLooper();
     if (!Array.isArray(l.layerStack) || !l.layerStack.length) {
@@ -3810,19 +3470,11 @@ function selectLooper(index) {
 
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
+    if (next !== s.activeLooper) selectLooper(next);
     if (s.shiftHeld) {
-        if (s.volumeTouchHeld) {
-            looperQuantize(next, 16);
-            return;
-        }
-        if (next !== s.activeLooper && copyLooperTo(s.activeLooper, next)) {
-            selectLooper(next);
-            return;
-        }
         looperQuantize(next, 16);
         return;
     }
-    if (next !== s.activeLooper) selectLooper(next);
     handleLoopButtonPress(false);
 }
 
@@ -3840,11 +3492,6 @@ function tickMidiLooperButtonHold() {
     if ((s.transportTicks - l.buttonDownTick) < LOOP_ERASE_HOLD_TICKS) return;
     l.eraseHoldTriggered = true;
     if (l.holdEraseArmed) {
-        if (anyLooperActive()) {
-            showStatus('Use Del+LoopPad erase', 90);
-            l.holdEraseArmed = false;
-            return;
-        }
         looperErase();
         l.holdEraseArmed = false;
         return;
@@ -4056,24 +3703,6 @@ function handlePadNote(note, velocity) {
     if (s.loopPadMode) {
         const lp = loopPadIndexFromPadNote(note);
         if (lp >= 0) {
-            if (s.deleteHeld && anyLooperActive()) {
-                const target = looperByIndex(lp);
-                if (target) {
-                    target.events = [];
-                    target.preQuantizeEvents = [];
-                    target.layerStack = [];
-                    target.loopLengthMs = 0;
-                    target.state = 'empty';
-                    target.playStartMs = looperNowMs();
-                    target.loopPosMs = 0;
-                    target.lastLoopPosMs = 0;
-                    showStatus('Looper ' + (lp + 1) + ' notes cleared', 100);
-                    updateUtilityButtonLeds();
-                    markSessionChanged();
-                    s.dirty = true;
-                }
-                return true;
-            }
             fireLooperPad(lp);
             return true;
         }
@@ -4088,21 +3717,6 @@ function handlePadNote(note, velocity) {
     const triggerNote = padNoteFor(sec, slot);
 
     if (s.muteHeld && !s.shiftHeld) {
-        const eraseLooper = resolveLooperIndexForPadErase();
-        if (eraseLooper >= 0) {
-            const erased = looperErasePadNotes(eraseLooper, sec, bank, slot);
-            if (erased) {
-                showStatus(
-                    'Looper ' + (clampInt(eraseLooper, 0, 3, 0) + 1) +
-                    ': cleared P' + (slot + 1) + ' S' + (sec + 1) + 'B' + (bank + 1),
-                    100
-                );
-                updateUtilityButtonLeds();
-            } else {
-                showStatus('Looper: no notes on touched pad', 90);
-            }
-            return true;
-        }
         togglePadMute(sec, bank, slot);
         return true;
     }
@@ -4111,8 +3725,7 @@ function handlePadNote(note, velocity) {
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         s.editScope = 'P';
-        /* Use blocking cursor sync so immediate knob turns always target the newly selected chop/slot. */
-        setSelectedSlice(slice, true, false);
+        setSelectedSlice(slice, false, false);
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
@@ -4231,39 +3844,6 @@ function handleMainKnob(delta) {
     adjustRecordMaxSeconds(delta);
 }
 
-function computeAbsoluteKnobDelta(prevValue, nextValue) {
-    const prev = clampInt(prevValue, -1, 127, -1);
-    const next = clampInt(nextValue, 0, 127, 0);
-    if (prev < 0 || next === prev) return 0;
-    return next - prev;
-}
-
-function decodeMasterKnobDelta(value) {
-    const v = clampInt(value, 0, 127, 0);
-    const prev = s.masterKnobLast;
-    s.masterKnobLast = v;
-    return computeAbsoluteKnobDelta(prev, v);
-}
-
-function runInternalSelfChecks() {
-    const checks = [
-        { prev: -1, next: 80, want: 0 },
-        { prev: 80, next: 90, want: 10 },
-        { prev: 90, next: 10, want: -80 },
-        { prev: 40, next: 40, want: 0 }
-    ];
-    for (let i = 0; i < checks.length; i++) {
-        const c = checks[i];
-        const got = computeAbsoluteKnobDelta(c.prev, c.next);
-        if (got !== c.want) {
-            showStatus('Self-check fail M' + i, 60);
-            try { console.log('TwinSampler self-check failed at ' + i + ' got=' + got + ' want=' + c.want); } catch (e) {}
-            return false;
-        }
-    }
-    return true;
-}
-
 function handleParamKnob(cc, delta) {
     if (delta === 0) return;
 
@@ -4280,22 +3860,6 @@ function handleParamKnob(cc, delta) {
     if (!inA && !inB) return;
 
     if (s.shiftHeld && s.volumeTouchHeld) {
-        if (cc === MoveKnob1) {
-            adjustSamplerEmuMode(delta);
-            return;
-        }
-        if (cc === MoveKnob2) {
-            adjustSamplerEmuBitDepth(delta);
-            return;
-        }
-        if (cc === MoveKnob3) {
-            adjustSamplerEmuRate(delta);
-            return;
-        }
-        if (cc === MoveKnob4) {
-            adjustSamplerEmuDrive(delta);
-            return;
-        }
         if (cc === MoveKnob5) {
             toggleEditScope();
             return;
@@ -4393,30 +3957,7 @@ function syncFromDsp() {
     pollRecordingState();
     tickRecordStateMachine();
     tickRecordButtonBlink();
-    syncCaptureMeters();
     syncFocusedSlotPlaybackCompat();
-}
-
-function syncCaptureMeters() {
-    const inputPeak = clampFloat(gp('capture_input_peak', s.captureInputPeak), 0.0, 2.0, s.captureInputPeak);
-    const busPeak = clampFloat(gp('capture_bus_peak', s.captureBusPeak), 0.0, 2.0, s.captureBusPeak);
-    const changed = Math.abs(inputPeak - s.captureInputPeak) > 0.0005 || Math.abs(busPeak - s.captureBusPeak) > 0.0005;
-    s.captureInputPeak = inputPeak;
-    s.captureBusPeak = busPeak;
-
-    const clipped = inputPeak >= INPUT_CLIP_WARN_THRESHOLD || busPeak >= INPUT_CLIP_WARN_THRESHOLD;
-    if (clipped) {
-        s.clipWarnTicks = 30;
-        s.dirty = true;
-        return;
-    }
-
-    if (s.clipWarnTicks > 0) {
-        s.clipWarnTicks--;
-        if (s.clipWarnTicks === 0) s.dirty = true;
-    }
-
-    if (changed && isRecordModeActive()) s.dirty = true;
 }
 
 function initFromDspDefaults() {
@@ -4457,25 +3998,8 @@ function initFromDspDefaults() {
     s.recordBlinkTicks = 0;
     updateRecordButtonLed();
 
-    s.recInputGainPct = 100;
-    s.recSchwungGainPct = 100;
-    s.captureInputPeak = clampFloat(gp('capture_input_peak', 0.0), 0.0, 2.0, 0.0);
-    s.captureBusPeak = clampFloat(gp('capture_bus_peak', 0.0), 0.0, 2.0, 0.0);
-    s.clipWarnTicks = 0;
-    s.samplerEmuMode = clampInt(gp('sampler_emu_mode', 0), 0, 4, 0);
-    s.samplerEmuBitDepth = clampInt(gp('sampler_emu_bit_depth', 16), 4, 16, 16);
-    s.samplerEmuRateHz = clampInt(gp('sampler_emu_resample_hz', 44100), 2000, 96000, 44100);
-    s.samplerEmuDrivePct = clampInt(Math.round(clampFloat(gp('sampler_emu_drive', 1.0), 0.25, 4.0, 1.0) * 100), 25, 400, 100);
-    s.samplerEmuNoisePct = clampInt(Math.round(clampFloat(gp('sampler_emu_noise', 0.0), 0.0, 1.0, 0.0) * 100), 0, 100, 0);
-    s.samplerEmuTonePct = clampInt(Math.round(clampFloat(gp('sampler_emu_tone', 0.8), 0.02, 1.0, 0.8) * 100), 2, 100, 80);
-    s.samplerEmuWetPct = clampInt(Math.round(clampFloat(gp('sampler_emu_wet', 1.0), 0.0, 1.0, 1.0) * 100), 0, 100, 100);
-    s.samplerEmuCompPct = clampInt(Math.round(clampFloat(gp('sampler_emu_comp', 0.30), 0.0, 1.0, 0.30) * 100), 0, 100, 30);
-
     sp('keyboard_section', String(s.focusedSection));
     sp('record_max_seconds', String(s.recordMaxSeconds));
-    sp('input_capture_gain', '1.000');
-    sp('record_mix_gain', '1.000');
-    pushSamplerEmuParams();
 
     ensureEditCursor();
     markLedsDirty();
@@ -4536,10 +4060,7 @@ function onMidiMessageInternal(data) {
 
         if (cc === MoveMute) {
             s.muteHeld = val > 0;
-            if (s.muteHeld) {
-                if (looperIsActiveState(currentLooper().state)) showStatus('Mute hold: tap pad clears looper pad-notes', 90);
-                else showStatus('Mute hold: tap pad', 70);
-            }
+            if (s.muteHeld) showStatus('Mute hold: tap pad', 70);
             updateUtilityButtonLeds();
             return;
         }
@@ -4569,17 +4090,14 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMaster) {
-            void val;
+            const delta = decodeDelta(val);
+            if (delta !== 0 && s.shiftHeld) {
+                adjustGlobalGain(delta);
+            }
             return;
         }
 
-        if (cc === MoveDelete) {
-            s.deleteHeld = val > 0;
-            if (val <= 0) return;
-            if (anyLooperActive()) {
-                showStatus('Del+LoopPad clears notes', 90);
-                return;
-            }
+        if (cc === MoveDelete && val > 0) {
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 deleteSelectedSession();
                 return;
@@ -4664,10 +4182,7 @@ function init() {
     s.ledQueue = [];
     s.ledsDirty = true;
     s.activePadPress = {};
-    s.deleteHeld = false;
-    s.masterKnobLast = -1;
     s.padPressFlash = {};
-    runInternalSelfChecks();
     s.sections = [
         makeSection(MODE_SINGLE),
         makeSection(MODE_PER_SLOT)
@@ -4729,7 +4244,6 @@ function tick() {
 }
 
 function beforeExit() {
-    s.deleteHeld = false;
     const keys = Object.keys(activeVoicesByAddr);
     for (let i = 0; i < keys.length; i++) {
         const v = activeVoicesByAddr[keys[i]];
