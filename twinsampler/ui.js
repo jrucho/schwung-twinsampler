@@ -6,6 +6,7 @@ const impl = (globalThis && globalThis.twinsampler_chain_ui && globalThis.twinsa
     ? globalThis.twinsampler_chain_ui
     : {};
 let exitRequested = false;
+let beforeExitDone = false;
 
 function safeInvoke(label, fn, arg) {
     if (typeof fn !== 'function') return;
@@ -21,6 +22,7 @@ function safeInvoke(label, fn, arg) {
 
 globalThis.init = function() {
     exitRequested = false;
+    beforeExitDone = false;
     if (typeof impl.init !== 'function') {
         try {
             console.log('TwinSampler init error: twinsampler_chain_ui missing or invalid');
@@ -29,6 +31,12 @@ globalThis.init = function() {
     safeInvoke('init', impl.init);
 };
 
+function runBeforeExit() {
+    if (beforeExitDone) return;
+    beforeExitDone = true;
+    safeInvoke('beforeExit', impl.beforeExit);
+}
+
 globalThis.tick = function() {
     safeInvoke('tick', impl.tick);
 };
@@ -36,7 +44,7 @@ globalThis.tick = function() {
 globalThis.onMidiMessageInternal = function(data) {
     const status = data[0] & 0xF0;
     if (status === 0xB0 && data[1] === MoveBack && data[2] > 0) {
-        safeInvoke('beforeExit', impl.beforeExit);
+        runBeforeExit();
         requestExitModule();
         return;
     }
@@ -48,9 +56,19 @@ globalThis.onMidiMessageExternal = function(data) {
     safeInvoke('onMidiMessageExternal', impl.onMidiMessageExternal, data);
 };
 
+/* Best-effort lifecycle hooks for hosts that call explicit cleanup handlers. */
+globalThis.beforeExit = function() {
+    runBeforeExit();
+};
+
+globalThis.deinit = function() {
+    runBeforeExit();
+};
+
 function requestExitModule() {
     if (exitRequested) return;
     exitRequested = true;
+    runBeforeExit();
 
     let exited = false;
     try {
