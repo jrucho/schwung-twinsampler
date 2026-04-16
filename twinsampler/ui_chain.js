@@ -4357,10 +4357,13 @@ function init() {
     s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
     ensureInitSessionFile(false);
 
-    if (!loadSessionFromPath(autosavePath(), true, false) &&
-        !loadSessionFromPath(sessionPathFromName(s.sessionName), true, false) &&
-        !loadLegacySession(true) &&
-        !loadSessionFromPath(sessionPathFromName(INIT_SESSION_NAME), true, false)) {
+    const restoredFromSession =
+        loadSessionFromPath(autosavePath(), true, false) ||
+        loadSessionFromPath(sessionPathFromName(s.sessionName), true, false) ||
+        loadLegacySession(true) ||
+        loadSessionFromPath(sessionPathFromName(INIT_SESSION_NAME), true, false);
+
+    if (!restoredFromSession) {
         applyAllStateToDsp();
     }
 
@@ -4371,8 +4374,21 @@ function init() {
     s.activeLooper = 0;
     for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
     for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
-    s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
-    looperReset(true);
+    if (!Array.isArray(s.midiLoopers) || s.midiLoopers.length !== 4) {
+        s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
+    }
+    for (let i = 0; i < s.midiLoopers.length; i++) {
+        const l = s.midiLoopers[i];
+        if (!l) continue;
+        l.buttonHeld = false;
+        l.buttonDownTick = -1;
+        l.lastPressTick = -9999;
+        l.eraseHoldTriggered = false;
+        l.holdEraseArmed = false;
+        l.playStartMs = looperNowMs();
+        l.loopPosMs = 0;
+        l.lastLoopPosMs = 0;
+    }
     s.autosavePending = false;
     s.autosaveTicks = 0;
     resetHistory();
