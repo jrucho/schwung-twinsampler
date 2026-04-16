@@ -349,6 +349,7 @@ const s = {
     recordBlinkOn: false,
     recordBlinkTicks: 0,
     recTarget: { sec: 0, bank: 0, slot: 0 },
+    recTargetLocked: { sec: 0, bank: 0, slot: 0, slice: 0 },
     lastRecordedPath: '',
 
     browserPath: SAMPLES_DIR,
@@ -365,6 +366,8 @@ const s = {
     sessionCharIndex: 0,
 
     copySource: null,
+    copyHeld: false,
+    deleteHeld: false,
     stepCopySource: null,
     activePadPress: {},
     muteHeld: false,
@@ -2293,6 +2296,18 @@ function captureFocusedRecordTarget() {
     return { sec: a.sec, bank: a.bank, slot: a.slot };
 }
 
+function lockRecordingTarget(target) {
+    const t = target || captureFocusedRecordTarget();
+    const slice = clampInt(dspSliceFromSecSlot(t.sec, t.slot), 0, TOTAL_PADS - 1, 0);
+    s.recTarget = { sec: t.sec, bank: t.bank, slot: t.slot };
+    s.recTargetLocked = { sec: t.sec, bank: t.bank, slot: t.slot, slice };
+    spb('selected_slice', String(slice), 120);
+    spb('keyboard_section', String(t.sec), 120);
+    spb('edit_section', String(t.sec), 120);
+    spb('edit_bank', String(t.bank), 120);
+    spb('edit_slot', String(t.slot), 120);
+}
+
 function armFocusedRecording() {
     if (s.recording) return;
     s.recordArmed = true;
@@ -2322,7 +2337,7 @@ function disarmFocusedRecording() {
 function startFocusedRecording() {
     if (isRecordTransitionPending()) return;
     const a = captureFocusedRecordTarget();
-    s.recTarget = a;
+    lockRecordingTarget(a);
     s.recordLoadOnStop = false;
     s.recordArmed = true;
     setRecordState('starting');
@@ -2330,9 +2345,12 @@ function startFocusedRecording() {
     s.recordBlinkTicks = 0;
     setRecordMonitorEnabled(true);
 
+    const preferInternal = shouldPreferInternalCapture();
     sp('record_target', a.sec + ':' + a.bank + ':' + a.slot);
-    sp('record_capture_mode', 'auto');
-    sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
+    sp('record_capture_mode', preferInternal ? 'internal' : 'line_in');
+    sp('record_input_channels', 'stereo');
+    sp('record_input_stereo', '1');
+    sp('record_intent_internal', preferInternal ? '1' : '0');
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '0');
     const recDir = recordingsDayDir(Date.now());
@@ -2419,21 +2437,13 @@ function pollRecordingState() {
         setRecordMonitorEnabled(false);
 
         if (path && shouldLoad) {
-            const t = s.recTarget;
-            const mode = s.sections[t.sec].mode;
-            if (mode === MODE_SINGLE) {
-                setSourcePath(t.sec, t.bank, path, true);
-                syncBankSliceState(t.sec, t.bank);
-                showStatus('Recorded+loaded SRC ' + recordTargetLabel(t), 110);
-            } else {
-                let slot = t.slot;
-                const existing = slotAt(t.sec, t.bank, slot).path;
-                if (existing && existing !== path) {
-                    showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
-                }
-                setSlotPath(t.sec, t.bank, slot, path, true);
-                showStatus('Recorded+loaded ' + recordTargetLabel({ sec: t.sec, bank: t.bank, slot }), 110);
+            const t = s.recTargetLocked || s.recTarget;
+            const existing = slotAt(t.sec, t.bank, t.slot).path;
+            if (existing && existing !== path) {
+                showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
             }
+            setSlotPath(t.sec, t.bank, t.slot, path, true);
+            showStatus('Recorded+loaded ' + recordTargetLabel(t), 110);
         } else if (path) {
             showStatus('Recorded: ' + shortText(baseName(path), 14), 90);
         } else {
@@ -3325,6 +3335,7 @@ function looperStopPlayback() {
 }
 
 function looperErase() {
+    ensureValidActiveLooper();
     releaseVoicesByOwner('looper:', looperNowMs());
     looperReset(true);
     showStatus('Looper: erased', 100);
@@ -3468,8 +3479,87 @@ function selectLooper(index) {
     markLedsDirty();
 }
 
+function looperHasMaterial(index) {
+    const l = looperByIndex(index);
+    if (!l) return false;
+    if (Array.isArray(l.events) && l.events.length > 0) return true;
+    return l.state === 'recording' || l.state === 'playing' || l.state === 'overdub' || l.state === 'stopped';
+}
+
+function ensureValidActiveLooper() {
+    if (looperHasMaterial(s.activeLooper)) return s.activeLooper;
+    for (let i = 0; i < s.midiLoopers.length; i++) {
+        if (!looperHasMaterial(i)) continue;
+        if (i !== s.activeLooper) selectLooper(i);
+        return i;
+    }
+    return s.activeLooper;
+}
+
+function cloneLooperState(index) {
+    const l = looperByIndex(index);
+    if (!l) return null;
+    return {
+        state: l.state,
+        events: Array.isArray(l.events) ? l.events.map((ev) => Object.assign({}, ev)) : [],
+        quantized: l.quantized ? 1 : 0,
+        preQuantizeEvents: Array.isArray(l.preQuantizeEvents) ? l.preQuantizeEvents.map((ev) => Object.assign({}, ev)) : [],
+        loopLengthMs: clampInt(l.loopLengthMs, 0, 600000, 0),
+        layerStack: Array.isArray(l.layerStack) ? l.layerStack.slice() : []
+    };
+}
+
+function applyClonedLooperState(index, cloned) {
+    if (!cloned) return false;
+    const l = looperByIndex(index);
+    if (!l) return false;
+    l.state = cloned.state;
+    l.events = cloned.events.map((ev) => Object.assign({}, ev));
+    l.quantized = cloned.quantized ? 1 : 0;
+    l.preQuantizeEvents = (l.quantized && cloned.preQuantizeEvents.length)
+        ? cloned.preQuantizeEvents.map((ev) => Object.assign({}, ev))
+        : [];
+    l.loopLengthMs = clampInt(cloned.loopLengthMs, 0, 600000, 0);
+    l.recordStartMs = 0;
+    l.playStartMs = looperNowMs();
+    l.loopPosMs = 0;
+    l.lastLoopPosMs = 0;
+    l.layerStack = Array.isArray(cloned.layerStack) ? cloned.layerStack.slice() : [];
+    l.buttonHeld = false;
+    l.buttonDownTick = -1;
+    l.lastPressTick = -9999;
+    l.eraseHoldTriggered = false;
+    l.holdEraseArmed = false;
+    return true;
+}
+
+function copyActiveLooperTo(index) {
+    const srcIdx = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
+    const dstIdx = clampInt(index, 0, s.midiLoopers.length - 1, 0);
+    if (srcIdx === dstIdx) return false;
+    if (looperHasMaterial(dstIdx)) {
+        showStatus('Looper ' + (dstIdx + 1) + ' not empty', 90);
+        return true;
+    }
+    const cloned = cloneLooperState(srcIdx);
+    if (!cloned || !cloned.events.length || cloned.loopLengthMs <= 0) {
+        showStatus('Source looper empty', 90);
+        return true;
+    }
+    if (applyClonedLooperState(dstIdx, cloned)) {
+        showStatus('Loop ' + (srcIdx + 1) + ' -> ' + (dstIdx + 1), 100);
+        markSessionChanged();
+        markLedsDirty();
+        return true;
+    }
+    return false;
+}
+
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
+    if (s.shiftHeld && s.copyHeld) {
+        if (copyActiveLooperTo(next)) return;
+    }
     if (next !== s.activeLooper) selectLooper(next);
     if (s.shiftHeld) {
         looperQuantize(next, 16);
@@ -3514,6 +3604,29 @@ function togglePadMute(sec, bank, slot) {
     markSessionChanged();
     showStatus('S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' ' + (sl.muted ? 'Muted' : 'Unmuted'), 90);
     s.dirty = true;
+}
+
+function eraseLooperNotesForPad(sec, bank, slot) {
+    const looperIdx = ensureValidActiveLooper();
+    const l = looperByIndex(looperIdx);
+    if (!l || !Array.isArray(l.events) || !l.events.length) return false;
+    const before = l.events.length;
+    l.events = l.events.filter((ev) => !(ev.sec === sec && ev.bank === bank && ev.slot === slot));
+    if (l.quantized && Array.isArray(l.preQuantizeEvents) && l.preQuantizeEvents.length) {
+        l.preQuantizeEvents = l.preQuantizeEvents.filter((ev) => !(ev.sec === sec && ev.bank === bank && ev.slot === slot));
+    }
+    if (!l.events.length) {
+        l.state = 'empty';
+        l.loopLengthMs = 0;
+        l.quantized = 0;
+        l.preQuantizeEvents = [];
+        l.layerStack = [];
+    }
+    if (l.events.length === before) return false;
+    markSessionChanged();
+    updateUtilityButtonLeds();
+    showStatus('Looper ' + (looperIdx + 1) + ' notes erased P' + (slot + 1), 100);
+    return true;
 }
 
 function flashPadPress(sec, bank, slot) {
@@ -3716,7 +3829,16 @@ function handlePadNote(note, velocity) {
     const addr = { sec, bank, slot };
     const triggerNote = padNoteFor(sec, slot);
 
+    if (s.deleteHeld && !s.shiftHeld) {
+        if (eraseLooperNotesForPad(sec, bank, slot)) return true;
+        showStatus('No looper notes on that pad', 80);
+        return true;
+    }
+
     if (s.muteHeld && !s.shiftHeld) {
+        const looper = currentLooper();
+        const looperActive = looper && (looper.state === 'playing' || looper.state === 'overdub' || looper.state === 'stopped');
+        if (looperActive && eraseLooperNotesForPad(sec, bank, slot)) return true;
         togglePadMute(sec, bank, slot);
         return true;
     }
@@ -4060,7 +4182,7 @@ function onMidiMessageInternal(data) {
 
         if (cc === MoveMute) {
             s.muteHeld = val > 0;
-            if (s.muteHeld) showStatus('Mute hold: tap pad', 70);
+            if (s.muteHeld) showStatus('Mute hold: tap pad (loop=erase notes)', 80);
             updateUtilityButtonLeds();
             return;
         }
@@ -4097,7 +4219,9 @@ function onMidiMessageInternal(data) {
             return;
         }
 
-        if (cc === MoveDelete && val > 0) {
+        if (cc === MoveDelete) {
+            s.deleteHeld = val > 0;
+            if (val <= 0) return;
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 deleteSelectedSession();
                 return;
@@ -4107,6 +4231,10 @@ function onMidiMessageInternal(data) {
                 return;
             }
             if (s.view === 'main') {
+                if (s.loopPadMode) {
+                    showStatus('Looper mode: Delete disabled for samples', 90);
+                    return;
+                }
                 if (s.shiftHeld) clearFocusedBankAudio();
                 else clearFocusedPadAudio();
             }
@@ -4129,7 +4257,9 @@ function onMidiMessageInternal(data) {
             return;
         }
 
-        if (cc === MoveCopy && val > 0) {
+        if (cc === MoveCopy) {
+            s.copyHeld = val > 0;
+            if (val <= 0) return;
             if (s.view === 'main' && s.shiftHeld && s.volumeTouchHeld) {
                 randomizeFocusedTransientSlices();
                 return;
@@ -4192,6 +4322,8 @@ function init() {
     activateStandaloneMidiPort();
     browserOpen(SAMPLES_DIR, 'samples');
     s.copySource = null;
+    s.copyHeld = false;
+    s.deleteHeld = false;
     s.sessionBrowserIntent = 'load';
     s.sessionName = sanitizeSessionName(s.sessionName);
     s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
