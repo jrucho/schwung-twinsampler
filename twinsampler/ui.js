@@ -55,12 +55,9 @@ globalThis.onMidiMessageInternal = function(data) {
     }
 
     if (status === 0xB0 && b1 === MoveBack && b2 > 0) {
-        if (shiftHeld && volumeTouchHeld) {
-            safeInvoke('beforeExit', impl.beforeExit);
-            requestExitModule();
-        } else {
-            requestBackgroundMode();
-        }
+        void shiftHeld;
+        void volumeTouchHeld;
+        requestBackgroundMode();
         return;
     }
 
