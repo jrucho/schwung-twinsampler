@@ -2243,9 +2243,9 @@ function adjustPadLoop(delta) {
 }
 
 function adjustGlobalGain(delta) {
-    s.globalGain = clamp(s.globalGain + delta * 0.05, 0.0, 4.0);
+    s.globalGain = clamp(s.globalGain + delta * 0.01, 0.0, 1.0);
     sp('global_gain', s.globalGain.toFixed(3));
-    showStatus('Global gain x' + s.globalGain.toFixed(2), 80);
+    showStatus('Volume ' + Math.round(s.globalGain * 100) + '%', 80);
     markSessionChanged();
     s.dirty = true;
 }
@@ -2359,23 +2359,35 @@ function isRecordModeActive() {
 }
 
 function setRecordInputGainPct(nextPct) {
-    void nextPct;
-    s.recInputGainPct = 100;
-    sp('input_capture_gain', '1.000');
+    s.recInputGainPct = clampInt(Math.round(nextPct), 0, 100, s.recInputGainPct);
+    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
 }
 
 function setRecordSchwungGainPct(nextPct) {
-    void nextPct;
-    s.recSchwungGainPct = 100;
-    sp('record_mix_gain', '1.000');
-    pushSamplerEmuParams();
+    s.recSchwungGainPct = clampInt(Math.round(nextPct), 0, 200, s.recSchwungGainPct);
+    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
 }
 
 function adjustRecordCaptureGain(delta, target) {
-    void delta;
-    void target;
-    setRecordInputGainPct(100);
-    setRecordSchwungGainPct(100);
+    if (delta === 0) return;
+    const step = s.shiftHeld ? 5 : 2;
+    const t = String(target || 'both');
+    if (t === 'input' || t === 'both') setRecordInputGainPct(s.recInputGainPct + delta * step);
+    if (t === 'schwung' || t === 'both') setRecordSchwungGainPct(s.recSchwungGainPct + delta * step);
+    showStatus('REC IN ' + s.recInputGainPct + '% SW ' + s.recSchwungGainPct + '%', 90);
+    s.dirty = true;
+}
+
+function handleMasterKnobAbsolute(value) {
+    const delta = decodeMasterKnobDelta(value);
+    if (delta === 0) return;
+
+    if (s.shiftHeld && s.volumeTouchHeld && isRecordModeActive()) {
+        adjustRecordCaptureGain(delta, 'both');
+        return;
+    }
+
+    adjustGlobalGain(delta);
 }
 
 function focusedEmuBank(sec = s.focusedSection) {
@@ -2410,14 +2422,34 @@ function storeSamplerEmuToBank(sec = s.focusedSection) {
 
 function pushSamplerEmuParams() {
     storeSamplerEmuToBank();
-    sp('sampler_emu_mode', String(clampInt(s.samplerEmuMode, 0, 4, 0)));
-    sp('sampler_emu_bit_depth', String(clampInt(s.samplerEmuBitDepth, 4, 16, 16)));
-    sp('sampler_emu_resample_hz', String(clampInt(s.samplerEmuRateHz, 2000, 96000, 44100)));
-    sp('sampler_emu_drive', (clampInt(s.samplerEmuDrivePct, 25, 400, 100) / 100).toFixed(3));
-    sp('sampler_emu_noise', (clampInt(s.samplerEmuNoisePct, 0, 100, 0) / 100).toFixed(3));
-    sp('sampler_emu_tone', (clampInt(s.samplerEmuTonePct, 2, 100, 80) / 100).toFixed(3));
-    sp('sampler_emu_wet', (clampInt(s.samplerEmuWetPct, 0, 100, 100) / 100).toFixed(3));
-    sp('sampler_emu_comp', (clampInt(s.samplerEmuCompPct, 0, 100, 30) / 100).toFixed(3));
+    const mode = clampInt(s.samplerEmuMode, 0, 4, 0);
+    const bits = clampInt(s.samplerEmuBitDepth, 4, 16, 16);
+    const rate = clampInt(s.samplerEmuRateHz, 2000, 96000, 44100);
+    const drive = (clampInt(s.samplerEmuDrivePct, 25, 400, 100) / 100).toFixed(3);
+    const noise = (clampInt(s.samplerEmuNoisePct, 0, 100, 0) / 100).toFixed(3);
+    const tone = (clampInt(s.samplerEmuTonePct, 2, 100, 80) / 100).toFixed(3);
+    const wet = (clampInt(s.samplerEmuWetPct, 0, 100, 100) / 100).toFixed(3);
+    const comp = (clampInt(s.samplerEmuCompPct, 0, 100, 30) / 100).toFixed(3);
+
+    /* Wrapper keys (dsp_wrapper_monitor). */
+    sp('sampler_emu_mode', String(mode));
+    sp('sampler_emu_bit_depth', String(bits));
+    sp('sampler_emu_resample_hz', String(rate));
+    sp('sampler_emu_drive', drive);
+    sp('sampler_emu_noise', noise);
+    sp('sampler_emu_tone', tone);
+    sp('sampler_emu_wet', wet);
+    sp('sampler_emu_comp', comp);
+
+    /* Core aliases for deployments where color params use legacy names. */
+    sp('color_mode', String(mode));
+    sp('color_bit_depth', String(bits));
+    sp('color_resample_hz', String(rate));
+    sp('color_drive', drive);
+    sp('color_noise', noise);
+    sp('color_tone', tone);
+    sp('color_wet', wet);
+    sp('color_comp', comp);
 }
 
 function adjustSamplerEmuMode(delta) {
@@ -2790,7 +2822,7 @@ function drawMain() {
             const modeTxt = sl.modeGate ? 'Gate' : 'Trig';
             print(0, 40, shortText('M:' + modeTxt + ' P:' + sl.pitch.toFixed(1) + ' G:' + sl.gain.toFixed(2), 21), 1);
         } else {
-            print(0, 40, shortText('Pitch:' + s.globalPitch.toFixed(1) + ' Gain:' + s.globalGain.toFixed(2) + ' Vel:' + (s.velocitySens ? 'On' : 'Off'), 21), 1);
+            print(0, 40, shortText('Pitch:' + s.globalPitch.toFixed(1) + ' Vol:' + Math.round(s.globalGain * 100) + '% Vel:' + (s.velocitySens ? 'On' : 'Off'), 21), 1);
         }
     }
 
@@ -3063,7 +3095,7 @@ function applyParsedSession(parsed, silent, label) {
     s.editScope = parsed.editScope === 'G' ? 'G' : 'P';
     s.browserAssignMode = parsed.browserAssignMode === 'slot' || parsed.browserAssignMode === 'source' ? parsed.browserAssignMode : 'auto';
 
-    s.globalGain = clampFloat(parsed.globalGain, 0.0, 4.0, 1.0);
+    s.globalGain = clampFloat(parsed.globalGain, 0.0, 1.0, 1.0);
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
@@ -4437,7 +4469,7 @@ function initFromDspDefaults() {
     syncBankSliceState(0, s.sections[0].currentBank);
     syncBankSliceState(1, s.sections[1].currentBank);
 
-    s.globalGain = clampFloat(gp('global_gain', 1.0), 0.0, 4.0, 1.0);
+    s.globalGain = clampFloat(gp('global_gain', 1.0), 0.0, 1.0, 1.0);
     s.globalPitch = clampFloat(gp('global_pitch', 0.0), -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(gp('velocity_sens', 0), 0, 1, 0);
 
@@ -4569,7 +4601,7 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMaster) {
-            void val;
+            handleMasterKnobAbsolute(val);
             return;
         }
 
