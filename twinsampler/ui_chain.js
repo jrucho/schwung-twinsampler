@@ -2301,6 +2301,9 @@ function lockRecordingTarget(target) {
     const slice = clampInt(dspSliceFromSecSlot(t.sec, t.slot), 0, TOTAL_PADS - 1, 0);
     s.recTarget = { sec: t.sec, bank: t.bank, slot: t.slot };
     s.recTargetLocked = { sec: t.sec, bank: t.bank, slot: t.slot, slice };
+    /* Some DSP paths still resolve record target from section_bank + selected_slice.
+       Force both deterministically before record_start. */
+    spb('section_bank', t.sec + ':' + t.bank, 180);
     spb('selected_slice', String(slice), 120);
     spb('keyboard_section', String(t.sec), 120);
     spb('edit_section', String(t.sec), 120);
@@ -2346,11 +2349,11 @@ function startFocusedRecording() {
     setRecordMonitorEnabled(true);
 
     const preferInternal = shouldPreferInternalCapture();
-    sp('record_target', a.sec + ':' + a.bank + ':' + a.slot);
-    sp('record_capture_mode', preferInternal ? 'internal' : 'line_in');
-    sp('record_input_channels', 'stereo');
-    sp('record_input_stereo', '1');
-    sp('record_intent_internal', preferInternal ? '1' : '0');
+    spb('record_target', a.sec + ':' + a.bank + ':' + a.slot, 180);
+    spb('record_capture_mode', preferInternal ? 'internal' : 'line_in', 180);
+    spb('record_input_channels', 'stereo', 180);
+    spb('record_input_stereo', '1', 180);
+    spb('record_intent_internal', preferInternal ? '1' : '0', 180);
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '0');
     const recDir = recordingsDayDir(Date.now());
