@@ -2359,23 +2359,35 @@ function isRecordModeActive() {
 }
 
 function setRecordInputGainPct(nextPct) {
-    void nextPct;
-    s.recInputGainPct = 100;
-    sp('input_capture_gain', '1.000');
+    s.recInputGainPct = clampInt(Math.round(nextPct), 0, 100, s.recInputGainPct);
+    sp('input_capture_gain', (s.recInputGainPct / 100).toFixed(3));
 }
 
 function setRecordSchwungGainPct(nextPct) {
-    void nextPct;
-    s.recSchwungGainPct = 100;
-    sp('record_mix_gain', '1.000');
-    pushSamplerEmuParams();
+    s.recSchwungGainPct = clampInt(Math.round(nextPct), 0, 200, s.recSchwungGainPct);
+    sp('record_mix_gain', (s.recSchwungGainPct / 100).toFixed(3));
 }
 
 function adjustRecordCaptureGain(delta, target) {
-    void delta;
-    void target;
-    setRecordInputGainPct(100);
-    setRecordSchwungGainPct(100);
+    if (delta === 0) return;
+    const step = s.shiftHeld ? 5 : 2;
+    const t = String(target || 'both');
+    if (t === 'input' || t === 'both') setRecordInputGainPct(s.recInputGainPct + delta * step);
+    if (t === 'schwung' || t === 'both') setRecordSchwungGainPct(s.recSchwungGainPct + delta * step);
+    showStatus('REC IN ' + s.recInputGainPct + '% SW ' + s.recSchwungGainPct + '%', 90);
+    s.dirty = true;
+}
+
+function handleMasterKnobAbsolute(value) {
+    const delta = decodeMasterKnobDelta(value);
+    if (delta === 0) return;
+
+    if (s.shiftHeld && s.volumeTouchHeld && isRecordModeActive()) {
+        adjustRecordCaptureGain(delta, 'both');
+        return;
+    }
+
+    adjustGlobalGain(delta);
 }
 
 function focusedEmuBank(sec = s.focusedSection) {
@@ -4569,7 +4581,7 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMaster) {
-            void val;
+            handleMasterKnobAbsolute(val);
             return;
         }
 
