@@ -703,18 +703,20 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         memcpy(audio_in_rw, inst->input_backup, (size_t)total * sizeof(int16_t));
     }
 
-    if (!inst->monitor_enabled || !g_host || !g_host->mapped_memory) return;
-    if (inst->monitor_policy && core_is_recording(inst) && capture_source == 2) return;
-
-    if (g_host->audio_in_offset <= 0) return;
-    const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
-    if (!audio_in) return;
-
-    const float gain = inst->monitor_gain * inst->input_capture_gain;
-    for (int i = 0; i < total; i++) {
-        const int32_t mon = (int32_t)((float)audio_in[i] * gain);
-        const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;
-        out_interleaved_lr[i] = (int16_t)clip_i32_to_i16(sum);
+    if (inst->monitor_enabled && g_host && g_host->mapped_memory) {
+        if (!(inst->monitor_policy && core_is_recording(inst) && capture_source == 2)) {
+            if (g_host->audio_in_offset > 0) {
+                const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
+                if (audio_in) {
+                    const float gain = inst->monitor_gain * inst->input_capture_gain;
+                    for (int i = 0; i < total; i++) {
+                        const int32_t mon = (int32_t)((float)audio_in[i] * gain);
+                        const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;
+                        out_interleaved_lr[i] = (int16_t)clip_i32_to_i16(sum);
+                    }
+                }
+            }
+        }
     }
 
     /* Final stage coloration on full TwinSampler output (post monitor mix). */
