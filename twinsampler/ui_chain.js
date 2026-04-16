@@ -3981,6 +3981,17 @@ function handleMainKnob(delta) {
     adjustRecordMaxSeconds(delta);
 }
 
+function ensureFocusedEditTargetForKnobs() {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const slot = focusedSlotIndex();
+    const dspSlice = clampInt(dspSliceFromSecSlot(sec, slot), 0, TOTAL_PADS - 1, 0);
+    spb('section_bank', sec + ':' + bank, 120);
+    spb('selected_slice', String(dspSlice), 120);
+    spb('keyboard_section', String(sec), 120);
+    ensureEditCursor(true);
+}
+
 function handleParamKnob(cc, delta) {
     if (delta === 0) return;
 
@@ -3995,6 +4006,8 @@ function handleParamKnob(cc, delta) {
     const inA = cc === MoveKnob1 || cc === MoveKnob2 || cc === MoveKnob3 || cc === MoveKnob4;
     const inB = cc === MoveKnob5 || cc === MoveKnob6 || cc === MoveKnob7 || cc === MoveKnob8;
     if (!inA && !inB) return;
+
+    ensureFocusedEditTargetForKnobs();
 
     if (s.shiftHeld && s.volumeTouchHeld) {
         if (cc === MoveKnob5) {
