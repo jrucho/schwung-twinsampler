@@ -2515,8 +2515,22 @@ function recordTargetLabel(target = s.recTarget) {
 }
 
 function captureFocusedRecordTarget() {
+    /*
+     * Deterministic record-lock snapshot:
+     * force UI->DSP cursor sync before freezing section/bank/slot target.
+     */
+    setSelectedSlice(s.selectedSlice, true, true);
+    ensureEditCursor(true);
     const a = focusedAddr();
     return { sec: a.sec, bank: a.bank, slot: a.slot };
+}
+
+function resolveRecordCaptureMode() {
+    /*
+     * Prefer direct line-in capture unless an intentional internal capture
+     * context is detected (active pad/looper activity).
+     */
+    return shouldPreferInternalCapture() ? 'auto' : 'input';
 }
 
 function armFocusedRecording() {
@@ -2556,8 +2570,8 @@ function startFocusedRecording() {
     s.recordBlinkTicks = 0;
     setRecordMonitorEnabled(true);
 
-    sp('record_target', a.sec + ':' + a.bank + ':' + a.slot);
-    sp('record_capture_mode', 'auto');
+    spb('record_target', a.sec + ':' + a.bank + ':' + a.slot, 160);
+    sp('record_capture_mode', resolveRecordCaptureMode());
     sp('record_intent_internal', shouldPreferInternalCapture() ? '1' : '0');
     sp('monitor_policy', '1');
     sp('debug_capture_logs', '0');
@@ -3647,6 +3661,17 @@ function looperErasePadNotes(index, sec, bank, slot) {
     return true;
 }
 
+function resolveLooperIndexForPadErase() {
+    const activeIdx = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
+    const active = looperByIndex(activeIdx);
+    if (active && looperIsActiveState(active.state)) return activeIdx;
+    for (let i = 0; i < s.midiLoopers.length; i++) {
+        const l = looperByIndex(i);
+        if (l && looperIsActiveState(l.state)) return i;
+    }
+    return -1;
+}
+
 function looperUndoLastLayer() {
     const l = currentLooper();
     if (!Array.isArray(l.layerStack) || !l.layerStack.length) {
@@ -4063,12 +4088,12 @@ function handlePadNote(note, velocity) {
     const triggerNote = padNoteFor(sec, slot);
 
     if (s.muteHeld && !s.shiftHeld) {
-        const active = currentLooper();
-        if (active && looperIsActiveState(active.state)) {
-            const erased = looperErasePadNotes(s.activeLooper, sec, bank, slot);
+        const eraseLooper = resolveLooperIndexForPadErase();
+        if (eraseLooper >= 0) {
+            const erased = looperErasePadNotes(eraseLooper, sec, bank, slot);
             if (erased) {
                 showStatus(
-                    'Looper ' + (clampInt(s.activeLooper, 0, 3, 0) + 1) +
+                    'Looper ' + (clampInt(eraseLooper, 0, 3, 0) + 1) +
                     ': cleared P' + (slot + 1) + ' S' + (sec + 1) + 'B' + (bank + 1),
                     100
                 );
