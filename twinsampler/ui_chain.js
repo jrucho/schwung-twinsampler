@@ -3539,7 +3539,10 @@ function applyClonedLooperState(index, cloned) {
 function copyActiveLooperTo(index) {
     const srcIdx = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
     const dstIdx = clampInt(index, 0, s.midiLoopers.length - 1, 0);
-    if (srcIdx === dstIdx) return false;
+    if (srcIdx === dstIdx) {
+        showStatus('Select destination looper', 80);
+        return true;
+    }
     if (looperHasMaterial(dstIdx)) {
         showStatus('Looper ' + (dstIdx + 1) + ' not empty', 90);
         return true;
@@ -3560,8 +3563,13 @@ function copyActiveLooperTo(index) {
 
 function fireLooperPad(index) {
     const next = clampInt(index, 0, 3, 0);
-    if (s.shiftHeld && s.copyHeld) {
-        if (copyActiveLooperTo(next)) return;
+    if (s.deleteHeld) {
+        eraseLooperAt(next);
+        return;
+    }
+    if (s.copyHeld) {
+        copyActiveLooperTo(next);
+        return;
     }
     if (next !== s.activeLooper) selectLooper(next);
     if (s.shiftHeld) {
@@ -3607,6 +3615,13 @@ function togglePadMute(sec, bank, slot) {
     markSessionChanged();
     showStatus('S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' ' + (sl.muted ? 'Muted' : 'Unmuted'), 90);
     s.dirty = true;
+}
+
+function eraseLooperAt(index) {
+    const idx = clampInt(index, 0, s.midiLoopers.length - 1, 0);
+    if (idx !== s.activeLooper) selectLooper(idx);
+    ensureValidActiveLooper();
+    looperErase();
 }
 
 function eraseLooperNotesForPad(sec, bank, slot) {
@@ -3839,9 +3854,6 @@ function handlePadNote(note, velocity) {
     }
 
     if (s.muteHeld && !s.shiftHeld) {
-        const looper = currentLooper();
-        const looperActive = looper && (looper.state === 'playing' || looper.state === 'overdub' || looper.state === 'stopped');
-        if (looperActive && eraseLooperNotesForPad(sec, bank, slot)) return true;
         togglePadMute(sec, bank, slot);
         return true;
     }
