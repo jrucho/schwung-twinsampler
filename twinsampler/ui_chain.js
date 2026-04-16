@@ -128,6 +128,9 @@ const INPUT_CLIP_WARN_THRESHOLD = 0.985;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
+const INIT_APPLY_TIMEOUT_MS = 2500;
+const INIT_LED_RETRY_TICKS = 3;
+const DEBUG_LIFECYCLE = true;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -213,6 +216,18 @@ function shortText(text, max = 21) {
     const s = String(text || '');
     if (s.length <= max) return s;
     return s.slice(0, Math.max(1, max - 1)) + '...';
+}
+
+function nowMs() {
+    if (typeof Date !== 'undefined' && typeof Date.now === 'function') return Date.now();
+    return 0;
+}
+
+function debugLog(msg) {
+    if (!DEBUG_LIFECYCLE) return;
+    try {
+        console.log('[TwinSampler] ' + String(msg || ''));
+    } catch (e) {}
 }
 
 function sectionFromSlice(slice) {
@@ -427,6 +442,10 @@ const s = {
     ledQueue: [],
     ledResyncTicks: 0,
     ledResyncPasses: 0,
+    initInProgress: false,
+    initStartedAtMs: 0,
+    initTimedOut: false,
+    initLedRetryTicks: 0,
 
     autosavePending: false,
     autosaveTicks: 0,
@@ -443,6 +462,76 @@ const playbackCompatCache = { sec: -1, bank: -1, slot: -1 };
 const midiHeldByChannelNote = {};
 const activeVoicesByAddr = {};
 const pendingNoteOffsByAddr = {};
+
+function clearObjectMap(mapObj) {
+    const keys = Object.keys(mapObj || {});
+    for (let i = 0; i < keys.length; i++) delete mapObj[keys[i]];
+}
+
+function resetRuntimeTransientState() {
+    s.ledQueue = [];
+    s.ledsDirty = true;
+    s.activePadPress = {};
+    s.padPressFlash = {};
+    s.copySource = null;
+    s.stepCopySource = null;
+    s.deleteHeld = false;
+    s.muteHeld = false;
+    s.shiftHeld = false;
+    s.volumeTouchHeld = false;
+    s.masterKnobLast = -1;
+    s.recordLoadOnStop = false;
+    s.recordStateTicks = 0;
+    s.recordBlinkTicks = 0;
+    s.recordBlinkOn = false;
+    s.recordMonitorOn = false;
+    s.autosavePending = false;
+    s.autosaveTicks = 0;
+    s.ledResyncPasses = LED_RESYNC_PASSES;
+    s.ledResyncTicks = LED_RESYNC_INTERVAL_TICKS;
+    s.initInProgress = false;
+    s.initStartedAtMs = 0;
+    s.initTimedOut = false;
+    s.initLedRetryTicks = 0;
+
+    editCursorCache.sec = -1;
+    editCursorCache.bank = -1;
+    editCursorCache.slot = -1;
+    invalidatePlaybackCompat();
+    clearObjectMap(midiHeldByChannelNote);
+    clearObjectMap(activeVoicesByAddr);
+    clearObjectMap(pendingNoteOffsByAddr);
+    clearObjectMap(s.recentOutboundMidi);
+}
+
+function beginModuleEnter() {
+    resetRuntimeTransientState();
+    s.initInProgress = true;
+    s.initStartedAtMs = nowMs();
+    s.initTimedOut = false;
+    debugLog('enter begin');
+}
+
+function finalizeModuleEnter() {
+    refreshRealtimeUiState();
+    s.initInProgress = false;
+    s.initStartedAtMs = 0;
+    s.initTimedOut = false;
+    s.initLedRetryTicks = INIT_LED_RETRY_TICKS;
+    debugLog('enter complete');
+}
+
+function recoverFromInitTimeout() {
+    if (!s.initInProgress || s.initTimedOut) return;
+    const started = clampInt(s.initStartedAtMs, 0, 0x7fffffff, 0);
+    if (!started) return;
+    if ((nowMs() - started) < INIT_APPLY_TIMEOUT_MS) return;
+    s.initTimedOut = true;
+    s.initInProgress = false;
+    showStatus('Init recovery', 90);
+    refreshRealtimeUiState();
+    debugLog('enter timeout recovered');
+}
 
 function normalizeSide(side) {
     if (side === 1 || side === 'right' || side === 'R' || side === 'r') return 1;
@@ -3019,7 +3108,7 @@ function sanitizeLooperState(raw) {
     };
 }
 
-function applyAllStateToDsp() {
+function applyAllStateToDsp(preferBlockingFocused = true) {
     sp('global_gain', s.globalGain.toFixed(3));
     sp('global_pitch', s.globalPitch.toFixed(2));
     sp('velocity_sens', String(s.velocitySens));
@@ -3036,7 +3125,8 @@ function applyAllStateToDsp() {
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) {
-            applyBankStateToDsp(sec, bank, true);
+            const focused = (sec === s.focusedSection && bank === s.sections[sec].currentBank);
+            applyBankStateToDsp(sec, bank, preferBlockingFocused && focused);
         }
     }
 
@@ -4660,13 +4750,8 @@ function onMidiMessageExternal(data) {
 
 function init() {
     /* Always hard-reset grid LEDs on entry to avoid stale state from previous modules. */
+    beginModuleEnter();
     clearPadAndStepLeds();
-    s.ledQueue = [];
-    s.ledsDirty = true;
-    s.activePadPress = {};
-    s.deleteHeld = false;
-    s.masterKnobLast = -1;
-    s.padPressFlash = {};
     runInternalSelfChecks();
     s.sections = [
         makeSection(MODE_SINGLE),
@@ -4690,27 +4775,23 @@ function init() {
     }
 
     s.view = 'main';
-    s.muteHeld = false;
     s.loopPadMode = false;
     s.transportTicks = 0;
     s.activeLooper = 0;
-    for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
-    for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
+    clearObjectMap(activeVoicesByAddr);
+    clearObjectMap(pendingNoteOffsByAddr);
     s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
     looperReset(true);
-    s.autosavePending = false;
-    s.autosaveTicks = 0;
     resetHistory();
     previewStop();
     updateRecordButtonLed();
-    forceLedRefreshNow();
-    s.ledResyncPasses = LED_RESYNC_PASSES;
-    s.ledResyncTicks = LED_RESYNC_INTERVAL_TICKS;
+    finalizeModuleEnter();
     s.dirty = true;
 }
 
 function tick() {
     s.transportTicks++;
+    recoverFromInitTimeout();
     syncFromDsp();
     tickStatusTimer();
     tickAutosave();
@@ -4722,6 +4803,13 @@ function tick() {
     flushPendingNoteOffs();
     tickLedResync();
     drainLedQueue();
+    if (s.initLedRetryTicks > 0) {
+        s.initLedRetryTicks--;
+        if (s.initLedRetryTicks === 0) {
+            forceLedRefreshNow();
+            debugLog('post-enter LED refresh');
+        }
+    }
 
     if (!s.dirty) return;
     s.dirty = false;
@@ -4729,6 +4817,7 @@ function tick() {
 }
 
 function beforeExit() {
+    debugLog('exit begin');
     s.deleteHeld = false;
     const keys = Object.keys(activeVoicesByAddr);
     for (let i = 0; i < keys.length; i++) {
@@ -4740,15 +4829,36 @@ function beforeExit() {
     setRecordMonitorEnabled(false);
     s.ledResyncPasses = 0;
     s.ledResyncTicks = 0;
+    s.initLedRetryTicks = 0;
+    s.initInProgress = false;
+    s.initStartedAtMs = 0;
+    s.initTimedOut = false;
+    clearObjectMap(midiHeldByChannelNote);
+    clearObjectMap(s.recentOutboundMidi);
+    s.ledQueue = [];
+    s.ledsDirty = true;
+    updateUtilityButtonLeds();
     setButtonLED(MoveRec, Black, true);
     setButtonLED(MoveRecord, Black, true);
     saveAutosaveSession(true);
+    debugLog('exit complete');
+}
+
+function enterModule() {
+    init();
+}
+
+function refreshState() {
+    refreshRealtimeUiState();
+    s.dirty = true;
 }
 
 const twinsamplerChainUi = {
     __moduleId: 'twinsampler_overtake',
     beforeExit,
+    enterModule,
     init,
+    refreshState,
     tick,
     onMidiMessageInternal,
     onMidiMessageExternal,

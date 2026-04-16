@@ -34,7 +34,12 @@ globalThis.init = function() {
             console.log('TwinSampler init error: twinsampler_chain_ui missing or invalid');
         } catch (e) {}
     }
-    safeInvoke('init', impl.init);
+    if (typeof impl.enterModule === 'function') {
+        safeInvoke('enterModule', impl.enterModule);
+    } else {
+        safeInvoke('init', impl.init);
+    }
+    safeInvoke('refreshState', impl.refreshState);
 };
 
 globalThis.tick = function() {
