@@ -127,7 +127,7 @@ const RECORD_INTENT_WINDOW_TICKS = 48;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
-const COPY_TAP_MAX_TICKS = 18;
+const COPY_TAP_MAX_TICKS = 48;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -4392,9 +4392,13 @@ function init() {
 
     s.view = 'main';
     s.muteHeld = false;
-    s.loopPadMode = false;
     s.transportTicks = 0;
-    s.activeLooper = 0;
+    if (!restoredFromSession) {
+        s.loopPadMode = false;
+        s.activeLooper = 0;
+    } else {
+        s.activeLooper = clampInt(s.activeLooper, 0, 3, 0);
+    }
     for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
     for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
     if (!Array.isArray(s.midiLoopers) || s.midiLoopers.length !== 4) {
