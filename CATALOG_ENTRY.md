@@ -2,7 +2,7 @@
 {
   "id": "twinsampler",
   "name": "Twinsampler",
-  "description": "[ADD SHORT DESCRIPTION]",
+  "description": "Dual-grid sampler overtake module for layered playback and bank control.",
   "author": "jrucho",
   "component_type": "overtake",
   "github_repo": "jrucho/schwung-twinsampler",
