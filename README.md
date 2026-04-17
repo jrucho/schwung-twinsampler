@@ -5,6 +5,7 @@ Twin Sampler is a high-performance "overtake" sampler module designed specifical
 [![Watch the demo](https://img.youtube.com/vi/dNPo0ITg-AQ/0.jpg)](https://youtu.be/dNPo0ITg-AQ)
 ▶️ **Watch Demo:** [https://youtu.be/dNPo0ITg-AQ](https://youtu.be/dNPo0ITg-AQ)
 
+
 ---
 
 ## Installation
@@ -134,3 +135,37 @@ Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler 
 * **Exiting:** Use the **Back** button to exit the module.
 * **Audio Routing:** Audio passes through the main Schwung/Move output path.
 * **Browser:** Use `Menu` in the browser to cycle load targets: `AUTO`, `SLOT` (force single pad), or `SRC` (force source bank).
+
+Video explainer:
+https://notebooklm.google.com/notebook/31678b7d-3a8e-4d41-8a5f-d2675b3e7298?artifactId=51636e7b-9007-4b6b-887e-5f6fd45da365
+
+Cool presentation cheatsheet/manual: 
+https://notebooklm.google.com/notebook/31678b7d-3a8e-4d41-8a5f-d2675b3e7298?artifactId=2e5a2681-70c7-47ee-9dd4-40b7615a7e9f
+
+<img width="1786" height="994" alt="1" src="https://github.com/user-attachments/assets/0309cf14-cbce-4b51-bb64-939a161f1f5b" />
+
+<img width="1789" height="997" alt="2" src="https://github.com/user-attachments/assets/3b55861e-6ce1-48d9-8f66-305a07fdc330" />
+
+<img width="1789" height="996" alt="3" src="https://github.com/user-attachments/assets/514b7eab-24be-4af7-8dbc-777282cda502" />
+
+<img width="1788" height="1000" alt="4" src="https://github.com/user-attachments/assets/61cdb326-001c-4947-85b5-ed524e1d0ed5" />
+
+<img width="1789" height="997" alt="5" src="https://github.com/user-attachments/assets/5c382054-c485-4964-9ab4-edb71773d810" />
+
+<img width="1788" height="1000" alt="6" src="https://github.com/user-attachments/assets/d78905f4-9b73-4268-be50-26177add2d98" />
+
+<img width="1787" height="997" alt="7" src="https://github.com/user-attachments/assets/fcb7850a-f68f-4b41-82e1-b884b6b4f5fb" />
+
+<img width="1787" height="996" alt="8" src="https://github.com/user-attachments/assets/9c52416d-f597-468a-8434-1dc927e48900" />
+
+<img width="1788" height="998" alt="9" src="https://github.com/user-attachments/assets/c91c4bb2-285d-4981-8deb-509b9fa69db1" />
+
+<img width="1787" height="997" alt="10" src="https://github.com/user-attachments/assets/19e6d9da-0ff9-4314-883f-f5f3932d6ed0" />
+
+
+
+
+
+
+
+
