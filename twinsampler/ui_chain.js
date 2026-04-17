@@ -2083,6 +2083,7 @@ function adjustPadStartTrim(delta) {
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
     setSlotStartTrim(a.sec, a.bank, a.slot, v);
+    retriggerFocusedPadForStartTrim();
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
 }
@@ -2140,6 +2141,27 @@ function retriggerHeldFocusedSourcePadForPitch() {
         triggerPadOn(sec, bank, slot, velocity, false, false, 'pitch-retrigger:' + String(note));
         return;
     }
+}
+
+function retriggerFocusedPadForStartTrim() {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const slot = focusedSlotIndex();
+
+    let velocity = -1;
+    const keys = Object.keys(s.activePadPress);
+    for (let i = 0; i < keys.length; i++) {
+        const press = s.activePadPress[keys[i]];
+        if (!press) continue;
+        if (press.sec !== sec || press.bank !== bank || press.slot !== slot) continue;
+        velocity = clampInt(press.velocity, 1, 127, 100);
+        break;
+    }
+    if (velocity < 1) return;
+
+    const sourceTag = 'starttrim-preview:' + String(s.transportTicks) + ':' + String(Date.now());
+    if (!triggerPadOn(sec, bank, slot, velocity, false, false, sourceTag)) return;
+    triggerPadOff(sec, bank, slot, false, false);
 }
 
 function adjustPadLoop(delta) {
@@ -2381,6 +2403,30 @@ function stopFocusedRecording(loadOnStop) {
     s.dirty = true;
 }
 
+function assignRecordedPathToTarget(path, target) {
+    const t = target || s.recTarget;
+    if (!t || !path) return false;
+
+    const sec = clampInt(t.sec, 0, GRID_COUNT - 1, 0);
+    const bank = clampInt(t.bank, 0, BANK_COUNT - 1, 0);
+    const slot = clampInt(t.slot, 0, GRID_SIZE - 1, 0);
+    const assignTarget = resolveAssignTarget(sec);
+
+    if (assignTarget === 'source') {
+        const existing = s.sections[sec].banks[bank].sourcePath;
+        if (existing && existing !== path) showStatus('Recorded overwrite source S' + (sec + 1) + 'B' + (bank + 1), 80);
+        setSourcePath(sec, bank, path, true);
+        showStatus('Recorded+loaded source S' + (sec + 1) + 'B' + (bank + 1), 110);
+        return true;
+    }
+
+    const existing = slotAt(sec, bank, slot).path;
+    if (existing && existing !== path) showStatus('Recorded overwrite ' + recordTargetLabel({ sec, bank, slot }), 80);
+    setSlotPath(sec, bank, slot, path, true);
+    showStatus('Recorded+loaded ' + recordTargetLabel({ sec, bank, slot }), 110);
+    return true;
+}
+
 function toggleFocusedRecording() {
     if (s.recording) {
         stopFocusedRecording(false);
@@ -2444,12 +2490,7 @@ function pollRecordingState() {
 
         if (path && shouldLoad) {
             const t = s.recTargetLocked || s.recTarget;
-            const existing = slotAt(t.sec, t.bank, t.slot).path;
-            if (existing && existing !== path) {
-                showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
-            }
-            setSlotPath(t.sec, t.bank, t.slot, path, true);
-            showStatus('Recorded+loaded ' + recordTargetLabel(t), 110);
+            assignRecordedPathToTarget(path, t);
         } else if (path) {
             showStatus('Recorded: ' + shortText(baseName(path), 14), 90);
         } else {
