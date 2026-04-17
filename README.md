@@ -127,7 +127,13 @@ Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler 
 * **Autosave:** Automatically saves state to `autosave.json` on exit or change.
 * **INIT Session:** A clean baseline session that cannot be deleted or overwritten.
 * **Erase Session:** Press **Erase** to erase a session.
+
+---
+
+## Pad Colours
   
+* **Bank Colour:** Press **Shift + Master Volume Touch + Knob 7** to change the current bank colour.
+* **Pad Colour:** Press **Shift + Master Volume Touch + Knob 8** to change the current pad colour.
 
 ---
 
