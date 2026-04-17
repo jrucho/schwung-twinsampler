@@ -80,7 +80,8 @@ When a pad is focused, the eight knobs control:
 - Select a pad or bank, then press the **Jog Wheel** to open the browser.  
 - Navigate folders. Sounds preview automatically when selected.  
 - Press the **Jog Wheel** again to load the sound.  
-- Press **Shift + Jog Wheel** to exit without loading.  
+- Press **Shift + Jog Wheel** to exit without loading.
+- Press **Erase** to erase a sample.
 
 ### Sampling Audio
 
@@ -124,6 +125,8 @@ Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler 
 * **Load Session:** Press **Shift + Menu** to browse and load saved sessions.
 * **Autosave:** Automatically saves state to `autosave.json` on exit or change.
 * **INIT Session:** A clean baseline session that cannot be deleted or overwritten.
+* **Erase Session:** Press **Erase** to erase a session.
+  
 
 ---
 
