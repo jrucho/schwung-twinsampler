@@ -4,7 +4,7 @@
   "name": "Twinsampler",
   "description": "[ADD SHORT DESCRIPTION]",
   "author": "jrucho",
-  "component_type": "sound_generator",
+  "component_type": "overtake",
   "github_repo": "jrucho/schwung-twinsampler",
   "default_branch": "main",
   "asset_name": "twinsampler-module.tar.gz",
