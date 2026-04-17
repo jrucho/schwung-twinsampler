@@ -1,405 +1,133 @@
 # schwung-twinsampler
 
-`TwinSampler` is an overtake sampler module for Schwung on Ableton Move.
+Twin Sampler is a high-performance "overtake" sampler module designed specifically for the **Schwung** environment on the **Ableton Move**. It features two independent 4x4 pad sections with 16 total banks, offering deep per-pad control, automatic slicing, MIDI looping, and integrated session management.
 
-It provides two independent 4x4 pad sections (left/right), each with 8 banks, with full per-pad control, source slicing mode, recording, session management, undo/redo, and autosave.
+[![Watch the demo](https://img.youtube.com/vi/dNPo0ITg-AQ/0.jpg)](https://youtu.be/dNPo0ITg-AQ)
+▶️ **Watch Demo:** [https://youtu.be/dNPo0ITg-AQ](https://youtu.be/dNPo0ITg-AQ)
 
-[![Watch the video](https://img.youtube.com/vi/dNPo0ITg-AQ/0.jpg)](https://youtu.be/dNPo0ITg-AQ)
+---
 
-▶️ Watch demo: https://youtu.be/dNPo0ITg-AQ
+## 🛠 Installation
 
-## Essential Keys (read this first)
-
-- `Jog click`: open/confirm in browser.
-- `Jog turn`: browse items or adjust main value.
-- `Step 1-16`: banks (1-8 left section, 9-16 right section).
-- `K1-K8`: pad/bank parameters (attack, decay, trim, mode, pitch, gain, loop).
-- `Copy` (main): toggle velocity mode (`Velocity Sens ON` / `Full Velocity ON`).
-- `Rec`: arm/start/stop recording cycle.
-- `Shift + Loop`: toggle loop-pad mode.
-- `Shift + Copy`: session save menu.
-- `Shift + Menu`: session load menu.
-
-### Loop pad mode (v0.1)
-
-- `Shift + Loop`: toggle loop-pad mode ON/OFF.
-- In loop-pad mode, the **top-right 4 pads** are reassigned as looper selectors/triggers (4 independent loopers).
-- In loop-pad mode, those 4 pads no longer trigger sampler voices; all other pads behave normally.
-- Looper pad LED states:
-  - off = no color
-  - recording = red
-  - playing = green
-  - overdub = orange
-- Looper pad press behavior matches loop button behavior for the selected looper, including:
-  - record -> play -> overdub -> play
-  - double press to stop
-  - double press and hold to erase
-- `Shift + looper pad` in loop-pad mode: toggle quantize ON/OFF for that looper's recorded note events (1/16 grid).
-
-### Main screen legend
-
-- `L:SRC B1  R:PAD B1` = left/right section mode + current bank.
-- `F:S1B1P1` = current focus (Section/Bank/Pad).
-- `C16 T50` = chop count and transient sensitivity.
-- Footer `Loop1:PLAY` = active looper number + state (`OFF/REC/PLAY/OVD/STOP`).
-
-## Install
-
-Place this folder at:
-
+Place the `twinsampler` folder in the following directory on your Ableton Move:
 `modules/overtake/twinsampler`
 
-Required files: 
-- `dsp.so`
-- `dsp_core.so`
-- `dsp_wrapper_monitor.c`
-- `help.json`
-- `module.json`
-- `plugin_api_v1.h`
-- `ui.js`
-- `ui_chain.js`
-
-## Quick Start
-
-1. Press `Jog click` to open the sample browser.
-2. Load a WAV file.
-3. Play pads on left/right 4x4 sections.
-4. Use `Step 1-16` to select banks (`1-8` left, `9-16` right).
-5. Edit pad/chop parameters with `K1-K8`.
-6. Save/load sessions with `Shift+Copy` / `Shift+Menu`.
-
-## Core Concepts
-
-### Two sections
-- Section 1: left 4 columns of pad matrix.
-- Section 2: right 4 columns of pad matrix.
-
-### Eight banks per section
-- Each section has banks `1-8`.
-- Bank selection is independent per section.
-
-### Two playback modes per section
-- `Source` mode: one source sample per bank, fixed 16 chops across pads.
-- `Per-Pad` mode: each pad slot can have its own sample.
-
-### Focused target
-- Tapping a pad sets focus: section, bank, slot.
-- Most edits apply to focused pad or focused bank depending on control context.
-
-## Control Manual
-
-### Main Navigation
-
-- `Jog click`:
-- In main view: opens sample browser.
-- In browser: selects/enters item.
-- With `Shift` in browser: close browser.
-- With `Shift+Vol touch`: opens session load browser.
+### Required Files:
+* `dsp.so` & `dsp_core.so` (DSP Engine)
+* `ui.js` & `ui_chain.js` (Interface & Logic)
+* `module.json`, `help.json`, and `plugin_api_v1.h`
+* `dsp_wrapper_monitor.c`
 
-- `Jog turn`:
-- In main view: record max length (seconds).
-- In browser: scroll list.
-- With `Shift` in main view: switch focused section mode (`Source` / `Per-Pad`).
+---
 
-### Pads
+## 🚀 Getting Started
 
-- Normal pad tap:
-- Triggers sound.
-- Sets focused section/slot.
+1.  **Load the Module:** Press **Shift + Touch Master Knob**, then turn the **Jog Wheel**. Navigate to *Overtake Modules* and select **Twin Sampler**.
+2.  **Select a Bank:** Use the **Step Sequencer buttons 1–16**. 
+    * Steps 1–8: Left Section
+    * Steps 9–16: Right Section
+3.  **Load a Sample:** Click the **Jog Wheel** to open the browser, navigate to a `.wav` file, and click again to load.
+4.  **Play:** Use the 4x4 pad grids to trigger your sounds.
 
-- `Shift + pad` (slot copy workflow):
-- First pad tap = copy source slot.
-- Second pad tap = paste slot settings to destination.
-- Release `Shift` to clear copy arm.
+---
 
-### Step Buttons (Bank control)
+## 🕹 Core Concepts
 
-- `Step 1-8`: select left section bank 1-8.
-- `Step 9-16`: select right section bank 1-8.
+### Two Independent Sections
+The Move’s pad matrix is split into two 4x4 grids:
+* **Left Section:** Banks 1–8. Defaults to **Source (SRC)** mode, ideal for chopping.
+* **Right Section:** Banks 1–8. Defaults to **Pad (PAD)** mode, ideal for finger drumming.
 
-- `Shift + Step`:
-- First step press = set bank copy source.
-- Second step press = copy source bank to destination bank.
+### Playback Modes
+Toggle modes for the focused section by holding **Shift** and turning the **Jog Wheel**.
+* **Source Mode (SRC):** Automatically chops a single sample into 16 pads using transient detection. Pads are in a **choke group** (they cut each other off).
+* **Pad Mode:** Each of the 16 pads can hold its own individual sample. Choking is disabled.
 
-- `Shift + Vol touch + Step`:
-- Clear/reset that destination bank content.
-- Bank color is preserved.
+### Velocity Toggle
+* **Copy Button:** Press the main **Copy** button (no shift) to toggle between `Velocity Sens ON` and `Full Velocity` (Fixed 127).
 
-### Knobs: Normal Edit (Main view)
+---
 
-Default scope is pad (`P`).
+## 🎛 Control Manual
 
-- `K1`: Attack
-- `K2`: Decay
-- `K3`: Start trim
-- `K4`: End trim
-- `K5`: Trigger/Gate toggle
-- `K6`: Pitch
-- `K7`: Gain
-- `K8`: Loop mode
-- Trim detail: `K3/K4` now use fine trim by default; hold `Shift` while turning for coarse trim.
+### Parameter Knobs (K1–K8)
+When a pad is focused, the eight knobs control:
+* **K1:** Attack
+* **K2:** Decay
+* **K3:** Start Trim (Hold **Shift** for coarse adjustment)
+* **K4:** End Trim (Hold **Shift** for coarse adjustment)
+* **K5:** Trigger / Gate Toggle
+* **K6:** Pitch
+* **K7:** Gain
+* **K8:** Loop Mode (Off, On, or Ping-pong)
 
-### Knobs: Shift Edit Layer (Main view, no Vol touch)
+### Shift & Utility Actions
+* **Global Bank Edit:** Hold **Shift + Knob** to apply a parameter change to **all pads** in the focused bank.
+* **Copy Pad:** Hold **Shift**, tap the source pad, then tap the destination pad.
+* **Copy Bank:** Hold **Shift**, press the source **Step button**, then the destination **Step button**.
+* **Erase:**
+    * **Delete + Pad:** Clears audio from a specific pad.
+    * **Shift + Delete:** Clears all audio in the focused bank.
+* **Capture:** In Source mode, press **Capture** to randomize or rebuild the transient chop map.
+* **Undo/Redo:** Press **Undo** for latest edit; **Shift + Undo** for Redo. (This action takes a few seconds. There is no loading screen, so wait a moment while the undo or redo completes.)
 
-- `Shift + K1`: all slots attack (focused bank)
-- `Shift + K2`: all slots decay (focused bank)
-- `Shift + K3`: all slots start trim (focused bank)
-- `Shift + K4`: all slots end trim (focused bank)
-- `Shift + K5`: all slots trig/gate (focused bank)
-- `Shift + K6`:
-- In `Source` mode: focused source-bank pitch (applies to all chops/slots in bank)
-- In `Per-Pad` mode: global pitch
-- `Shift + K7`: all slots gain (focused bank)
-- `Shift + K8`: all slots loop mode (focused bank)
+---
 
-### Knobs: Shift + Vol Touch Layer
+## 🎙️ Recording & Browsing
 
-- `Shift + Vol touch + K5`: toggle edit scope (`Pad` / `Bank`)
-- `Shift + Vol touch + K6`: propagate focused source bank to all banks in focused section
-- `Shift + Vol touch + K7`: bank color
-- `Shift + Vol touch + K8`: pad color
+### Browsing Samples
 
-### Scope Behavior
+- Select a pad or bank, then press the **Jog Wheel** to open the browser.  
+- Navigate folders. Sounds preview automatically when selected.  
+- Press the **Jog Wheel** again to load the sound.  
+- Press **Shift + Jog Wheel** to exit without loading.  
 
-When scope is `Bank` (`G`) in normal (non-shift) knob page:
-- `K1-K4`: all-pad attack/decay/start/end
-- `K5`: all-pad trig/gate
-- `K6`: global pitch
-- `K7`: global gain
-- `K8`: all-pad loop
+### Sampling Audio
 
-When scope is `Pad` (`P`), knobs edit focused slot only.
-Pressing a pad in normal mode re-focuses scope to `Pad` to keep knob edits locked to the selected pad.
+- Make sure your input (**USB-C** or **Line In**) is configured in the Overtake recording area.  
 
-### Transport / Utility Buttons
+### Standard Recording
 
-- `Copy` (no shift, main view): toggle `Velocity Sens ON` / `Full Velocity ON`.
-- Default on fresh first launch is `Full Velocity ON`.
-- `Capture` (main view): randomize transients/chop starts for focused source bank.
-- `Shift + Vol touch + Copy` (main view): same transient randomize shortcut.
+- Press the **Record** button. It will blink in monitor mode.  
+- Press **Record** again to start recording.  
+- The audio is saved in the `recorded` folder.  
 
-- `Delete`:
-- In main view: clear focused pad audio.
-- In browser samples view: delete selected `.wav` file.
-- In browser sessions view: delete selected session file.
+### Auto-Map Recording
 
-- `Shift + Delete` (main view): clear all audio in focused bank.
+- Select a Source bank or Pad first.  
+- Press **Shift + Record**.  
+- The recording is automatically sent to your selected target.  
+- In **Source Mode**, it is auto-chopped after recording.  
 
-- `Undo`: if looper has a recorded overdub layer, undo that looper layer first; otherwise undo latest edit state.
-- `Shift + Undo`: redo latest undone state.
+### Exit Record Mode
 
-- `Shift + Master knob turn`: adjust TwinSampler module gain (`global_gain`).
+- While the Record button is blinking, press **Shift + Record** to cancel.
 
-### Sample Browser Manual
+---
 
-Open with `Jog click` from main view.
-
-### Behavior
-
-- Shows directories and `.wav` files under:
-- `/data/UserData/UserLibrary/Samples`
-
-- WAV preview:
-- Highlighting a WAV queues automatic preview playback.
-- Preview stops when leaving relevant context.
-
-### Selection
-
-- `Jog click` / `Menu` on directory: enter directory.
-- `Jog click` / `Menu` on WAV: load to current target.
-
-### Load target mode
-
-- `Menu` in sample browser cycles target mode:
-- `AUTO`: source if section is Source mode, otherwise slot.
-- `SLOT`: force load into focused slot.
-- `SRC`: force load as focused bank source sample.
-
-### Session System Manual
-
-Sessions are stored in:
-- `/data/UserData/UserLibrary/TwinSamplerSessions`
-
-Autosave file:
-- `/data/UserData/UserLibrary/twinsampler-autosave-v1.json`
-
-### What a session saves
-
-- Section modes and current banks
-- Source paths
-- Per-slot sample paths
-- Per-slot parameters (attack/decay/trims/gain/pitch/mode/loop)
-- Colors (bank + pad)
-- Global settings (gain/pitch, velocity, etc.)
-- Source slice start map/transient state
-- Looper state (`activeLooper`, loop-pad mode, and recorded looper note events/length)
-- Looper quantize toggle state and pre-quantize event snapshot (for unquantize toggle recovery)
-
-### Open session menus
-
-- `Shift + Copy`: open session **save** menu (auto name prepared).
-- `Shift + Menu`: open session **load** menu.
-- `Shift + Vol + Jog click`: open session load menu (legacy shortcut).
-
-### Session browser controls
-
-- `K1`: session name character index
-- `K2`: session name character value
-
-- `Menu` / `Jog click`:
-- Load selected session.
-
-- `Copy`:
-- In save menu: save current name.
-- In load menu: copy selected session name to current name field.
-
-- `Shift + Copy`:
-- Save current name (quick save while holding shift).
-
-- `Shift + Vol + Copy`:
-- Duplicate selected session to next free auto name.
-
-- `Shift + Menu`:
-- Rename selected session to current name field.
-
-- `Delete`:
-- Delete selected session file.
-- Session naming supports auto-increment far beyond 10 (`SESSION01`, `SESSION10`, `SESSION99999`).
-
-### INIT baseline session
-
-- `INIT` session is always ensured on disk.
-- `INIT` is a clean baseline for starting from scratch.
-- `INIT` is locked:
-- cannot be renamed
-- cannot be deleted
-- cannot be overwritten directly by save
-
-### Autosave
-
-- Most state edits schedule autosave with a short delay.
-- Autosave is also written on module exit.
-
-### Startup load order
-
-On init, TwinSampler attempts:
-1. autosave
-2. named session (`sessionName`)
-3. legacy session file (`twinsampler-session-v2.json`)
-4. `INIT`
-5. otherwise defaults
-
-### Recording
-
-- `Rec` button in main view now works as a 3-step cycle:
-1. first press: arm record + enable monitor (LED blinks)
-2. second press (while blinking): start recording (monitor remains on)
-3. third press: stop recording + disable monitor
-- `Shift + Rec` while recording: stop recording, disable monitor, and auto-load the recorded file to the target locked when recording started.
-- While recording, wrapper DSP feeds the recorder with `Line In + Schwung audio bus` mixed together when both are active (auto mode).
-- In auto mode, if only one source is active, recorder captures that source directly (clean `Line In` or clean `Schwung` bus).
-- Mixed capture uses float-domain summing with equal-power dual-source headroom and dithering on int16 handoff to reduce quantization artifacts without limiter coloration.
-- Monitoring remains `Line In` only (Schwung bus is added to record path, not monitor path).
-- Recording target is focused section/bank/slot.
-- In `Source` mode, load target is focused bank source.
-- In `Per-Pad` mode, load target is focused slot.
-- Record max length is adjusted with `Jog turn` in main view.
-- Record LED is solid while recording and blinking while armed.
-
-### Source Mode Details
-
-- Chop count is fixed at 16.
-- Source banks use transient-derived slice starts.
-- `Capture` randomizes/rebuilds transient slice map.
-- Playback uses longer tails for practical trim editing.
-
-## Audio and Routing Notes
-
-- TwinSampler is an `overtake` module (`component_type: overtake`).
-- Module audio passes through Schwung/Move output path.
-- Schwung master volume and master FX chain are host-level concerns.
-- TwinSampler internal loudness trim is available via `Shift + Master knob turn` (module gain).
-
-## Files and Roles
-
-- `module.json`: manifest/capabilities
-- `ui.js`: overtake wrapper, exit hook
-- `ui_chain.js`: main control/UI/session logic
-- `dsp.so`: monitor wrapper DSP (forwards to core + mixes live input when monitor is enabled)
-- `dsp_core.so`: original TwinSampler DSP engine binary
-- `dsp_wrapper_monitor.c`: wrapper source
-- `help.json`: on-device help pages
-
-## Internal Function Map (`ui_chain.js`)
-
-Main runtime:
-- `init()`: startup flow, session restore order, DSP sync bootstrap.
-- `tick()`: polling, autosave tick, browser preview tick, LED queue drain, draw.
-- `onMidiMessageInternal(data)`: top-level control dispatcher.
-- `updateRecordButtonLed()`: drives Rec LED for armed blink and recording solid.
-
-Browsers:
-- `browserOpen(path, mode)`: opens samples/sessions browser and refreshes entries.
-- `browserSelect()`: loads selected sample/session depending on mode.
-- `cycleAssignMode()`: sample-browser target cycling (`AUTO/SLOT/SRC`).
-
-Session system:
-- `serializeSession()`: builds full persisted session payload.
-- `loadSessionFromPath(path, silent, trackHistory)`: load JSON session and apply.
-- `saveSessionNamed(silent)`: save current state using current session name.
-- `copySelectedSessionToAutoName()`: duplicate selected session to next free name.
-- `renameSelectedSessionToCurrentName()`: rename selected session.
-- `deleteSelectedSession()`: delete selected session file.
-- `ensureInitSessionFile()`: guarantees permanent `INIT` baseline session exists.
-
-History:
-- `markSessionChanged()`: marks autosave + history snapshot on edits.
-- `undoSessionState()`: undo to previous snapshot.
-- `redoSessionState()`: redo previously undone snapshot.
-
-Editing and DSP sync:
-- `setSelectedSlice(sliceIdx, ...)`: updates focused section/slot and DSP cursor.
-- `ensureEditCursor(blocking)`: syncs edit section/bank/slot to DSP.
-- `sendSlotParamCompat(...)`: sends slot params with cursor/direct compatibility path.
-
-Audio/sample operations:
-- `setSourcePath(...)`: assign/clear source sample for section/bank.
-- `setSlotPath(...)`: assign/clear per-slot sample.
-- `randomizeFocusedTransientSlices()`: rebuild source-bank transient chop map.
-- `clearFocusedPadAudio()`: erase focused pad sample (or source in source mode fallback).
-- `clearFocusedBankAudio()`: erase all slot/source audio for focused bank.
-
-Control layers:
-- `handleMainKnob(delta)`: record-length / browser scroll / mode switching behavior.
-- `handleParamKnob(cc, delta)`: K1-K8 logic by scope and modifier state.
-- `handleStepBankNote(note, velocity)`: bank select/copy/clear actions.
-- `handlePadNote(note, velocity)`: play/select pads and Shift copy workflow.
-
-## Troubleshooting
-
-### Parameter seems to update only after bank switch
-
-If a parameter appears stale, update to latest `ui_chain.js` from this repo state. Cursor-sync handling was tightened to avoid stale non-blocking cursor cache.
-
-### Velocity toggle seems to require extra press
-
-Same recommendation: latest `ui_chain.js` includes blocking send for velocity toggle.
-
-### Browser preview works but pad playback does not
-
-1. Confirm module is installed in `modules/overtake/twinsampler`.
-2. Confirm you are in the expected section and bank.
-3. In `Source` mode, ensure a source sample is loaded.
-4. In `Per-Pad` mode, ensure focused slot has a sample.
-
-### Module updates not reflected on device
-
-1. Re-copy the full folder.
-2. Remove old duplicate folder versions.
-3. Restart Schwung / reload module.
-
-## Notes
-
-- TwinSampler is optimized for Move’s 6-line display and overtake workflow.
-- Left and right sections are independent at UI/state level.
-- The module may run in a dirty device environment; session files are plain JSON for easy recovery.
+## 🔁 MIDI Loopers
+Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler includes its own looper.
+* **Single Looper:** Use the **Loop** button. (1st press: Rec, 2nd: Play, 3rd: Overdub). Double-tap to stop. Tap or double to erase.
+* **Multi-Looper Mode:** Press **Shift + Loop** to activate the **top-right 4 pads** as independent looper triggers.
+    * **Red:** Recording | **Purple:** Playing / standby | **Yellow:** Overdub
+* **Quantize:** Press **Shift + Loop button** (or Shift + Looper Pad) to toggle 1/16th note quantization.
+* **Erase:** Double tap and hold a looper pad to clear its MIDI notes.
+* **Mute:** Press and hold the **Mute** button, then press pads to mute them.  
+* **Erase MIDI Notes:** Press and hold the **Erase** button, then press pads to remove their MIDI notes.  
+* **Copy Loop Clips:** Press and hold the **Copy** button, then press an empty looper pad.
+
+---
+
+## 💾 Sessions & Saving
+* **Save Session:** Press **Shift + Copy** to open the save menu. (K1/K2 to edit name).
+* **Quick Save:** Press **Shift + Copy** again while in the menu.
+* **Load Session:** Press **Shift + Menu** to browse and load saved sessions.
+* **Autosave:** Automatically saves state to `autosave.json` on exit or change.
+* **INIT Session:** A clean baseline session that cannot be deleted or overwritten.
+
+---
+
+## ⚠️ Notes
+* **Exiting:** Use the **Back** button to exit the module.
+* **Audio Routing:** Audio passes through the main Schwung/Move output path.
+* **Browser:** Use `Menu` in the browser to cycle load targets: `AUTO`, `SLOT` (force single pad), or `SRC` (force source bank).
