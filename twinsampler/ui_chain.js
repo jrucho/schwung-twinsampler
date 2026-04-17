@@ -2402,6 +2402,30 @@ function stopFocusedRecording(loadOnStop) {
     s.dirty = true;
 }
 
+function assignRecordedPathToTarget(path, target) {
+    const t = target || s.recTarget;
+    if (!t || !path) return false;
+
+    const sec = clampInt(t.sec, 0, GRID_COUNT - 1, 0);
+    const bank = clampInt(t.bank, 0, BANK_COUNT - 1, 0);
+    const slot = clampInt(t.slot, 0, GRID_SIZE - 1, 0);
+    const assignTarget = resolveAssignTarget(sec);
+
+    if (assignTarget === 'source') {
+        const existing = s.sections[sec].banks[bank].sourcePath;
+        if (existing && existing !== path) showStatus('Recorded overwrite source S' + (sec + 1) + 'B' + (bank + 1), 80);
+        setSourcePath(sec, bank, path, true);
+        showStatus('Recorded+loaded source S' + (sec + 1) + 'B' + (bank + 1), 110);
+        return true;
+    }
+
+    const existing = slotAt(sec, bank, slot).path;
+    if (existing && existing !== path) showStatus('Recorded overwrite ' + recordTargetLabel({ sec, bank, slot }), 80);
+    setSlotPath(sec, bank, slot, path, true);
+    showStatus('Recorded+loaded ' + recordTargetLabel({ sec, bank, slot }), 110);
+    return true;
+}
+
 function toggleFocusedRecording() {
     if (s.recording) {
         stopFocusedRecording(false);
@@ -2465,12 +2489,7 @@ function pollRecordingState() {
 
         if (path && shouldLoad) {
             const t = s.recTargetLocked || s.recTarget;
-            const existing = slotAt(t.sec, t.bank, t.slot).path;
-            if (existing && existing !== path) {
-                showStatus('Recorded overwrite ' + recordTargetLabel(t), 80);
-            }
-            setSlotPath(t.sec, t.bank, t.slot, path, true);
-            showStatus('Recorded+loaded ' + recordTargetLabel(t), 110);
+            assignRecordedPathToTarget(path, t);
         } else if (path) {
             showStatus('Recorded: ' + shortText(baseName(path), 14), 90);
         } else {
