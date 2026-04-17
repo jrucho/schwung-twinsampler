@@ -7,7 +7,7 @@ Twin Sampler is a high-performance "overtake" sampler module designed specifical
 
 ---
 
-## 🛠 Installation
+## Installation
 
 Place the `twinsampler` folder in the following directory on your Ableton Move:
 `modules/overtake/twinsampler`
@@ -20,7 +20,7 @@ Place the `twinsampler` folder in the following directory on your Ableton Move:
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 1.  **Load the Module:** Press **Shift + Touch Master Knob**, then turn the **Jog Wheel**. Navigate to *Overtake Modules* and select **Twin Sampler**.
 2.  **Select a Bank:** Use the **Step Sequencer buttons 1–16**. 
@@ -31,7 +31,7 @@ Place the `twinsampler` folder in the following directory on your Ableton Move:
 
 ---
 
-## 🕹 Core Concepts
+## Core Concepts
 
 ### Two Independent Sections
 The Move’s pad matrix is split into two 4x4 grids:
@@ -48,7 +48,7 @@ Toggle modes for the focused section by holding **Shift** and turning the **Jog 
 
 ---
 
-## 🎛 Control Manual
+## Control Manual
 
 ### Parameter Knobs (K1–K8)
 When a pad is focused, the eight knobs control:
@@ -73,7 +73,7 @@ When a pad is focused, the eight knobs control:
 
 ---
 
-## 🎙️ Recording & Browsing
+## Recording & Browsing
 
 ### Browsing Samples
 
@@ -105,7 +105,7 @@ When a pad is focused, the eight knobs control:
 
 ---
 
-## 🔁 MIDI Loopers
+## MIDI Loopers
 Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler includes its own looper.
 * **Single Looper:** Use the **Loop** button. (1st press: Rec, 2nd: Play, 3rd: Overdub). Double-tap to stop. Tap or double to erase.
 * **Multi-Looper Mode:** Press **Shift + Loop** to activate the **top-right 4 pads** as independent looper triggers.
@@ -118,7 +118,7 @@ Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler 
 
 ---
 
-## 💾 Sessions & Saving
+## Sessions & Saving
 * **Save Session:** Press **Shift + Copy** to open the save menu. (K1/K2 to edit name).
 * **Quick Save:** Press **Shift + Copy** again while in the menu.
 * **Load Session:** Press **Shift + Menu** to browse and load saved sessions.
@@ -127,7 +127,7 @@ Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler 
 
 ---
 
-## ⚠️ Notes
+## Notes
 * **Exiting:** Use the **Back** button to exit the module.
 * **Audio Routing:** Audio passes through the main Schwung/Move output path.
 * **Browser:** Use `Menu` in the browser to cycle load targets: `AUTO`, `SLOT` (force single pad), or `SRC` (force source bank).
