@@ -40,6 +40,8 @@ const MoveUndo = pickConst('MoveUndo', 56);
 const MoveDelete = pickConst('MoveDelete', 119);
 const MoveMaster = pickConst('MoveMaster', 79);
 const MoveMasterTouch = pickConst('MoveMasterTouch', 8);
+const MoveArrowLeft = pickConst('MoveArrowLeft', pickConst('MoveLeft', 44));
+const MoveArrowRight = pickConst('MoveArrowRight', pickConst('MoveRight', 45));
 const Black = pickConst('Black', 0);
 const BrightRed = pickConst('BrightRed', 127);
 
@@ -136,6 +138,8 @@ const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
 const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
+const LOOPER_COUNT = 16;
+const LOOPER_PAGE_SIZE = 4;
 
 function createLooperState() {
     return {
@@ -380,9 +384,11 @@ const s = {
 
     transportTicks: 0,
     padPressFlash: {},
-    midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
+    midiLoopers: Array.from({ length: LOOPER_COUNT }, () => createLooperState()),
     activeLooper: 0,
     loopPadMode: false,
+    loopPadPage: 0,
+    loopPadSection: 1, /* 1=right grid, 0=left grid */
 
     statusText: '',
     statusTicks: 0,
@@ -626,7 +632,9 @@ function makeInitSessionPayload() {
         recordMaxSeconds: 30,
         activeLooper: 0,
         loopPadMode: false,
-        midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
+        midiLoopers: Array.from({ length: LOOPER_COUNT }, () => createLooperState()),
+        loopPadPage: 0,
+        loopPadSection: 1,
         sections: [
             {
                 mode: left.mode,
@@ -1204,7 +1212,7 @@ function looperNowMs() {
 }
 
 function currentLooper() {
-    const idx = clampInt(s.activeLooper, 0, 3, 0);
+    const idx = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
     return s.midiLoopers[idx];
 }
 
@@ -1221,7 +1229,18 @@ function looperStateColor(state) {
 }
 
 function loopPadIndexFromPadNote(note) {
-    return LOOP_PAD_NOTES.indexOf(note);
+    if (!s.loopPadMode) return -1;
+    const slice = sliceFromPadNote(note);
+    if (slice < 0) return -1;
+    const sec = sectionFromSlice(slice);
+    if (sec !== clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1)) return -1;
+    const slot = slotFromSlice(slice);
+    const maxPage = Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE));
+    const pageStart = clampInt(s.loopPadPage, 0, maxPage, 0) * LOOPER_PAGE_SIZE;
+    if (slot < 0 || slot >= LOOPER_PAGE_SIZE) return -1;
+    const idx = pageStart + slot;
+    if (idx < 0 || idx >= s.midiLoopers.length) return -1;
+    return idx;
 }
 
 function previewCanPlay() {
@@ -2670,8 +2689,10 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
-        activeLooper: clampInt(s.activeLooper, 0, 3, 0),
+        activeLooper: clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0),
         loopPadMode: !!s.loopPadMode,
+        loopPadPage: clampInt(s.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0),
+        loopPadSection: clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1),
         midiLoopers: s.midiLoopers.map((l) => ({
             state: (l && (l.state === 'playing' || l.state === 'stopped' || l.state === 'empty')) ? l.state : (l && l.events && l.events.length ? 'stopped' : 'empty'),
             quantized: (l && l.quantized) ? 1 : 0,
@@ -2857,9 +2878,11 @@ function applyParsedSession(parsed, silent, label) {
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
-    s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
-    s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
+    s.midiLoopers = Array.from({ length: LOOPER_COUNT }, (_, i) => sanitizeLooperState(rawLoopers[i]));
+    s.activeLooper = clampInt(parsed.activeLooper, 0, s.midiLoopers.length - 1, 0);
     s.loopPadMode = !!parsed.loopPadMode;
+    s.loopPadPage = clampInt(parsed.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0);
+    s.loopPadSection = clampInt(parsed.loopPadSection, 0, GRID_COUNT - 1, 1);
 
     const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
     s.sections = [
@@ -3420,7 +3443,7 @@ function looperQuantize(index, steps = 16) {
         l.events = l.preQuantizeEvents.map((ev) => Object.assign({}, ev));
         l.quantized = 0;
         l.preQuantizeEvents = [];
-        showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': unquantized', 100);
+        showStatus('Looper ' + (clampInt(index, 0, s.midiLoopers.length - 1, 0) + 1) + ': unquantized', 100);
         markSessionChanged();
         s.dirty = true;
         return true;
@@ -3459,7 +3482,7 @@ function looperQuantize(index, steps = 16) {
 
     l.events = quantized;
     l.quantized = 1;
-    showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': quantized 1/' + safeSteps, 100);
+    showStatus('Looper ' + (clampInt(index, 0, s.midiLoopers.length - 1, 0) + 1) + ': quantized 1/' + safeSteps, 100);
     markSessionChanged();
     s.dirty = true;
     return true;
@@ -3511,7 +3534,7 @@ function handleLoopButtonRelease() {
 
 function stopActiveLooperForSwitch() {
     const l = currentLooper();
-    releaseVoicesByOwner('looper:' + String(clampInt(s.activeLooper, 0, 3, 0)), looperNowMs());
+    releaseVoicesByOwner('looper:' + String(clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0)), looperNowMs());
     if (l.state === 'recording') looperFinishRecordingStartPlayback();
     if (l.state === 'playing' || l.state === 'overdub') {
         l.state = 'stopped';
@@ -3521,7 +3544,7 @@ function stopActiveLooperForSwitch() {
 }
 
 function selectLooper(index) {
-    const next = clampInt(index, 0, 3, 0);
+    const next = clampInt(index, 0, s.midiLoopers.length - 1, 0);
     if (next === s.activeLooper) return;
     stopActiveLooperForSwitch();
     s.activeLooper = next;
@@ -3609,7 +3632,7 @@ function copyActiveLooperTo(index) {
 }
 
 function fireLooperPad(index) {
-    const next = clampInt(index, 0, 3, 0);
+    const next = clampInt(index, 0, s.midiLoopers.length - 1, 0);
     if (s.deleteHeld) {
         eraseLooperAt(next);
         return;
@@ -3632,6 +3655,33 @@ function toggleLoopPadMode() {
     showStatus(s.loopPadMode ? 'Looper pad mode ON' : 'Looper pad mode OFF', 90);
     markLedsDirty();
     updateUtilityButtonLeds();
+}
+
+function shiftLooperPadWindow(delta) {
+    if (!s.loopPadMode || delta === 0) return false;
+    const dir = delta > 0 ? 1 : -1;
+    const maxPage = Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE));
+    let nextPage = clampInt(s.loopPadPage, 0, maxPage, 0) + dir;
+    let nextSection = clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1);
+
+    if (nextPage > maxPage) {
+        nextPage = maxPage;
+        nextSection = nextSection === 1 ? 0 : 1;
+    } else if (nextPage < 0) {
+        nextPage = 0;
+        nextSection = nextSection === 1 ? 0 : 1;
+    }
+
+    const changed = nextPage !== s.loopPadPage || nextSection !== s.loopPadSection;
+    s.loopPadPage = nextPage;
+    s.loopPadSection = nextSection;
+    if (!changed) return false;
+
+    const end = Math.min(s.midiLoopers.length, (s.loopPadPage + 1) * LOOPER_PAGE_SIZE);
+    const secLabel = s.loopPadSection === 1 ? 'right' : 'left';
+    showStatus('Loopers ' + (s.loopPadPage * LOOPER_PAGE_SIZE + 1) + '-' + end + ' on ' + secLabel, 90);
+    markLedsDirty();
+    return true;
 }
 
 function tickMidiLooperButtonHold() {
@@ -3768,7 +3818,7 @@ function tickMidiLooperPlayback() {
         if (ev.type === 'on') {
             if (isPadMuted(ev.sec, ev.bank, ev.slot)) continue;
             const vel = clampInt(ev.velocity, 1, 127, 100);
-            triggerPadOn(ev.sec, ev.bank, ev.slot, vel, true, false, 'looper:' + String(clampInt(s.activeLooper, 0, 3, 0)));
+            triggerPadOn(ev.sec, ev.bank, ev.slot, vel, true, false, 'looper:' + String(clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0)));
         } else {
             triggerPadOff(ev.sec, ev.bank, ev.slot, true, false);
         }
@@ -4376,6 +4426,13 @@ function onMidiMessageInternal(data) {
             return;
         }
 
+        if ((cc === MoveArrowRight || cc === MoveArrowLeft) && val > 0) {
+            if (s.view === 'main' && s.loopPadMode) {
+                shiftLooperPadWindow(cc === MoveArrowRight ? 1 : -1);
+                return;
+            }
+        }
+
         if (cc === MoveMainKnob) {
             handleMainKnob(decodeDelta(val));
             return;
@@ -4437,13 +4494,17 @@ function init() {
     if (!restoredFromSession) {
         s.loopPadMode = false;
         s.activeLooper = 0;
+        s.loopPadPage = 0;
+        s.loopPadSection = 1;
     } else {
-        s.activeLooper = clampInt(s.activeLooper, 0, 3, 0);
+        s.activeLooper = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
+        s.loopPadPage = clampInt(s.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0);
+        s.loopPadSection = clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1);
     }
     for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
     for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
-    if (!Array.isArray(s.midiLoopers) || s.midiLoopers.length !== 4) {
-        s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
+    if (!Array.isArray(s.midiLoopers) || s.midiLoopers.length !== LOOPER_COUNT) {
+        s.midiLoopers = Array.from({ length: LOOPER_COUNT }, () => createLooperState());
     }
     for (let i = 0; i < s.midiLoopers.length; i++) {
         const l = s.midiLoopers[i];
