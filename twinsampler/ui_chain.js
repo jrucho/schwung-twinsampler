@@ -2083,6 +2083,7 @@ function adjustPadStartTrim(delta) {
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
     setSlotStartTrim(a.sec, a.bank, a.slot, v);
+    retriggerFocusedPadForStartTrim();
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
 }
@@ -2140,6 +2141,26 @@ function retriggerHeldFocusedSourcePadForPitch() {
         triggerPadOn(sec, bank, slot, velocity, false, false, 'pitch-retrigger:' + String(note));
         return;
     }
+}
+
+function retriggerFocusedPadForStartTrim() {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const slot = focusedSlotIndex();
+
+    let velocity = 100;
+    const keys = Object.keys(s.activePadPress);
+    for (let i = 0; i < keys.length; i++) {
+        const press = s.activePadPress[keys[i]];
+        if (!press) continue;
+        if (press.sec !== sec || press.bank !== bank || press.slot !== slot) continue;
+        velocity = clampInt(press.velocity, 1, 127, 100);
+        break;
+    }
+
+    const sourceTag = 'starttrim-preview:' + String(s.transportTicks) + ':' + String(Date.now());
+    if (!triggerPadOn(sec, bank, slot, velocity, false, false, sourceTag)) return;
+    triggerPadOff(sec, bank, slot, false, false);
 }
 
 function adjustPadLoop(delta) {
