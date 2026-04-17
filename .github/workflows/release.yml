@@ -1,0 +1,64 @@
+name: Release Module
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      MODULE_ID: twinsampler
+      ASSET_NAME: twinsampler-module.tar.gz
+      DEFAULT_BRANCH: main
+
+    steps:
+      - name: Checkout tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build module
+        run: ./scripts/build.sh
+
+      - name: Package module tarball
+        run: |
+          rm -f "$ASSET_NAME"
+          tar -C dist -czf "$ASSET_NAME" "$MODULE_ID"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.ASSET_NAME }}
+
+      - name: Update release.json on main
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          VERSION="${TAG#v}"
+          DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${TAG}/${ASSET_NAME}"
+
+          git fetch origin "${DEFAULT_BRANCH}"
+          git checkout "${DEFAULT_BRANCH}"
+
+          printf '{"version": "%s", "download_url": "%s"}\n' "$VERSION" "$DOWNLOAD_URL" > release.json
+
+          if git diff --quiet -- release.json; then
+            echo "release.json is already up to date."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release.json
+          git commit -m "chore: update release.json for ${TAG}"
+          git push origin "HEAD:${DEFAULT_BRANCH}"
