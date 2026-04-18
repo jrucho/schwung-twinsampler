@@ -1238,7 +1238,8 @@ function loopPadIndexFromPadNote(note) {
     const slice = sliceFromPadNote(note);
     if (slice < 0) return -1;
     const sec = sectionFromSlice(slice);
-    if (sec !== clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1)) return -1;
+    const activeSection = s.loopPadFullGrid ? clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1) : 1;
+    if (sec !== activeSection) return -1;
     const slot = slotFromSlice(slice);
     if (s.loopPadFullGrid) {
         if (slot < 0 || slot >= s.midiLoopers.length) return -1;
@@ -3663,6 +3664,11 @@ function fireLooperPad(index) {
 
 function toggleLoopPadMode() {
     s.loopPadMode = !s.loopPadMode;
+    if (s.loopPadMode) {
+        s.loopPadPage = 0;
+        s.loopPadSection = 1;
+        s.loopPadFullGrid = false;
+    }
     showStatus(s.loopPadMode ? 'Looper pad mode ON' : 'Looper pad mode OFF', 90);
     markLedsDirty();
     updateUtilityButtonLeds();
@@ -3677,7 +3683,14 @@ function shiftLooperPadWindow(delta) {
     let nextFullGrid = !!s.loopPadFullGrid;
 
     if (nextFullGrid) {
-        nextSection = nextSection === 1 ? 0 : 1;
+        if (dir < 0) {
+            /* Exit full-grid takeover back to paged looper rows on the right grid. */
+            nextFullGrid = false;
+            nextSection = 1;
+            nextPage = maxPage;
+        } else {
+            nextSection = nextSection === 1 ? 0 : 1;
+        }
     } else if (dir > 0) {
         if (nextPage < maxPage) {
             nextPage++;
@@ -3687,6 +3700,7 @@ function shiftLooperPadWindow(delta) {
         }
     } else {
         if (nextPage > 0) nextPage--;
+        nextSection = 1;
     }
 
     const changed = nextPage !== s.loopPadPage || nextSection !== s.loopPadSection || nextFullGrid !== s.loopPadFullGrid;
