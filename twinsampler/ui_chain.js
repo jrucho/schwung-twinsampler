@@ -1029,13 +1029,19 @@ function scheduleTrimReplayAll(ticks = SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD) {
     );
 }
 
-function replayAllSlotTrimsToDsp() {
+function replayAllSlotParamsToDsp() {
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) {
             for (let slot = 0; slot < GRID_SIZE; slot++) {
                 const sl = slotAt(sec, bank, slot);
+                sp('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)));
+                sp('slot_decay_at', fmtAt(sec, bank, slot, sl.decay.toFixed(2)));
                 sp('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)));
                 sp('slot_end_trim_at', fmtAt(sec, bank, slot, sl.endTrim.toFixed(2)));
+                sp('slot_gain_at', fmtAt(sec, bank, slot, sl.gain.toFixed(3)));
+                sp('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)));
+                sp('slot_mode_at', fmtAt(sec, bank, slot, sl.modeGate));
+                sp('slot_loop_at', fmtAt(sec, bank, slot, sl.loop));
             }
         }
     }
@@ -4291,7 +4297,7 @@ function syncFromDsp() {
         s.trimReplayTicks--;
         if (s.trimReplayTicks === 0 && s.trimReplayPendingAll) {
             s.trimReplayPendingAll = false;
-            replayAllSlotTrimsToDsp();
+            replayAllSlotParamsToDsp();
             invalidatePlaybackCompat();
             syncFocusedSlotPlaybackCompat(true);
         }
