@@ -141,6 +141,7 @@ const TRIM_STEP_COARSE = 5.0;
 const SLOT_TRIM_MIN_MS = -600000.0;
 const SLOT_TRIM_MAX_MS = 600000.0;
 const SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD = 24;
+const SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD = 36;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
@@ -405,6 +406,8 @@ const s = {
     autosavePending: false,
     autosaveTicks: 0,
     focusedParamRefreshTicks: 0,
+    trimReplayTicks: 0,
+    trimReplayPendingAll: false,
 
     undoHistory: [],
     redoHistory: [],
@@ -1018,6 +1021,26 @@ function scheduleFocusedSlotRefresh(ticks = SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD)
     );
 }
 
+function scheduleTrimReplayAll(ticks = SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD) {
+    s.trimReplayPendingAll = true;
+    s.trimReplayTicks = Math.max(
+        clampInt(ticks, 0, 2048, SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD),
+        clampInt(s.trimReplayTicks, 0, 2048, 0)
+    );
+}
+
+function replayAllSlotTrimsToDsp() {
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        for (let bank = 0; bank < BANK_COUNT; bank++) {
+            for (let slot = 0; slot < GRID_SIZE; slot++) {
+                const sl = slotAt(sec, bank, slot);
+                sp('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)));
+                sp('slot_end_trim_at', fmtAt(sec, bank, slot, sl.endTrim.toFixed(2)));
+            }
+        }
+    }
+}
+
 function bankSliceStateKey(prefix, sec, bank) {
     return prefix + '_' + clampInt(sec, 0, GRID_COUNT - 1, 0) + '_' + clampInt(bank, 0, BANK_COUNT - 1, 0);
 }
@@ -1489,6 +1512,7 @@ function setSlotPath(sec, bank, slot, path, sendToDsp) {
 
     if (sl.path) spb('slot_sample_path', sec + ':' + bank + ':' + slot + ':' + sl.path, 500);
     else spb('clear_slot_sample', sec + ':' + bank + ':' + slot, 500);
+    scheduleTrimReplayAll();
     if (sec === s.focusedSection && bank === focusedBankIndex(sec) && slot === focusedSlotIndex()) {
         invalidatePlaybackCompat();
         syncFocusedSlotPlaybackCompat(true);
@@ -2919,6 +2943,7 @@ function applyParsedSession(parsed, silent, label) {
     invalidatePlaybackCompat();
     applyAllStateToDsp();
     scheduleFocusedSlotRefresh();
+    scheduleTrimReplayAll();
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) syncBankSliceState(sec, bank);
     }
@@ -4262,6 +4287,15 @@ function syncFromDsp() {
         invalidatePlaybackCompat();
         syncFocusedSlotPlaybackCompat(true);
     }
+    if (s.trimReplayTicks > 0) {
+        s.trimReplayTicks--;
+        if (s.trimReplayTicks === 0 && s.trimReplayPendingAll) {
+            s.trimReplayPendingAll = false;
+            replayAllSlotTrimsToDsp();
+            invalidatePlaybackCompat();
+            syncFocusedSlotPlaybackCompat(true);
+        }
+    }
 }
 
 function initFromDspDefaults() {
@@ -4579,6 +4613,8 @@ function init() {
     s.autosavePending = false;
     s.autosaveTicks = 0;
     s.focusedParamRefreshTicks = 0;
+    s.trimReplayTicks = 0;
+    s.trimReplayPendingAll = false;
     resetHistory();
     previewStop();
     updateRecordButtonLed();
