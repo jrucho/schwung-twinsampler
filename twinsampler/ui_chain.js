@@ -40,6 +40,8 @@ const MoveUndo = pickConst('MoveUndo', 56);
 const MoveDelete = pickConst('MoveDelete', 119);
 const MoveMaster = pickConst('MoveMaster', 79);
 const MoveMasterTouch = pickConst('MoveMasterTouch', 8);
+const MoveArrowLeft = pickConst('MoveArrowLeft', pickConst('MoveLeft', 44));
+const MoveArrowRight = pickConst('MoveArrowRight', pickConst('MoveRight', 45));
 const Black = pickConst('Black', 0);
 const BrightRed = pickConst('BrightRed', 127);
 
@@ -136,6 +138,13 @@ const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
 const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
+const SLOT_TRIM_MIN_MS = -600000.0;
+const SLOT_TRIM_MAX_MS = 600000.0;
+const SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD = 24;
+const SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD = 36;
+const LOOPER_COUNT = 16;
+const LOOPER_PAGE_SIZE = 4;
+const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
 
 function createLooperState() {
     return {
@@ -352,6 +361,7 @@ const s = {
     recTarget: { sec: 0, bank: 0, slot: 0 },
     recTargetLocked: { sec: 0, bank: 0, slot: 0, slice: 0 },
     lastRecordedPath: '',
+    startTrimSoundingEnabled: true,
 
     browserPath: SAMPLES_DIR,
     browserEntries: [],
@@ -380,9 +390,12 @@ const s = {
 
     transportTicks: 0,
     padPressFlash: {},
-    midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
+    midiLoopers: Array.from({ length: LOOPER_COUNT }, () => createLooperState()),
     activeLooper: 0,
     loopPadMode: false,
+    loopPadPage: 0,
+    loopPadSection: 1, /* 1=right grid, 0=left grid */
+    loopPadFullGrid: false,
 
     statusText: '',
     statusTicks: 0,
@@ -393,6 +406,9 @@ const s = {
 
     autosavePending: false,
     autosaveTicks: 0,
+    focusedParamRefreshTicks: 0,
+    trimReplayTicks: 0,
+    trimReplayPendingAll: false,
 
     undoHistory: [],
     redoHistory: [],
@@ -626,7 +642,10 @@ function makeInitSessionPayload() {
         recordMaxSeconds: 30,
         activeLooper: 0,
         loopPadMode: false,
-        midiLoopers: [createLooperState(), createLooperState(), createLooperState(), createLooperState()],
+        midiLoopers: Array.from({ length: LOOPER_COUNT }, () => createLooperState()),
+        loopPadPage: 0,
+        loopPadSection: 1,
+        loopPadFullGrid: false,
         sections: [
             {
                 mode: left.mode,
@@ -996,6 +1015,39 @@ function markSessionChanged() {
     noteHistoryChanged();
 }
 
+function scheduleFocusedSlotRefresh(ticks = SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD) {
+    s.focusedParamRefreshTicks = Math.max(
+        clampInt(ticks, 0, 1024, SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD),
+        clampInt(s.focusedParamRefreshTicks, 0, 1024, 0)
+    );
+}
+
+function scheduleTrimReplayAll(ticks = SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD) {
+    s.trimReplayPendingAll = true;
+    s.trimReplayTicks = Math.max(
+        clampInt(ticks, 0, 2048, SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD),
+        clampInt(s.trimReplayTicks, 0, 2048, 0)
+    );
+}
+
+function replayAllSlotParamsToDsp() {
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        for (let bank = 0; bank < BANK_COUNT; bank++) {
+            for (let slot = 0; slot < GRID_SIZE; slot++) {
+                const sl = slotAt(sec, bank, slot);
+                sp('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)));
+                sp('slot_decay_at', fmtAt(sec, bank, slot, sl.decay.toFixed(2)));
+                sp('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)));
+                sp('slot_end_trim_at', fmtAt(sec, bank, slot, sl.endTrim.toFixed(2)));
+                sp('slot_gain_at', fmtAt(sec, bank, slot, sl.gain.toFixed(3)));
+                sp('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)));
+                sp('slot_mode_at', fmtAt(sec, bank, slot, sl.modeGate));
+                sp('slot_loop_at', fmtAt(sec, bank, slot, sl.loop));
+            }
+        }
+    }
+}
+
 function bankSliceStateKey(prefix, sec, bank) {
     return prefix + '_' + clampInt(sec, 0, GRID_COUNT - 1, 0) + '_' + clampInt(bank, 0, BANK_COUNT - 1, 0);
 }
@@ -1204,7 +1256,7 @@ function looperNowMs() {
 }
 
 function currentLooper() {
-    const idx = clampInt(s.activeLooper, 0, 3, 0);
+    const idx = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
     return s.midiLoopers[idx];
 }
 
@@ -1221,7 +1273,23 @@ function looperStateColor(state) {
 }
 
 function loopPadIndexFromPadNote(note) {
-    return LOOP_PAD_NOTES.indexOf(note);
+    if (!s.loopPadMode) return -1;
+    const slice = sliceFromPadNote(note);
+    if (slice < 0) return -1;
+    const sec = sectionFromSlice(slice);
+    const activeSection = s.loopPadFullGrid ? clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1) : 1;
+    if (sec !== activeSection) return -1;
+    const slot = slotFromSlice(slice);
+    if (s.loopPadFullGrid) {
+        if (slot < 0 || slot >= s.midiLoopers.length) return -1;
+        return slot;
+    }
+    const maxPage = Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE));
+    const pageStart = clampInt(s.loopPadPage, 0, maxPage, 0) * LOOPER_PAGE_SIZE;
+    if (slot < TOP_ROW_SLOT_START || slot >= (TOP_ROW_SLOT_START + LOOPER_PAGE_SIZE)) return -1;
+    const idx = pageStart + (slot - TOP_ROW_SLOT_START);
+    if (idx < 0 || idx >= s.midiLoopers.length) return -1;
+    return idx;
 }
 
 function previewCanPlay() {
@@ -1451,9 +1519,11 @@ function setSlotPath(sec, bank, slot, path, sendToDsp) {
 
     if (sl.path) spb('slot_sample_path', sec + ':' + bank + ':' + slot + ':' + sl.path, 500);
     else spb('clear_slot_sample', sec + ':' + bank + ':' + slot, 500);
+    scheduleTrimReplayAll();
     if (sec === s.focusedSection && bank === focusedBankIndex(sec) && slot === focusedSlotIndex()) {
         invalidatePlaybackCompat();
         syncFocusedSlotPlaybackCompat(true);
+        scheduleFocusedSlotRefresh();
     }
     markLedsDirty();
     markSessionChanged();
@@ -1694,14 +1764,14 @@ function setSlotDecay(sec, bank, slot, value) {
 }
 
 function setSlotStartTrim(sec, bank, slot, value) {
-    const v = clampFloat(value, -5000.0, 5000.0, 0.0);
+    const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).startTrim = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180);
     markSessionChanged();
 }
 
 function setSlotEndTrim(sec, bank, slot, value) {
-    const v = clampFloat(value, -5000.0, 5000.0, 0.0);
+    const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180);
     markSessionChanged();
@@ -1768,8 +1838,8 @@ function applySlotToDsp(sec, bank, slot, srcSlot) {
     dst.path = String(srcSlot.path || '');
     dst.attack = clampFloat(srcSlot.attack, 1.0, 5000.0, 5.0);
     dst.decay = clampFloat(srcSlot.decay, 1.0, 10000.0, 500.0);
-    dst.startTrim = clampFloat(srcSlot.startTrim, -5000.0, 5000.0, 0.0);
-    dst.endTrim = clampFloat(srcSlot.endTrim, -5000.0, 5000.0, 0.0);
+    dst.startTrim = clampFloat(srcSlot.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
+    dst.endTrim = clampFloat(srcSlot.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     dst.gain = clampFloat(srcSlot.gain, 0.0, 4.0, 1.0);
     dst.pitch = clampFloat(srcSlot.pitch, -48.0, 48.0, 0.0);
     dst.modeGate = clampInt(srcSlot.modeGate, 0, 1, 1);
@@ -2080,10 +2150,12 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
+    const silentTrimEdit = !s.startTrimSoundingEnabled;
+    if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
     setSlotStartTrim(a.sec, a.bank, a.slot, v);
-    retriggerFocusedPadForStartTrim();
+    if (!silentTrimEdit) retriggerFocusedPadForStartTrim();
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
 }
@@ -2162,6 +2234,16 @@ function retriggerFocusedPadForStartTrim() {
     const sourceTag = 'starttrim-preview:' + String(s.transportTicks) + ':' + String(Date.now());
     if (!triggerPadOn(sec, bank, slot, velocity, false, false, sourceTag)) return;
     triggerPadOff(sec, bank, slot, false, false);
+}
+
+function stopFocusedPadAudioForTrimEdit() {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const slot = focusedSlotIndex();
+    const key = addrKey(sec, bank, slot);
+    const voice = activeVoicesByAddr[key];
+    if (!voice) return;
+    releaseActiveVoice(voice.sec, voice.bank, voice.slot, !!voice.routeBank, false, Date.now(), true);
 }
 
 function adjustPadLoop(delta) {
@@ -2266,6 +2348,10 @@ function adjustAllGain(delta) {
         setSlotGain(sec, bank, slot, v);
     });
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
+}
+
+function focusedSectionIsSourceMode() {
+    return s.sections[s.focusedSection].mode === MODE_SINGLE;
 }
 
 function adjustFocusedBankPitch(delta) {
@@ -2670,8 +2756,11 @@ function serializeSession() {
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
         recordMaxSeconds: s.recordMaxSeconds,
-        activeLooper: clampInt(s.activeLooper, 0, 3, 0),
+        activeLooper: clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0),
         loopPadMode: !!s.loopPadMode,
+        loopPadPage: clampInt(s.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0),
+        loopPadSection: clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1),
+        loopPadFullGrid: !!s.loopPadFullGrid,
         midiLoopers: s.midiLoopers.map((l) => ({
             state: (l && (l.state === 'playing' || l.state === 'stopped' || l.state === 'empty')) ? l.state : (l && l.events && l.events.length ? 'stopped' : 'empty'),
             quantized: (l && l.quantized) ? 1 : 0,
@@ -2713,8 +2802,8 @@ function sanitizeSlot(raw) {
         path: typeof raw.path === 'string' ? raw.path : '',
         attack: clampFloat(raw.attack, 1.0, 5000.0, base.attack),
         decay: clampFloat(raw.decay, 1.0, 10000.0, base.decay),
-        startTrim: clampFloat(raw.startTrim, -5000.0, 5000.0, base.startTrim),
-        endTrim: clampFloat(raw.endTrim, -5000.0, 5000.0, base.endTrim),
+        startTrim: clampFloat(raw.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, base.startTrim),
+        endTrim: clampFloat(raw.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, base.endTrim),
         gain: clampFloat(raw.gain, 0.0, 4.0, base.gain),
         pitch: clampFloat(raw.pitch, -48.0, 48.0, base.pitch),
         modeGate: clampInt(raw.modeGate, 0, 1, base.modeGate),
@@ -2857,9 +2946,12 @@ function applyParsedSession(parsed, silent, label) {
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
-    s.midiLoopers = Array.from({ length: 4 }, (_, i) => sanitizeLooperState(rawLoopers[i]));
-    s.activeLooper = clampInt(parsed.activeLooper, 0, 3, 0);
+    s.midiLoopers = Array.from({ length: LOOPER_COUNT }, (_, i) => sanitizeLooperState(rawLoopers[i]));
+    s.activeLooper = clampInt(parsed.activeLooper, 0, s.midiLoopers.length - 1, 0);
     s.loopPadMode = !!parsed.loopPadMode;
+    s.loopPadPage = clampInt(parsed.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0);
+    s.loopPadSection = clampInt(parsed.loopPadSection, 0, GRID_COUNT - 1, 1);
+    s.loopPadFullGrid = !!parsed.loopPadFullGrid;
 
     const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
     s.sections = [
@@ -2869,6 +2961,8 @@ function applyParsedSession(parsed, silent, label) {
 
     invalidatePlaybackCompat();
     applyAllStateToDsp();
+    scheduleFocusedSlotRefresh();
+    scheduleTrimReplayAll();
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) syncBankSliceState(sec, bank);
     }
@@ -3207,6 +3301,12 @@ function knobTouchActionLabel(note) {
 function handleKnobTouch(note, velocity) {
     if (note < 0 || note > 7 || velocity <= 0) return false;
 
+    if (s.shiftHeld && s.volumeTouchHeld && note === 2) {
+        s.startTrimSoundingEnabled = !s.startTrimSoundingEnabled;
+        showStatus(s.startTrimSoundingEnabled ? 'Start trim sound ON' : 'Start trim sound OFF', 90);
+        return true;
+    }
+
     if (s.shiftHeld && !USE_STEP_BANKS && s.view === 'main') {
         setSectionBank(s.focusedSection, note);
         s.knobPage = note < 4 ? 'A' : 'B';
@@ -3420,7 +3520,7 @@ function looperQuantize(index, steps = 16) {
         l.events = l.preQuantizeEvents.map((ev) => Object.assign({}, ev));
         l.quantized = 0;
         l.preQuantizeEvents = [];
-        showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': unquantized', 100);
+        showStatus('Looper ' + (clampInt(index, 0, s.midiLoopers.length - 1, 0) + 1) + ': unquantized', 100);
         markSessionChanged();
         s.dirty = true;
         return true;
@@ -3459,7 +3559,7 @@ function looperQuantize(index, steps = 16) {
 
     l.events = quantized;
     l.quantized = 1;
-    showStatus('Looper ' + (clampInt(index, 0, 3, 0) + 1) + ': quantized 1/' + safeSteps, 100);
+    showStatus('Looper ' + (clampInt(index, 0, s.midiLoopers.length - 1, 0) + 1) + ': quantized 1/' + safeSteps, 100);
     markSessionChanged();
     s.dirty = true;
     return true;
@@ -3511,7 +3611,7 @@ function handleLoopButtonRelease() {
 
 function stopActiveLooperForSwitch() {
     const l = currentLooper();
-    releaseVoicesByOwner('looper:' + String(clampInt(s.activeLooper, 0, 3, 0)), looperNowMs());
+    releaseVoicesByOwner('looper:' + String(clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0)), looperNowMs());
     if (l.state === 'recording') looperFinishRecordingStartPlayback();
     if (l.state === 'playing' || l.state === 'overdub') {
         l.state = 'stopped';
@@ -3521,7 +3621,7 @@ function stopActiveLooperForSwitch() {
 }
 
 function selectLooper(index) {
-    const next = clampInt(index, 0, 3, 0);
+    const next = clampInt(index, 0, s.midiLoopers.length - 1, 0);
     if (next === s.activeLooper) return;
     stopActiveLooperForSwitch();
     s.activeLooper = next;
@@ -3609,7 +3709,7 @@ function copyActiveLooperTo(index) {
 }
 
 function fireLooperPad(index) {
-    const next = clampInt(index, 0, 3, 0);
+    const next = clampInt(index, 0, s.midiLoopers.length - 1, 0);
     if (s.deleteHeld) {
         eraseLooperAt(next);
         return;
@@ -3629,9 +3729,59 @@ function fireLooperPad(index) {
 
 function toggleLoopPadMode() {
     s.loopPadMode = !s.loopPadMode;
+    if (s.loopPadMode) {
+        s.loopPadPage = 0;
+        s.loopPadSection = 1;
+        s.loopPadFullGrid = false;
+    }
     showStatus(s.loopPadMode ? 'Looper pad mode ON' : 'Looper pad mode OFF', 90);
     markLedsDirty();
     updateUtilityButtonLeds();
+}
+
+function shiftLooperPadWindow(delta) {
+    if (!s.loopPadMode || delta === 0) return false;
+    const dir = delta > 0 ? 1 : -1;
+    const maxPage = Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE));
+    let nextPage = clampInt(s.loopPadPage, 0, maxPage, 0);
+    let nextSection = clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1);
+    let nextFullGrid = !!s.loopPadFullGrid;
+
+    if (nextFullGrid) {
+        if (dir < 0) {
+            /* Exit full-grid takeover back to paged looper rows on the right grid. */
+            nextFullGrid = false;
+            nextSection = 1;
+            nextPage = maxPage;
+        } else {
+            nextSection = nextSection === 1 ? 0 : 1;
+        }
+    } else if (dir > 0) {
+        if (nextPage < maxPage) {
+            nextPage++;
+        } else {
+            nextFullGrid = true;
+            nextSection = 0; /* first full-grid takeover appears on the left grid */
+        }
+    } else {
+        if (nextPage > 0) nextPage--;
+        nextSection = 1;
+    }
+
+    const changed = nextPage !== s.loopPadPage || nextSection !== s.loopPadSection || nextFullGrid !== s.loopPadFullGrid;
+    s.loopPadPage = nextPage;
+    s.loopPadSection = nextSection;
+    s.loopPadFullGrid = nextFullGrid;
+    if (!changed) return false;
+
+    const secLabel = s.loopPadSection === 1 ? 'right' : 'left';
+    if (s.loopPadFullGrid) showStatus('Loopers 1-16 on ' + secLabel + ' grid', 90);
+    else {
+        const end = Math.min(s.midiLoopers.length, (s.loopPadPage + 1) * LOOPER_PAGE_SIZE);
+        showStatus('Loopers ' + (s.loopPadPage * LOOPER_PAGE_SIZE + 1) + '-' + end + ' on top row', 90);
+    }
+    markLedsDirty();
+    return true;
 }
 
 function tickMidiLooperButtonHold() {
@@ -3768,7 +3918,7 @@ function tickMidiLooperPlayback() {
         if (ev.type === 'on') {
             if (isPadMuted(ev.sec, ev.bank, ev.slot)) continue;
             const vel = clampInt(ev.velocity, 1, 127, 100);
-            triggerPadOn(ev.sec, ev.bank, ev.slot, vel, true, false, 'looper:' + String(clampInt(s.activeLooper, 0, 3, 0)));
+            triggerPadOn(ev.sec, ev.bank, ev.slot, vel, true, false, 'looper:' + String(clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0)));
         } else {
             triggerPadOff(ev.sec, ev.bank, ev.slot, true, false);
         }
@@ -4102,7 +4252,8 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob7) {
-            adjustAllGain(delta);
+            if (focusedSectionIsSourceMode()) adjustGlobalGain(delta);
+            else adjustAllGain(delta);
             return;
         }
         if (cc === MoveKnob8) {
@@ -4156,6 +4307,20 @@ function syncFromDsp() {
     tickRecordStateMachine();
     tickRecordButtonBlink();
     syncFocusedSlotPlaybackCompat();
+    if (s.focusedParamRefreshTicks > 0) {
+        s.focusedParamRefreshTicks--;
+        invalidatePlaybackCompat();
+        syncFocusedSlotPlaybackCompat(true);
+    }
+    if (s.trimReplayTicks > 0) {
+        s.trimReplayTicks--;
+        if (s.trimReplayTicks === 0 && s.trimReplayPendingAll) {
+            s.trimReplayPendingAll = false;
+            replayAllSlotParamsToDsp();
+            invalidatePlaybackCompat();
+            syncFocusedSlotPlaybackCompat(true);
+        }
+    }
 }
 
 function initFromDspDefaults() {
@@ -4376,6 +4541,13 @@ function onMidiMessageInternal(data) {
             return;
         }
 
+        if ((cc === MoveArrowRight || cc === MoveArrowLeft) && val > 0) {
+            if (s.view === 'main' && s.loopPadMode) {
+                shiftLooperPadWindow(cc === MoveArrowRight ? 1 : -1);
+                return;
+            }
+        }
+
         if (cc === MoveMainKnob) {
             handleMainKnob(decodeDelta(val));
             return;
@@ -4416,6 +4588,7 @@ function init() {
     s.copyPressTick = -1;
     s.copyConsumed = false;
     s.deleteHeld = false;
+    s.startTrimSoundingEnabled = true;
     s.sessionBrowserIntent = 'load';
     s.sessionName = sanitizeSessionName(s.sessionName);
     s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
@@ -4437,13 +4610,19 @@ function init() {
     if (!restoredFromSession) {
         s.loopPadMode = false;
         s.activeLooper = 0;
+        s.loopPadPage = 0;
+        s.loopPadSection = 1;
+        s.loopPadFullGrid = false;
     } else {
-        s.activeLooper = clampInt(s.activeLooper, 0, 3, 0);
+        s.activeLooper = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
+        s.loopPadPage = clampInt(s.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0);
+        s.loopPadSection = clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1);
+        s.loopPadFullGrid = !!s.loopPadFullGrid;
     }
     for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
     for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
-    if (!Array.isArray(s.midiLoopers) || s.midiLoopers.length !== 4) {
-        s.midiLoopers = [createLooperState(), createLooperState(), createLooperState(), createLooperState()];
+    if (!Array.isArray(s.midiLoopers) || s.midiLoopers.length !== LOOPER_COUNT) {
+        s.midiLoopers = Array.from({ length: LOOPER_COUNT }, () => createLooperState());
     }
     for (let i = 0; i < s.midiLoopers.length; i++) {
         const l = s.midiLoopers[i];
@@ -4459,6 +4638,9 @@ function init() {
     }
     s.autosavePending = false;
     s.autosaveTicks = 0;
+    s.focusedParamRefreshTicks = 0;
+    s.trimReplayTicks = 0;
+    s.trimReplayPendingAll = false;
     resetHistory();
     previewStop();
     updateRecordButtonLed();

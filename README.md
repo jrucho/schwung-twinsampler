@@ -110,7 +110,12 @@ When a pad is focused, the eight knobs control:
 ## MIDI Loopers
 Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler includes its own looper.
 * **Single Looper:** Use the **Loop** button. (1st press: Rec, 2nd: Play, 3rd: Overdub). Double-tap to stop. Tap or double to erase.
-* **Multi-Looper Mode:** Press **Shift + Loop** to activate the **top-right 4 pads** as independent looper triggers.
+* **Multi-Looper Mode:** Press **Shift + Loop** to activate looper pads.
+    * **Page 1:** Top-right row controls **Loopers 1-4**.
+    * **Right Arrow:** Pages to **5-8**, then **9-12**, then **13-16**.
+    * **After 13-16:** Press **Right Arrow** again to enter full-grid looper takeover on the **left grid** (all 16 loopers available directly).
+    * **Right Arrow again:** Moves the full-grid looper takeover to the **right grid**.
+    * **Left Arrow (from full-grid):** Returns to paged mode at **13-16** on the top-right row, then steps back pages.
     * **Red:** Recording | **Purple:** Playing / standby | **Yellow:** Overdub
 * **Quantize:** Press **Shift + Loop button** (or Shift + Looper Pad) to toggle 1/16th note quantization.
 * **Erase:** Double tap and hold a looper pad to clear its MIDI notes.
@@ -167,7 +172,6 @@ https://notebooklm.google.com/notebook/31678b7d-3a8e-4d41-8a5f-d2675b3e7298?arti
 <img width="1788" height="998" alt="9" src="https://github.com/user-attachments/assets/c91c4bb2-285d-4981-8deb-509b9fa69db1" />
 
 <img width="1787" height="997" alt="10" src="https://github.com/user-attachments/assets/19e6d9da-0ff9-4314-883f-f5f3932d6ed0" />
-
 
 
 
