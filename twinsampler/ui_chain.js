@@ -138,6 +138,8 @@ const LOOP_PAD_COLOR_OVERDUB = 9;
 const LOOP_PAD_COLOR_STOPPED = 118;
 const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
+const SLOT_TRIM_MIN_MS = -600000.0;
+const SLOT_TRIM_MAX_MS = 600000.0;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
@@ -1720,14 +1722,14 @@ function setSlotDecay(sec, bank, slot, value) {
 }
 
 function setSlotStartTrim(sec, bank, slot, value) {
-    const v = clampFloat(value, -5000.0, 5000.0, 0.0);
+    const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).startTrim = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180);
     markSessionChanged();
 }
 
 function setSlotEndTrim(sec, bank, slot, value) {
-    const v = clampFloat(value, -5000.0, 5000.0, 0.0);
+    const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180);
     markSessionChanged();
@@ -1794,8 +1796,8 @@ function applySlotToDsp(sec, bank, slot, srcSlot) {
     dst.path = String(srcSlot.path || '');
     dst.attack = clampFloat(srcSlot.attack, 1.0, 5000.0, 5.0);
     dst.decay = clampFloat(srcSlot.decay, 1.0, 10000.0, 500.0);
-    dst.startTrim = clampFloat(srcSlot.startTrim, -5000.0, 5000.0, 0.0);
-    dst.endTrim = clampFloat(srcSlot.endTrim, -5000.0, 5000.0, 0.0);
+    dst.startTrim = clampFloat(srcSlot.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
+    dst.endTrim = clampFloat(srcSlot.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     dst.gain = clampFloat(srcSlot.gain, 0.0, 4.0, 1.0);
     dst.pitch = clampFloat(srcSlot.pitch, -48.0, 48.0, 0.0);
     dst.modeGate = clampInt(srcSlot.modeGate, 0, 1, 1);
@@ -2742,8 +2744,8 @@ function sanitizeSlot(raw) {
         path: typeof raw.path === 'string' ? raw.path : '',
         attack: clampFloat(raw.attack, 1.0, 5000.0, base.attack),
         decay: clampFloat(raw.decay, 1.0, 10000.0, base.decay),
-        startTrim: clampFloat(raw.startTrim, -5000.0, 5000.0, base.startTrim),
-        endTrim: clampFloat(raw.endTrim, -5000.0, 5000.0, base.endTrim),
+        startTrim: clampFloat(raw.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, base.startTrim),
+        endTrim: clampFloat(raw.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, base.endTrim),
         gain: clampFloat(raw.gain, 0.0, 4.0, base.gain),
         pitch: clampFloat(raw.pitch, -48.0, 48.0, base.pitch),
         modeGate: clampInt(raw.modeGate, 0, 1, base.modeGate),
