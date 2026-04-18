@@ -1508,7 +1508,17 @@ function sourcePlayModeForSection(sec) {
 
 function setSourcePath(sec, bank, path, sendToDsp) {
     const sb = s.sections[sec].banks[bank];
-    sb.sourcePath = String(path || '');
+    const nextPath = String(path || '');
+    const hadSource = !!sb.sourcePath;
+    const loadingNewSource = !!nextPath && (!hadSource || sb.sourcePath !== nextPath);
+
+    if (loadingNewSource) {
+        for (let i = 0; i < GRID_SIZE; i++) {
+            resetSlotSoundParamsToDefault(sb.slots[i]);
+        }
+    }
+
+    sb.sourcePath = nextPath;
     sb.chopCount = SOURCE_CHOP_COUNT;
     sb.slicePage = 0;
     if (sendToDsp) {
@@ -1518,6 +1528,12 @@ function setSourcePath(sec, bank, path, sendToDsp) {
         spb('section_source_path', sec + ':' + bank + ':' + sb.sourcePath, 500);
         spb('section_randomize_transients', sec + ':' + bank + ':1', 500);
         syncBankSliceState(sec, bank);
+        if (loadingNewSource) {
+            for (let i = 0; i < GRID_SIZE; i++) {
+                sendSlotStateToDsp(sec, bank, i, true, true);
+            }
+            scheduleTrimReplayAll();
+        }
     }
     markSessionChanged();
 }
