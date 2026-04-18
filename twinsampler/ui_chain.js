@@ -2307,6 +2307,10 @@ function adjustAllGain(delta) {
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
 }
 
+function focusedSectionIsSourceMode() {
+    return s.sections[s.focusedSection].mode === MODE_SINGLE;
+}
+
 function adjustFocusedBankPitch(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).pitch + delta * 0.5;
@@ -4198,7 +4202,8 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob7) {
-            adjustAllGain(delta);
+            if (focusedSectionIsSourceMode()) adjustGlobalGain(delta);
+            else adjustAllGain(delta);
             return;
         }
         if (cc === MoveKnob8) {
