@@ -2149,10 +2149,12 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
+    const silentTrimEdit = s.shiftHeld && s.volumeTouchHeld;
+    if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
     setSlotStartTrim(a.sec, a.bank, a.slot, v);
-    retriggerFocusedPadForStartTrim();
+    if (!silentTrimEdit) retriggerFocusedPadForStartTrim();
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
 }
@@ -2231,6 +2233,16 @@ function retriggerFocusedPadForStartTrim() {
     const sourceTag = 'starttrim-preview:' + String(s.transportTicks) + ':' + String(Date.now());
     if (!triggerPadOn(sec, bank, slot, velocity, false, false, sourceTag)) return;
     triggerPadOff(sec, bank, slot, false, false);
+}
+
+function stopFocusedPadAudioForTrimEdit() {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const slot = focusedSlotIndex();
+    const key = addrKey(sec, bank, slot);
+    const voice = activeVoicesByAddr[key];
+    if (!voice) return;
+    releaseActiveVoice(voice.sec, voice.bank, voice.slot, !!voice.routeBank, false, Date.now(), true);
 }
 
 function adjustPadLoop(delta) {
