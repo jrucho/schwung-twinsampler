@@ -33,6 +33,11 @@ jobs:
           rm -f "$ASSET_NAME"
           tar -C dist -czf "$ASSET_NAME" "$MODULE_ID"
 
+      - name: Verify packaged tarball
+        run: |
+          test -f "$ASSET_NAME"
+          tar -tzf "$ASSET_NAME" >/dev/null
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
