@@ -361,6 +361,7 @@ const s = {
     recTarget: { sec: 0, bank: 0, slot: 0 },
     recTargetLocked: { sec: 0, bank: 0, slot: 0, slice: 0 },
     lastRecordedPath: '',
+    startTrimSoundingEnabled: true,
 
     browserPath: SAMPLES_DIR,
     browserEntries: [],
@@ -2149,7 +2150,7 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
-    const silentTrimEdit = s.shiftHeld && s.volumeTouchHeld;
+    const silentTrimEdit = !s.startTrimSoundingEnabled;
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
@@ -3299,6 +3300,12 @@ function knobTouchActionLabel(note) {
 
 function handleKnobTouch(note, velocity) {
     if (note < 0 || note > 7 || velocity <= 0) return false;
+
+    if (s.shiftHeld && s.volumeTouchHeld && note === 2) {
+        s.startTrimSoundingEnabled = !s.startTrimSoundingEnabled;
+        showStatus(s.startTrimSoundingEnabled ? 'Start trim sound ON' : 'Start trim sound OFF', 90);
+        return true;
+    }
 
     if (s.shiftHeld && !USE_STEP_BANKS && s.view === 'main') {
         setSectionBank(s.focusedSection, note);
@@ -4581,6 +4588,7 @@ function init() {
     s.copyPressTick = -1;
     s.copyConsumed = false;
     s.deleteHeld = false;
+    s.startTrimSoundingEnabled = true;
     s.sessionBrowserIntent = 'load';
     s.sessionName = sanitizeSessionName(s.sessionName);
     s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
