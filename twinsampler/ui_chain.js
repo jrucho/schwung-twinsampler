@@ -140,6 +140,7 @@ const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
+const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
 
 function createLooperState() {
     return {
@@ -389,6 +390,7 @@ const s = {
     loopPadMode: false,
     loopPadPage: 0,
     loopPadSection: 1, /* 1=right grid, 0=left grid */
+    loopPadFullGrid: false,
 
     statusText: '',
     statusTicks: 0,
@@ -635,6 +637,7 @@ function makeInitSessionPayload() {
         midiLoopers: Array.from({ length: LOOPER_COUNT }, () => createLooperState()),
         loopPadPage: 0,
         loopPadSection: 1,
+        loopPadFullGrid: false,
         sections: [
             {
                 mode: left.mode,
@@ -1235,10 +1238,14 @@ function loopPadIndexFromPadNote(note) {
     const sec = sectionFromSlice(slice);
     if (sec !== clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1)) return -1;
     const slot = slotFromSlice(slice);
+    if (s.loopPadFullGrid) {
+        if (slot < 0 || slot >= s.midiLoopers.length) return -1;
+        return slot;
+    }
     const maxPage = Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE));
     const pageStart = clampInt(s.loopPadPage, 0, maxPage, 0) * LOOPER_PAGE_SIZE;
-    if (slot < 0 || slot >= LOOPER_PAGE_SIZE) return -1;
-    const idx = pageStart + slot;
+    if (slot < TOP_ROW_SLOT_START || slot >= (TOP_ROW_SLOT_START + LOOPER_PAGE_SIZE)) return -1;
+    const idx = pageStart + (slot - TOP_ROW_SLOT_START);
     if (idx < 0 || idx >= s.midiLoopers.length) return -1;
     return idx;
 }
@@ -2693,6 +2700,7 @@ function serializeSession() {
         loopPadMode: !!s.loopPadMode,
         loopPadPage: clampInt(s.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0),
         loopPadSection: clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1),
+        loopPadFullGrid: !!s.loopPadFullGrid,
         midiLoopers: s.midiLoopers.map((l) => ({
             state: (l && (l.state === 'playing' || l.state === 'stopped' || l.state === 'empty')) ? l.state : (l && l.events && l.events.length ? 'stopped' : 'empty'),
             quantized: (l && l.quantized) ? 1 : 0,
@@ -2883,6 +2891,7 @@ function applyParsedSession(parsed, silent, label) {
     s.loopPadMode = !!parsed.loopPadMode;
     s.loopPadPage = clampInt(parsed.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0);
     s.loopPadSection = clampInt(parsed.loopPadSection, 0, GRID_COUNT - 1, 1);
+    s.loopPadFullGrid = !!parsed.loopPadFullGrid;
 
     const rawSections = Array.isArray(parsed.sections) ? parsed.sections : [];
     s.sections = [
@@ -3661,25 +3670,35 @@ function shiftLooperPadWindow(delta) {
     if (!s.loopPadMode || delta === 0) return false;
     const dir = delta > 0 ? 1 : -1;
     const maxPage = Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE));
-    let nextPage = clampInt(s.loopPadPage, 0, maxPage, 0) + dir;
+    let nextPage = clampInt(s.loopPadPage, 0, maxPage, 0);
     let nextSection = clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1);
+    let nextFullGrid = !!s.loopPadFullGrid;
 
-    if (nextPage > maxPage) {
-        nextPage = maxPage;
+    if (nextFullGrid) {
         nextSection = nextSection === 1 ? 0 : 1;
-    } else if (nextPage < 0) {
-        nextPage = 0;
-        nextSection = nextSection === 1 ? 0 : 1;
+    } else if (dir > 0) {
+        if (nextPage < maxPage) {
+            nextPage++;
+        } else {
+            nextFullGrid = true;
+            nextSection = 0; /* first full-grid takeover appears on the left grid */
+        }
+    } else {
+        if (nextPage > 0) nextPage--;
     }
 
-    const changed = nextPage !== s.loopPadPage || nextSection !== s.loopPadSection;
+    const changed = nextPage !== s.loopPadPage || nextSection !== s.loopPadSection || nextFullGrid !== s.loopPadFullGrid;
     s.loopPadPage = nextPage;
     s.loopPadSection = nextSection;
+    s.loopPadFullGrid = nextFullGrid;
     if (!changed) return false;
 
-    const end = Math.min(s.midiLoopers.length, (s.loopPadPage + 1) * LOOPER_PAGE_SIZE);
     const secLabel = s.loopPadSection === 1 ? 'right' : 'left';
-    showStatus('Loopers ' + (s.loopPadPage * LOOPER_PAGE_SIZE + 1) + '-' + end + ' on ' + secLabel, 90);
+    if (s.loopPadFullGrid) showStatus('Loopers 1-16 on ' + secLabel + ' grid', 90);
+    else {
+        const end = Math.min(s.midiLoopers.length, (s.loopPadPage + 1) * LOOPER_PAGE_SIZE);
+        showStatus('Loopers ' + (s.loopPadPage * LOOPER_PAGE_SIZE + 1) + '-' + end + ' on top row', 90);
+    }
     markLedsDirty();
     return true;
 }
@@ -4496,10 +4515,12 @@ function init() {
         s.activeLooper = 0;
         s.loopPadPage = 0;
         s.loopPadSection = 1;
+        s.loopPadFullGrid = false;
     } else {
         s.activeLooper = clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0);
         s.loopPadPage = clampInt(s.loopPadPage, 0, Math.max(0, Math.floor((s.midiLoopers.length - 1) / LOOPER_PAGE_SIZE)), 0);
         s.loopPadSection = clampInt(s.loopPadSection, 0, GRID_COUNT - 1, 1);
+        s.loopPadFullGrid = !!s.loopPadFullGrid;
     }
     for (const k in activeVoicesByAddr) delete activeVoicesByAddr[k];
     for (const k in pendingNoteOffsByAddr) delete pendingNoteOffsByAddr[k];
