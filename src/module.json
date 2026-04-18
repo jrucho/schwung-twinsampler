@@ -1,0 +1,20 @@
+{
+  "id": "twinsampler_overtake",
+  "name": "TwinSampler",
+  "abbrev": "TS",
+  "description": "TwinSampler overtake module with full dual-grid bank control",
+  "author": "j3threejay",
+  "version": "0.1.0",
+  "ui": "ui.js",
+  "dsp": "dsp.so",
+  "api_version": 2,
+  "component_type": "overtake",
+  "capabilities": {
+    "audio_in": true,
+    "audio_out": true,
+    "midi_in": true,
+    "midi_out": true,
+    "raw_ui": true,
+    "claims_master_knob": false
+  }
+}
