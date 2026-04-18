@@ -292,6 +292,19 @@ function cloneSlot(s) {
     };
 }
 
+function resetSlotSoundParamsToDefault(slot) {
+    if (!slot || typeof slot !== 'object') return;
+    const base = makeSlot();
+    slot.attack = base.attack;
+    slot.decay = base.decay;
+    slot.startTrim = base.startTrim;
+    slot.endTrim = base.endTrim;
+    slot.gain = base.gain;
+    slot.pitch = base.pitch;
+    slot.modeGate = base.modeGate;
+    slot.loop = base.loop;
+}
+
 function makeBank(bankIdx = 0) {
     const slots = [];
     for (let i = 0; i < GRID_SIZE; i++) slots.push(makeSlot());
@@ -1495,7 +1508,17 @@ function sourcePlayModeForSection(sec) {
 
 function setSourcePath(sec, bank, path, sendToDsp) {
     const sb = s.sections[sec].banks[bank];
-    sb.sourcePath = String(path || '');
+    const nextPath = String(path || '');
+    const hadSource = !!sb.sourcePath;
+    const loadingNewSource = !!nextPath && (!hadSource || sb.sourcePath !== nextPath);
+
+    if (loadingNewSource) {
+        for (let i = 0; i < GRID_SIZE; i++) {
+            resetSlotSoundParamsToDefault(sb.slots[i]);
+        }
+    }
+
+    sb.sourcePath = nextPath;
     sb.chopCount = SOURCE_CHOP_COUNT;
     sb.slicePage = 0;
     if (sendToDsp) {
@@ -1505,20 +1528,31 @@ function setSourcePath(sec, bank, path, sendToDsp) {
         spb('section_source_path', sec + ':' + bank + ':' + sb.sourcePath, 500);
         spb('section_randomize_transients', sec + ':' + bank + ':1', 500);
         syncBankSliceState(sec, bank);
+        if (loadingNewSource) {
+            for (let i = 0; i < GRID_SIZE; i++) {
+                sendSlotStateToDsp(sec, bank, i, true, true);
+            }
+            scheduleTrimReplayAll();
+        }
     }
     markSessionChanged();
 }
 
 function setSlotPath(sec, bank, slot, path, sendToDsp) {
     const sl = s.sections[sec].banks[bank].slots[slot];
-    sl.path = String(path || '');
+    const nextPath = String(path || '');
+    const hadSample = !!sl.path;
+    const loadingNewSample = !!nextPath && (!hadSample || sl.path !== nextPath);
+
+    if (loadingNewSample) resetSlotSoundParamsToDefault(sl);
+    sl.path = nextPath;
+
     if (!sendToDsp) {
         markSessionChanged();
         return;
     }
 
-    if (sl.path) spb('slot_sample_path', sec + ':' + bank + ':' + slot + ':' + sl.path, 500);
-    else spb('clear_slot_sample', sec + ':' + bank + ':' + slot, 500);
+    sendSlotStateToDsp(sec, bank, slot, true, true);
     scheduleTrimReplayAll();
     if (sec === s.focusedSection && bank === focusedBankIndex(sec) && slot === focusedSlotIndex()) {
         invalidatePlaybackCompat();
@@ -1749,6 +1783,12 @@ function sendSlotParamCompat(sec, bank, slot, keyAt, keyDirect, value, timeoutMs
     }
 }
 
+function resetEditCursorCache() {
+    editCursorCache.sec = -1;
+    editCursorCache.bank = -1;
+    editCursorCache.slot = -1;
+}
+
 function setSlotAttack(sec, bank, slot, value) {
     const v = clampFloat(value, 1.0, 5000.0, 5.0);
     slotAt(sec, bank, slot).attack = v;
@@ -1906,7 +1946,7 @@ function clearFocusedBankAudio() {
     return true;
 }
 
-function sendSlotStateToDsp(sec, bank, slot, blocking) {
+function sendSlotStateToDsp(sec, bank, slot, blocking, forceDirect) {
     const sl = slotAt(sec, bank, slot);
     const send = blocking ? spb : sp;
     const timeout = blocking ? 250 : 0;
@@ -1923,7 +1963,10 @@ function sendSlotStateToDsp(sec, bank, slot, blocking) {
     send('slot_mode_at', fmtAt(sec, bank, slot, sl.modeGate), timeout);
     send('slot_loop_at', fmtAt(sec, bank, slot, sl.loop), timeout);
 
-    if (sec === s.focusedSection && bank === focusedBankIndex(sec) && slot === focusedSlotIndex()) {
+    if (
+        forceDirect ||
+        (sec === s.focusedSection && bank === focusedBankIndex(sec) && slot === focusedSlotIndex())
+    ) {
         const directTimeout = blocking ? 180 : 120;
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_attack', sl.attack.toFixed(2), directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_decay', sl.decay.toFixed(2), directTimeout, !!blocking);
@@ -1936,7 +1979,7 @@ function sendSlotStateToDsp(sec, bank, slot, blocking) {
     }
 }
 
-function applyBankStateToDsp(sec, bank, blockingSlots) {
+function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
     const b = s.sections[sec].banks[bank];
     b.chopCount = SOURCE_CHOP_COUNT;
     b.slicePage = 0;
@@ -1954,7 +1997,7 @@ function applyBankStateToDsp(sec, bank, blockingSlots) {
     spb('section_slice_page', sec + ':' + bank + ':0', 300);
 
     for (let slot = 0; slot < GRID_SIZE; slot++) {
-        sendSlotStateToDsp(sec, bank, slot, !!blockingSlots);
+        sendSlotStateToDsp(sec, bank, slot, !!blockingSlots, !!forceDirect);
     }
     if (sec === s.focusedSection && bank === focusedBankIndex(sec)) {
         invalidatePlaybackCompat();
@@ -2903,6 +2946,7 @@ function sanitizeLooperState(raw) {
 }
 
 function applyAllStateToDsp() {
+    resetEditCursorCache();
     sp('global_gain', s.globalGain.toFixed(3));
     sp('global_pitch', s.globalPitch.toFixed(2));
     sp('velocity_sens', String(s.velocitySens));
@@ -2914,7 +2958,7 @@ function applyAllStateToDsp() {
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) {
-            applyBankStateToDsp(sec, bank, true);
+            applyBankStateToDsp(sec, bank, true, true);
         }
     }
 
