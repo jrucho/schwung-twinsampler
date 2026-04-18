@@ -140,6 +140,7 @@ const TRIM_STEP_FINE = 1.0;
 const TRIM_STEP_COARSE = 5.0;
 const SLOT_TRIM_MIN_MS = -600000.0;
 const SLOT_TRIM_MAX_MS = 600000.0;
+const SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD = 24;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
@@ -403,6 +404,7 @@ const s = {
 
     autosavePending: false,
     autosaveTicks: 0,
+    focusedParamRefreshTicks: 0,
 
     undoHistory: [],
     redoHistory: [],
@@ -1009,6 +1011,13 @@ function markSessionChanged() {
     noteHistoryChanged();
 }
 
+function scheduleFocusedSlotRefresh(ticks = SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD) {
+    s.focusedParamRefreshTicks = Math.max(
+        clampInt(ticks, 0, 1024, SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD),
+        clampInt(s.focusedParamRefreshTicks, 0, 1024, 0)
+    );
+}
+
 function bankSliceStateKey(prefix, sec, bank) {
     return prefix + '_' + clampInt(sec, 0, GRID_COUNT - 1, 0) + '_' + clampInt(bank, 0, BANK_COUNT - 1, 0);
 }
@@ -1483,6 +1492,7 @@ function setSlotPath(sec, bank, slot, path, sendToDsp) {
     if (sec === s.focusedSection && bank === focusedBankIndex(sec) && slot === focusedSlotIndex()) {
         invalidatePlaybackCompat();
         syncFocusedSlotPlaybackCompat(true);
+        scheduleFocusedSlotRefresh();
     }
     markLedsDirty();
     markSessionChanged();
@@ -2904,6 +2914,7 @@ function applyParsedSession(parsed, silent, label) {
 
     invalidatePlaybackCompat();
     applyAllStateToDsp();
+    scheduleFocusedSlotRefresh();
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) syncBankSliceState(sec, bank);
     }
@@ -4241,6 +4252,11 @@ function syncFromDsp() {
     tickRecordStateMachine();
     tickRecordButtonBlink();
     syncFocusedSlotPlaybackCompat();
+    if (s.focusedParamRefreshTicks > 0) {
+        s.focusedParamRefreshTicks--;
+        invalidatePlaybackCompat();
+        syncFocusedSlotPlaybackCompat(true);
+    }
 }
 
 function initFromDspDefaults() {
@@ -4557,6 +4573,7 @@ function init() {
     }
     s.autosavePending = false;
     s.autosaveTicks = 0;
+    s.focusedParamRefreshTicks = 0;
     resetHistory();
     previewStop();
     updateRecordButtonLed();
