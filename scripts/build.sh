@@ -4,9 +4,12 @@ set -euo pipefail
 MODULE_ID="twinsampler"
 SOURCE_DIR="twinsampler"
 DIST_DIR="dist/${MODULE_ID}"
+ARCHIVE_NAME="twinsampler-module.tar.gz"
+ARCHIVE_PATH="dist/${ARCHIVE_NAME}"
 
 rm -rf "${DIST_DIR}"
 mkdir -p "${DIST_DIR}"
+mkdir -p "dist"
 
 if [[ ! -d "${SOURCE_DIR}" ]]; then
   echo "Expected source directory '${SOURCE_DIR}' was not found." >&2
@@ -45,4 +48,12 @@ if [[ ! -f "${DIST_DIR}/module.json" ]]; then
   exit 1
 fi
 
+tar -czf "${ARCHIVE_PATH}" -C dist "${MODULE_ID}"
+
+if [[ ! -f "${ARCHIVE_PATH}" ]]; then
+  echo "Failed to create ${ARCHIVE_PATH}." >&2
+  exit 1
+fi
+
 echo "Build complete: ${DIST_DIR}"
+echo "Archive complete: ${ARCHIVE_PATH}"

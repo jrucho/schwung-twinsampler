@@ -130,6 +130,9 @@ const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
 const COPY_TAP_MAX_TICKS = 48;
+const BINARY_KNOB_TURN_THRESHOLD = 2;
+const BINARY_KNOB_TOGGLE_COOLDOWN_MS = 160;
+const BINARY_KNOB_TURN_IDLE_RESET_MS = 220;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -341,6 +344,10 @@ function makeSection(defaultMode) {
     };
 }
 
+function defaultPadModeGateForSectionMode(mode) {
+    return clampInt(mode, MODE_SINGLE, MODE_PER_SLOT, MODE_PER_SLOT) === MODE_SINGLE ? 1 : 0;
+}
+
 const s = {
     view: 'main',
     dirty: true,
@@ -396,6 +403,7 @@ const s = {
     deleteHeld: false,
     stepCopySource: null,
     activePadPress: {},
+    binaryKnobState: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
     midiEchoSuppression: true,
@@ -1513,8 +1521,10 @@ function setSourcePath(sec, bank, path, sendToDsp) {
     const loadingNewSource = !!nextPath && (!hadSource || sb.sourcePath !== nextPath);
 
     if (loadingNewSource) {
+        const defaultModeGate = defaultPadModeGateForSectionMode(s.sections[sec].mode);
         for (let i = 0; i < GRID_SIZE; i++) {
             resetSlotSoundParamsToDefault(sb.slots[i]);
+            sb.slots[i].modeGate = defaultModeGate;
         }
     }
 
@@ -1789,38 +1799,38 @@ function resetEditCursorCache() {
     editCursorCache.slot = -1;
 }
 
-function setSlotAttack(sec, bank, slot, value) {
+function setSlotAttack(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, 1.0, 5000.0, 5.0);
     slotAt(sec, bank, slot).attack = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_attack_at', 'slot_attack', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_attack_at', 'slot_attack', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotDecay(sec, bank, slot, value) {
+function setSlotDecay(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, 1.0, 10000.0, 500.0);
     slotAt(sec, bank, slot).decay = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_decay_at', 'slot_decay', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_decay_at', 'slot_decay', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotStartTrim(sec, bank, slot, value) {
+function setSlotStartTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).startTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotEndTrim(sec, bank, slot, value) {
+function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotGain(sec, bank, slot, value) {
+function setSlotGain(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, 0.0, 4.0, 1.0);
     slotAt(sec, bank, slot).gain = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_gain_at', 'slot_gain', v.toFixed(3), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_gain_at', 'slot_gain', v.toFixed(3), 180, !!forceDirect);
     markSessionChanged();
 }
 
@@ -1831,17 +1841,17 @@ function setSlotPitch(sec, bank, slot, value) {
     markSessionChanged();
 }
 
-function setSlotMode(sec, bank, slot, modeGate) {
+function setSlotMode(sec, bank, slot, modeGate, forceDirect = false) {
     const v = clampInt(modeGate, 0, 1, 1);
     slotAt(sec, bank, slot).modeGate = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_mode_at', 'slot_mode', v, 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_mode_at', 'slot_mode', v, 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotLoop(sec, bank, slot, loopMode) {
+function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const v = clampInt(loopMode, 0, 2, 0);
     slotAt(sec, bank, slot).loop = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
     markSessionChanged();
 }
 
@@ -2212,6 +2222,40 @@ function adjustPadEndTrim(delta) {
     s.dirty = true;
 }
 
+function consumeBinaryKnobTurn(actionKey, delta) {
+    const key = String(actionKey || '');
+    if (!key || delta === 0) return false;
+
+    const nowMs = Date.now();
+    const sign = delta > 0 ? 1 : -1;
+    const existing = s.binaryKnobState[key] || { accum: 0, sign: 0, lastAtMs: 0, cooldownUntilMs: 0 };
+
+    if (nowMs < clampInt(existing.cooldownUntilMs, 0, 0x7fffffff, 0)) {
+        existing.accum = 0;
+        existing.sign = sign;
+        existing.lastAtMs = nowMs;
+        s.binaryKnobState[key] = existing;
+        return false;
+    }
+
+    if (existing.sign !== 0 && existing.sign !== sign) existing.accum = 0;
+    if (nowMs - clampInt(existing.lastAtMs, 0, 0x7fffffff, 0) > BINARY_KNOB_TURN_IDLE_RESET_MS) existing.accum = 0;
+
+    existing.accum += delta;
+    existing.sign = sign;
+    existing.lastAtMs = nowMs;
+
+    if (Math.abs(existing.accum) < BINARY_KNOB_TURN_THRESHOLD) {
+        s.binaryKnobState[key] = existing;
+        return false;
+    }
+
+    existing.accum = 0;
+    existing.cooldownUntilMs = nowMs + BINARY_KNOB_TOGGLE_COOLDOWN_MS;
+    s.binaryKnobState[key] = existing;
+    return true;
+}
+
 function togglePadMode() {
     const a = focusedAddr();
     const cur = slotAt(a.sec, a.bank, a.slot).modeGate;
@@ -2317,7 +2361,7 @@ function adjustGlobalPitch(delta) {
 function toggleVelocitySens() {
     s.velocitySens = s.velocitySens ? 0 : 1;
     spb('velocity_sens', String(s.velocitySens), 120);
-    showStatus(s.velocitySens ? 'Velocity Sens ON' : 'Full Velocity ON', 80);
+    showStatus(s.velocitySens ? 'Pad Velocity ON' : 'Pad Velocity OFF (Full)', 80);
     markSessionChanged();
     s.dirty = true;
 }
@@ -2332,7 +2376,7 @@ function applyAllSlotsInFocusedBank(op) {
 function adjustAllAttack(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).attack + delta * 5.0;
-        setSlotAttack(sec, bank, slot, v);
+        setSlotAttack(sec, bank, slot, v, true);
     });
     showStatus('All atk ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).attack), 80);
 }
@@ -2340,7 +2384,7 @@ function adjustAllAttack(delta) {
 function adjustAllDecay(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).decay + delta * 20.0;
-        setSlotDecay(sec, bank, slot, v);
+        setSlotDecay(sec, bank, slot, v, true);
     });
     showStatus('All dec ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).decay), 80);
 }
@@ -2349,7 +2393,7 @@ function adjustAllStartTrim(delta) {
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).startTrim + delta * step;
-        setSlotStartTrim(sec, bank, slot, v);
+        setSlotStartTrim(sec, bank, slot, v, true);
     });
     showStatus('All start ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).startTrim), 80);
 }
@@ -2358,7 +2402,7 @@ function adjustAllEndTrim(delta) {
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).endTrim + delta * step;
-        setSlotEndTrim(sec, bank, slot, v);
+        setSlotEndTrim(sec, bank, slot, v, true);
     });
     showStatus('All end ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).endTrim), 80);
 }
@@ -2368,7 +2412,7 @@ function toggleAllMode() {
     const bank = focusedBankIndex(sec);
     const first = slotAt(sec, bank, 0).modeGate;
     const next = first ? 0 : 1;
-    forEachSlotInBank(sec, bank, (slot) => setSlotMode(sec, bank, slot, next));
+    forEachSlotInBank(sec, bank, (slot) => setSlotMode(sec, bank, slot, next, true));
     showStatus('All mode ' + (next ? 'Gate' : 'Trig'), 80);
     s.dirty = true;
 }
@@ -2379,7 +2423,7 @@ function adjustAllLoop(delta) {
     forEachSlotInBank(sec, bank, (slot) => {
         const cur = slotAt(sec, bank, slot).loop;
         const next = clamp(cur + (delta > 0 ? 1 : -1), 0, 2);
-        setSlotLoop(sec, bank, slot, next);
+        setSlotLoop(sec, bank, slot, next, true);
     });
     showStatus('All loop ' + LOOP_LABELS[slotAt(sec, bank, 0).loop], 80);
     s.dirty = true;
@@ -2388,13 +2432,9 @@ function adjustAllLoop(delta) {
 function adjustAllGain(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).gain + delta * 0.05;
-        setSlotGain(sec, bank, slot, v);
+        setSlotGain(sec, bank, slot, v, true);
     });
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
-}
-
-function focusedSectionIsSourceMode() {
-    return s.sections[s.focusedSection].mode === MODE_SINGLE;
 }
 
 function adjustFocusedBankPitch(delta) {
@@ -3900,7 +3940,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     flashPadPress(sec, bank, slot);
     s.lastPadTriggerTick = s.transportTicks;
     const triggerNote = padNoteFor(sec, slot);
-    const vel = clampInt(velocity, 1, 127, 100);
+    const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
     const nowMs = Date.now();
     const key = addrKey(sec, bank, slot);
     const existing = activeVoicesByAddr[key];
@@ -4296,8 +4336,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob7) {
-            if (focusedSectionIsSourceMode()) adjustGlobalGain(delta);
-            else adjustAllGain(delta);
+            adjustAllGain(delta);
             return;
         }
         if (cc === MoveKnob8) {
@@ -4313,7 +4352,7 @@ function handleParamKnob(cc, delta) {
         else if (cc === MoveKnob2) adjustPadDecay(delta);
         else if (cc === MoveKnob3) adjustPadStartTrim(delta);
         else if (cc === MoveKnob4) adjustPadEndTrim(delta);
-        else if (cc === MoveKnob5) togglePadMode();
+        else if (cc === MoveKnob5) { if (consumeBinaryKnobTurn('pad-mode', delta)) togglePadMode(); }
         else if (cc === MoveKnob6) adjustPadPitch(delta);
         else if (cc === MoveKnob7) adjustPadGain(delta);
         else if (cc === MoveKnob8) adjustPadLoop(delta);
@@ -4322,7 +4361,7 @@ function handleParamKnob(cc, delta) {
         else if (cc === MoveKnob2) adjustAllDecay(delta);
         else if (cc === MoveKnob3) adjustAllStartTrim(delta);
         else if (cc === MoveKnob4) adjustAllEndTrim(delta);
-        else if (cc === MoveKnob5) toggleAllMode();
+        else if (cc === MoveKnob5) { if (consumeBinaryKnobTurn('all-mode', delta)) toggleAllMode(); }
         else if (cc === MoveKnob6) adjustGlobalPitch(delta);
         else if (cc === MoveKnob7) adjustGlobalGain(delta);
         else if (cc === MoveKnob8) adjustAllLoop(delta);
@@ -4618,6 +4657,7 @@ function init() {
     s.ledQueue = [];
     s.ledsDirty = true;
     s.activePadPress = {};
+    s.binaryKnobState = {};
     s.padPressFlash = {};
     s.sections = [
         makeSection(MODE_SINGLE),
@@ -4626,7 +4666,6 @@ function init() {
 
     initFromDspDefaults();
     activateStandaloneMidiPort();
-    browserOpen(SAMPLES_DIR, 'samples');
     s.copySource = null;
     s.copyHeld = false;
     s.copyPressTick = -1;
@@ -4647,6 +4686,9 @@ function init() {
     if (!restoredFromSession) {
         applyAllStateToDsp();
     }
+
+    s.velocitySens = 0;
+    spb('velocity_sens', '0', 120);
 
     s.view = 'main';
     s.muteHeld = false;
