@@ -3,8 +3,10 @@
 Twin Sampler is a high-performance "overtake" sampler module designed specifically for the **Schwung** environment on the **Ableton Move**. It features two independent 4x4 pad sections with 16 total banks, offering deep per-pad control, automatic slicing, MIDI looping, and integrated session management.
 
 [![Watch the demo](https://img.youtube.com/vi/dNPo0ITg-AQ/0.jpg)](https://youtu.be/dNPo0ITg-AQ)
-▶️ **Watch Demo:** [https://youtu.be/dNPo0ITg-AQ](https://youtu.be/dNPo0ITg-AQ)
 
+▶️ **Watch demo:** [https://youtu.be/dNPo0ITg-AQ](https://youtu.be/dNPo0ITg-AQ)
+
+▶️ **v0.2.2 - 16 Loopers demo:** https://youtu.be/D_-MyqxISjM?si=ceDgwZSeFdTEcinQ
 
 ---
 
