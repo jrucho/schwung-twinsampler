@@ -148,6 +148,9 @@ const SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD = 36;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
+const LAUNCH_ANIM_TICKS = 56;
+const LOADING_ANIM_MIN_TICKS = 22;
+const LOADING_SPINNER = ['|', '/', '-', '\\'];
 
 function createLooperState() {
     return {
@@ -430,6 +433,13 @@ const s = {
     focusedParamRefreshTicks: 0,
     trimReplayTicks: 0,
     trimReplayPendingAll: false,
+    launchAnimTicks: 0,
+    loadingAnim: {
+        active: false,
+        label: '',
+        ticks: 0,
+        minTicks: 0
+    },
 
     undoHistory: [],
     redoHistory: [],
@@ -994,6 +1004,7 @@ function undoSessionState() {
         return;
     }
 
+    startLoadingAnimation('Undo');
     const current = s.undoHistory.pop();
     if (current) s.redoHistory.push(current);
 
@@ -1002,10 +1013,12 @@ function undoSessionState() {
         const rollback = s.redoHistory.pop();
         if (rollback) s.undoHistory.push(rollback);
         showStatus('Undo failed', 120);
+        finishLoadingAnimation();
         return;
     }
 
     showStatus('Undo', 90);
+    finishLoadingAnimation();
     s.dirty = true;
 }
 
@@ -1015,9 +1028,11 @@ function redoSessionState() {
         return;
     }
 
+    startLoadingAnimation('Redo');
     const next = s.redoHistory.pop();
     if (!applyHistorySnapshot(next, 'redo')) {
         showStatus('Redo failed', 120);
+        finishLoadingAnimation();
         return;
     }
 
@@ -1028,6 +1043,7 @@ function redoSessionState() {
     }
 
     showStatus('Redo', 90);
+    finishLoadingAnimation();
     s.dirty = true;
 }
 
@@ -1131,6 +1147,63 @@ function showStatus(msg, ticks = STATUS_TICKS) {
     s.statusText = String(msg || '');
     s.statusTicks = ticks;
     s.dirty = true;
+}
+
+function startLoadingAnimation(label, minTicks = LOADING_ANIM_MIN_TICKS) {
+    s.loadingAnim.active = true;
+    s.loadingAnim.label = String(label || 'Loading');
+    s.loadingAnim.ticks = 0;
+    s.loadingAnim.minTicks = clampInt(minTicks, 1, 240, LOADING_ANIM_MIN_TICKS);
+    s.dirty = true;
+}
+
+function finishLoadingAnimation() {
+    if (!s.loadingAnim.active) return;
+    s.loadingAnim.ticks = Math.max(s.loadingAnim.ticks, s.loadingAnim.minTicks);
+    s.dirty = true;
+}
+
+function tickUiAnimations() {
+    if (s.launchAnimTicks > 0) {
+        s.launchAnimTicks--;
+        s.dirty = true;
+    }
+
+    if (!s.loadingAnim.active) return;
+    s.loadingAnim.ticks++;
+    s.dirty = true;
+    if (s.loadingAnim.ticks >= s.loadingAnim.minTicks) {
+        s.loadingAnim.active = false;
+        s.loadingAnim.label = '';
+        s.loadingAnim.ticks = 0;
+        s.loadingAnim.minTicks = 0;
+    }
+}
+
+function drawLaunchAnimation() {
+    clear_screen();
+    const total = LAUNCH_ANIM_TICKS;
+    const progress = clampInt(total - s.launchAnimTicks, 0, total, 0);
+    const pulse = (progress % 16) < 8 ? '>' : '<';
+    const reveal = clampInt(Math.floor((progress / Math.max(1, total)) * 11), 1, 11, 1);
+    const title = 'TwinSampler'.slice(0, reveal);
+    const spinner = LOADING_SPINNER[progress % LOADING_SPINNER.length];
+    print(0, 0, shortText('Booting TwinSampler', 21), 1);
+    print(0, 20, shortText(pulse + ' ' + title + ' ' + pulse, 21), 2);
+    print(0, 30, shortText('Dual Engine ' + spinner, 21), 1);
+    print(0, 50, shortText('L sampler <> R sampler', 21), 1);
+}
+
+function drawLoadingAnimation() {
+    clear_screen();
+    const t = clampInt(s.loadingAnim.ticks, 0, 10000, 0);
+    const spinner = LOADING_SPINNER[t % LOADING_SPINNER.length];
+    const phase = t % 12;
+    const meter = '[' + '#'.repeat(Math.max(1, phase)) + '.'.repeat(Math.max(0, 12 - phase)) + ']';
+    print(0, 0, shortText('TwinSampler', 21), 1);
+    print(0, 20, shortText(s.loadingAnim.label + ' ' + spinner, 21), 2);
+    print(0, 30, shortText(meter, 21), 1);
+    print(0, 50, shortText('Please wait...', 21), 1);
 }
 
 function markLedsDirty() {
@@ -2819,6 +2892,14 @@ function drawBrowser() {
 }
 
 function draw() {
+    if (s.launchAnimTicks > 0) {
+        drawLaunchAnimation();
+        return;
+    }
+    if (s.loadingAnim.active) {
+        drawLoadingAnimation();
+        return;
+    }
     if (s.view === 'browser') {
         drawBrowser();
     } else {
@@ -3060,9 +3141,11 @@ function applyParsedSession(parsed, silent, label) {
 }
 
 function loadSessionFromPath(path, silent, trackHistory = true) {
+    if (!silent) startLoadingAnimation('Loading session');
     const text = readTextFile(path);
     if (!text) {
         if (!silent) showStatus('Session not found', 120);
+        if (!silent) finishLoadingAnimation();
         return false;
     }
 
@@ -3071,16 +3154,19 @@ function loadSessionFromPath(path, silent, trackHistory = true) {
         parsed = JSON.parse(text);
     } catch (e) {
         if (!silent) showStatus('Session parse failed', 120);
+        if (!silent) finishLoadingAnimation();
         return false;
     }
 
     if (!parsed || typeof parsed !== 'object') {
         if (!silent) showStatus('Session invalid', 120);
+        if (!silent) finishLoadingAnimation();
         return false;
     }
 
     const ok = applyParsedSession(parsed, silent, sessionNameFromPath(path));
     if (ok && trackHistory) noteHistoryChanged();
+    if (!silent) finishLoadingAnimation();
     return ok;
 }
 
@@ -4727,6 +4813,11 @@ function init() {
     s.focusedParamRefreshTicks = 0;
     s.trimReplayTicks = 0;
     s.trimReplayPendingAll = false;
+    s.launchAnimTicks = LAUNCH_ANIM_TICKS;
+    s.loadingAnim.active = false;
+    s.loadingAnim.label = '';
+    s.loadingAnim.ticks = 0;
+    s.loadingAnim.minTicks = 0;
     resetHistory();
     previewStop();
     updateRecordButtonLed();
@@ -4738,6 +4829,7 @@ function init() {
 
 function tick() {
     s.transportTicks++;
+    tickUiAnimations();
     syncFromDsp();
     tickStatusTimer();
     tickAutosave();
