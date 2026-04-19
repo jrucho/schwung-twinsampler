@@ -3357,7 +3357,7 @@ function knobTouchActionLabel(note) {
         if (idx === 1) return 'All decay';
         if (idx === 2) return 'All start trim';
         if (idx === 3) return 'All end trim';
-        if (idx === 4) return 'All mode';
+        if (idx === 4) return 'Pad mode';
         if (idx === 5) return s.sections[s.focusedSection].mode === MODE_SINGLE ? 'Bank pitch' : 'Global pitch';
         if (idx === 6) return 'All gain';
         if (idx === 7) return 'All loop';
@@ -4332,7 +4332,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob5) {
-            if (consumeBinaryKnobTurn('all-mode', delta)) toggleAllMode();
+            if (consumeBinaryKnobTurn('pad-mode-shift', delta)) togglePadMode();
             return;
         }
         if (cc === MoveKnob6) {
