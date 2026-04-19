@@ -113,6 +113,8 @@ const SOURCE_CHOP_COUNT = 16;
 const CHOP_OPTIONS = [SOURCE_CHOP_COUNT];
 
 const LOOP_LABELS = ['Off', 'Loop', 'Ping'];
+const FILTER_TYPES = ['Low-pass', 'High-pass', 'Band-pass', 'Res LP'];
+const EMULATION_PRESETS = ['Clean', 'Punchy', 'Dusty', 'Vintage'];
 const STATUS_TICKS = 120;
 const LEDS_PER_TICK = 8;
 const PREVIEW_DEBOUNCE_MS = 250;
@@ -145,6 +147,9 @@ const SLOT_TRIM_MIN_MS = -600000.0;
 const SLOT_TRIM_MAX_MS = 600000.0;
 const SLOT_PARAM_REFRESH_TICKS_AFTER_LOAD = 24;
 const SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD = 36;
+const DEFAULT_DECAY_MS = 500.0;
+const SOURCE_MODE_DEFAULT_DECAY_MS = 10000.0;
+const DECAY_MAX_MS = 600000.0;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
@@ -267,13 +272,14 @@ function makeSlot() {
     return {
         path: '',
         attack: 5.0,
-        decay: 500.0,
+        decay: DEFAULT_DECAY_MS,
         startTrim: 0.0,
         endTrim: 0.0,
         gain: 1.0,
         pitch: 0.0,
         modeGate: 0,
         loop: 0,
+        reverse: 0,
         color: -1,
         muted: 0
     };
@@ -290,6 +296,7 @@ function cloneSlot(s) {
         pitch: s.pitch,
         modeGate: s.modeGate,
         loop: s.loop,
+        reverse: s.reverse ? 1 : 0,
         color: s.color,
         muted: s.muted ? 1 : 0
     };
@@ -306,6 +313,12 @@ function resetSlotSoundParamsToDefault(slot) {
     slot.pitch = base.pitch;
     slot.modeGate = base.modeGate;
     slot.loop = base.loop;
+    slot.reverse = base.reverse;
+}
+
+function applySourceModeDefaultsToSlot(slot) {
+    if (!slot || typeof slot !== 'object') return;
+    slot.decay = SOURCE_MODE_DEFAULT_DECAY_MS;
 }
 
 function makeBank(bankIdx = 0) {
@@ -318,6 +331,9 @@ function makeBank(bankIdx = 0) {
         slicePage: 0,
         transientSensitivity: 50,
         sliceStarts: [],
+        filterType: 0,
+        filterValue: 0.5,
+        emulationPreset: 0,
         slots
     };
 }
@@ -330,6 +346,9 @@ function cloneBank(b) {
         slicePage: clampInt(b.slicePage, 0, 7, 0),
         transientSensitivity: normalizeTransientSensitivity(b.transientSensitivity),
         sliceStarts: Array.isArray(b.sliceStarts) ? b.sliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
+        filterType: clampInt(b.filterType, 0, FILTER_TYPES.length - 1, 0),
+        filterValue: clampFloat(b.filterValue, 0.0, 1.0, 0.5),
+        emulationPreset: clampInt(b.emulationPreset, 0, EMULATION_PRESETS.length - 1, 0),
         slots: b.slots.map((s) => cloneSlot(s))
     };
 }
@@ -337,6 +356,11 @@ function cloneBank(b) {
 function makeSection(defaultMode) {
     const banks = [];
     for (let i = 0; i < BANK_COUNT; i++) banks.push(makeBank(i));
+    if (clampInt(defaultMode, MODE_SINGLE, MODE_PER_SLOT, MODE_PER_SLOT) === MODE_SINGLE) {
+        for (let b = 0; b < BANK_COUNT; b++) {
+            for (let slot = 0; slot < GRID_SIZE; slot++) applySourceModeDefaultsToSlot(banks[b].slots[slot]);
+        }
+    }
     return {
         mode: defaultMode,
         currentBank: 0,
@@ -411,6 +435,7 @@ const s = {
 
     transportTicks: 0,
     padPressFlash: {},
+    padPlaybackState: {},
     midiLoopers: Array.from({ length: LOOPER_COUNT }, () => createLooperState()),
     activeLooper: 0,
     loopPadMode: false,
@@ -1525,6 +1550,7 @@ function setSourcePath(sec, bank, path, sendToDsp) {
         for (let i = 0; i < GRID_SIZE; i++) {
             resetSlotSoundParamsToDefault(sb.slots[i]);
             sb.slots[i].modeGate = defaultModeGate;
+            if (s.sections[sec].mode === MODE_SINGLE) applySourceModeDefaultsToSlot(sb.slots[i]);
         }
     }
 
@@ -1621,6 +1647,10 @@ function setSectionMode(sec, mode) {
     if (m === MODE_SINGLE) {
         s.sections[sec].banks[bank].chopCount = SOURCE_CHOP_COUNT;
         s.sections[sec].banks[bank].slicePage = 0;
+        for (let slot = 0; slot < GRID_SIZE; slot++) {
+            const sl = s.sections[sec].banks[bank].slots[slot];
+            if (sl.decay <= DEFAULT_DECAY_MS + 1.0) sl.decay = SOURCE_MODE_DEFAULT_DECAY_MS;
+        }
     }
     spb('section_mode', sec + ':' + m, 200);
     applyBankStateToDsp(sec, bank, true);
@@ -1640,6 +1670,7 @@ function setSectionBank(sec, bank) {
 
     s.sections[sec].currentBank = b;
     spb('section_bank', sec + ':' + b, 200);
+    sendBankToneStateToDsp(sec, b);
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
@@ -1807,7 +1838,7 @@ function setSlotAttack(sec, bank, slot, value, forceDirect = false) {
 }
 
 function setSlotDecay(sec, bank, slot, value, forceDirect = false) {
-    const v = clampFloat(value, 1.0, 10000.0, 500.0);
+    const v = clampFloat(value, 1.0, DECAY_MAX_MS, DEFAULT_DECAY_MS);
     slotAt(sec, bank, slot).decay = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_decay_at', 'slot_decay', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
@@ -1855,6 +1886,13 @@ function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     markSessionChanged();
 }
 
+function setSlotReverse(sec, bank, slot, reverseOn, forceDirect = false) {
+    const v = clampInt(reverseOn, 0, 1, 0);
+    slotAt(sec, bank, slot).reverse = v;
+    sendSlotParamCompat(sec, bank, slot, 'slot_reverse_at', 'slot_reverse', v, 180, !!forceDirect);
+    markSessionChanged();
+}
+
 function forEachSlotInBank(sec, bank, fn) {
     for (let i = 0; i < GRID_SIZE; i++) fn(i);
 }
@@ -1887,13 +1925,14 @@ function applySlotToDsp(sec, bank, slot, srcSlot) {
     const dst = slotAt(sec, bank, slot);
     dst.path = String(srcSlot.path || '');
     dst.attack = clampFloat(srcSlot.attack, 1.0, 5000.0, 5.0);
-    dst.decay = clampFloat(srcSlot.decay, 1.0, 10000.0, 500.0);
+    dst.decay = clampFloat(srcSlot.decay, 1.0, DECAY_MAX_MS, DEFAULT_DECAY_MS);
     dst.startTrim = clampFloat(srcSlot.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     dst.endTrim = clampFloat(srcSlot.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     dst.gain = clampFloat(srcSlot.gain, 0.0, 4.0, 1.0);
     dst.pitch = clampFloat(srcSlot.pitch, -48.0, 48.0, 0.0);
     dst.modeGate = clampInt(srcSlot.modeGate, 0, 1, 1);
     dst.loop = clampInt(srcSlot.loop, 0, 2, 0);
+    dst.reverse = clampInt(srcSlot.reverse, 0, 1, 0);
     dst.color = clampInt(srcSlot.color, -1, 127, -1);
     dst.muted = clampInt(srcSlot.muted, 0, 1, 0);
 
@@ -1972,6 +2011,7 @@ function sendSlotStateToDsp(sec, bank, slot, blocking, forceDirect) {
     send('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)), timeout);
     send('slot_mode_at', fmtAt(sec, bank, slot, sl.modeGate), timeout);
     send('slot_loop_at', fmtAt(sec, bank, slot, sl.loop), timeout);
+    send('slot_reverse_at', fmtAt(sec, bank, slot, sl.reverse ? 1 : 0), timeout);
 
     if (
         forceDirect ||
@@ -1986,7 +2026,15 @@ function sendSlotStateToDsp(sec, bank, slot, blocking, forceDirect) {
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_pitch', sl.pitch.toFixed(2), directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_mode', sl.modeGate, directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_loop', sl.loop, directTimeout, !!blocking);
+        sendDirectSlotParamCompat(sec, bank, slot, 'slot_reverse', sl.reverse ? 1 : 0, directTimeout, !!blocking);
     }
+}
+
+function sendBankToneStateToDsp(sec, bank) {
+    const b = s.sections[sec].banks[bank];
+    spb('section_filter_type', sec + ':' + bank + ':' + clampInt(b.filterType, 0, FILTER_TYPES.length - 1, 0), 120);
+    spb('section_filter_amount', sec + ':' + bank + ':' + clampFloat(b.filterValue, 0.0, 1.0, 0.5).toFixed(3), 120);
+    spb('section_emulation_preset', sec + ':' + bank + ':' + clampInt(b.emulationPreset, 0, EMULATION_PRESETS.length - 1, 0), 120);
 }
 
 function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
@@ -2009,6 +2057,7 @@ function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
     for (let slot = 0; slot < GRID_SIZE; slot++) {
         sendSlotStateToDsp(sec, bank, slot, !!blockingSlots, !!forceDirect);
     }
+    sendBankToneStateToDsp(sec, bank);
     if (sec === s.focusedSection && bank === focusedBankIndex(sec)) {
         invalidatePlaybackCompat();
     }
@@ -2066,6 +2115,8 @@ function stepNoteFor(sec, bank) {
 function effectivePadColor(sec, bankIdx, slotIdx) {
     const bank = s.sections[sec].banks[bankIdx];
     const slot = bank.slots[slotIdx];
+    const playbackState = s.padPlaybackState[addrKey(sec, bankIdx, slotIdx)] || 'idle';
+    if (slot.loop > 0 && playbackState !== 'idle') return PAD_PRESS_LED_COLOR;
     const pressKey = sec + ':' + bankIdx + ':' + slotIdx;
     const flashUntil = clampInt(s.padPressFlash[pressKey], 0, 0x7fffffff, 0);
     if (flashUntil > s.transportTicks) return PAD_PRESS_LED_COLOR;
@@ -2197,7 +2248,8 @@ function adjustPadDecay(delta) {
     const a = focusedAddr();
     const v = slotAt(a.sec, a.bank, a.slot).decay + delta * 20.0;
     setSlotDecay(a.sec, a.bank, a.slot, v);
-    showStatus('P' + (a.slot + 1) + ' Dec ' + Math.round(slotAt(a.sec, a.bank, a.slot).decay), 80);
+    const next = slotAt(a.sec, a.bank, a.slot).decay;
+    showStatus('P' + (a.slot + 1) + ' Dec ' + (next >= DECAY_MAX_MS ? 'INF' : Math.round(next)), 80);
     s.dirty = true;
 }
 
@@ -2386,7 +2438,34 @@ function adjustAllDecay(delta) {
         const v = slotAt(sec, bank, slot).decay + delta * 20.0;
         setSlotDecay(sec, bank, slot, v, true);
     });
-    showStatus('All dec ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).decay), 80);
+    const next = slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).decay;
+    showStatus('All dec ' + (next >= DECAY_MAX_MS ? 'INF' : Math.round(next)), 80);
+}
+
+function adjustFocusedBankFilter(delta) {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const b = s.sections[sec].banks[bank];
+    const typeValues = Array.from({ length: FILTER_TYPES.length }, (_, i) => i);
+    if (s.sections[sec].mode === MODE_SINGLE) b.filterType = cycleInPalette(clampInt(b.filterType, 0, FILTER_TYPES.length - 1, 0), typeValues, delta, 0);
+    else b.filterValue = clamp(clampFloat(b.filterValue, 0.0, 1.0, 0.5) + delta * 0.03, 0.0, 1.0);
+    sendBankToneStateToDsp(sec, bank);
+    showStatus('B' + (bank + 1) + ' Filter ' + FILTER_TYPES[clampInt(b.filterType, 0, FILTER_TYPES.length - 1, 0)] + ' ' + Math.round(clampFloat(b.filterValue, 0.0, 1.0, 0.5) * 100) + '%', 90);
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function adjustFocusedBankEmulation(delta) {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    const b = s.sections[sec].banks[bank];
+    const next = clamp(clampInt(b.emulationPreset, 0, EMULATION_PRESETS.length - 1, 0) + (delta > 0 ? 1 : -1), 0, EMULATION_PRESETS.length - 1);
+    if (next === b.emulationPreset) return;
+    b.emulationPreset = next;
+    sendBankToneStateToDsp(sec, bank);
+    showStatus('B' + (bank + 1) + ' Tone ' + EMULATION_PRESETS[next], 90);
+    markSessionChanged();
+    s.dirty = true;
 }
 
 function adjustAllStartTrim(delta) {
@@ -2884,13 +2963,14 @@ function sanitizeSlot(raw) {
     return {
         path: typeof raw.path === 'string' ? raw.path : '',
         attack: clampFloat(raw.attack, 1.0, 5000.0, base.attack),
-        decay: clampFloat(raw.decay, 1.0, 10000.0, base.decay),
+        decay: clampFloat(raw.decay, 1.0, DECAY_MAX_MS, base.decay),
         startTrim: clampFloat(raw.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, base.startTrim),
         endTrim: clampFloat(raw.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, base.endTrim),
         gain: clampFloat(raw.gain, 0.0, 4.0, base.gain),
         pitch: clampFloat(raw.pitch, -48.0, 48.0, base.pitch),
         modeGate: clampInt(raw.modeGate, 0, 1, base.modeGate),
         loop: clampInt(raw.loop, 0, 2, base.loop),
+        reverse: clampInt(raw.reverse, 0, 1, base.reverse),
         color: clampInt(raw.color, -1, 127, base.color),
         muted: clampInt(raw.muted, 0, 1, base.muted)
     };
@@ -2910,6 +2990,9 @@ function sanitizeBank(raw, bankIdx) {
         slicePage: clampInt(raw.slicePage, 0, maxPages - 1, 0),
         transientSensitivity: normalizeTransientSensitivity(raw.transientSensitivity),
         sliceStarts: parseSliceStartsString(Array.isArray(raw.sliceStarts) ? raw.sliceStarts.join(',') : raw.sliceStarts, chopCount),
+        filterType: clampInt(raw.filterType, 0, FILTER_TYPES.length - 1, base.filterType),
+        filterValue: clampFloat(raw.filterValue, 0.0, 1.0, base.filterValue),
+        emulationPreset: clampInt(raw.emulationPreset, 0, EMULATION_PRESETS.length - 1, base.emulationPreset),
         slots: []
     };
 
@@ -3972,6 +4055,8 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         startedMs: nowMs,
         lastOnMs: nowMs
     };
+    setPadPlaybackState(sec, bank, slot, 'playing');
+    markLedsDirty();
     return true;
 }
 
@@ -4036,7 +4121,14 @@ function tickMidiEchoCache() {
 
 function addrKey(sec, bank, slot) {
     return String(clampInt(sec, 0, GRID_COUNT - 1, 0)) + ':' +
+        String(clampInt(bank, 0, BANK_COUNT - 1, 0)) + ':' +
         String(clampInt(slot, 0, GRID_SIZE - 1, 0));
+}
+
+function setPadPlaybackState(sec, bank, slot, nextState) {
+    const key = addrKey(sec, bank, slot);
+    if (nextState === 'idle') delete s.padPlaybackState[key];
+    else s.padPlaybackState[key] = nextState;
 }
 
 function currentVoiceAt(sec, bank, slot) {
@@ -4075,12 +4167,15 @@ function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = 
             recordToLooper: !!recordToLooper,
             dueAtMs: nowMs + (MIDI_MIN_NOTE_LENGTH_MS - elapsed)
         };
+        setPadPlaybackState(sec, bank, slot, 'stopping');
         return true;
     }
 
     clearPendingOff(sec, bank, slot);
     emitPadNoteOffNow(sec, bank, slot, routeBank, recordToLooper);
     delete activeVoicesByAddr[key];
+    setPadPlaybackState(sec, bank, slot, 'idle');
+    markLedsDirty();
     return true;
 }
 
@@ -4093,7 +4188,9 @@ function releaseVoicesByOwner(ownerPrefix, nowMs = Date.now()) {
         clearPendingOff(v.sec, v.bank, v.slot);
         emitPadNoteOffNow(v.sec, v.bank, v.slot, !!v.routeBank, false);
         delete activeVoicesByAddr[keys[i]];
+        setPadPlaybackState(v.sec, v.bank, v.slot, 'idle');
     }
+    markLedsDirty();
 }
 
 function flushPendingNoteOffs() {
@@ -4107,6 +4204,8 @@ function flushPendingNoteOffs() {
         emitPadNoteOffNow(p.sec, p.bank, p.slot, !!p.routeBank, !!p.recordToLooper);
         delete activeVoicesByAddr[key];
         delete pendingNoteOffsByAddr[key];
+        setPadPlaybackState(p.sec, p.bank, p.slot, 'idle');
+        markLedsDirty();
     }
 }
 
@@ -4129,6 +4228,16 @@ function handlePadNote(note, velocity) {
     const addr = { sec, bank, slot };
     const triggerNote = padNoteFor(sec, slot);
 
+    if (s.shiftHeld && s.volumeTouchHeld) {
+        delete s.activePadPress[String(note)];
+        setSelectedSlice(slice, true);
+        const cur = slotAt(sec, bank, slot).reverse ? 1 : 0;
+        setSlotReverse(sec, bank, slot, cur ? 0 : 1);
+        showStatus('P' + (slot + 1) + ' Reverse ' + (slotAt(sec, bank, slot).reverse ? 'ON' : 'OFF'), 90);
+        s.dirty = true;
+        return true;
+    }
+
     if (s.deleteHeld && !s.shiftHeld) {
         if (eraseLooperNotesForPad(sec, bank, slot)) return true;
         showStatus('No looper notes on that pad', 80);
@@ -4141,6 +4250,20 @@ function handlePadNote(note, velocity) {
     }
 
     if (!s.shiftHeld) {
+        const sl = slotAt(sec, bank, slot);
+        if (sl.loop > 0) {
+            const existing = currentVoiceAt(sec, bank, slot);
+            if (existing) {
+                releaseActiveVoice(sec, bank, slot, false, true, Date.now(), true);
+                delete s.activePadPress[String(note)];
+                return true;
+            }
+            triggerPadOn(sec, bank, slot, velocity, false, true, 'pad-toggle:' + String(note));
+            delete s.activePadPress[String(note)];
+            s.editScope = 'P';
+            setSelectedSlice(slice, false, false);
+            return true;
+        }
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         s.editScope = 'P';
@@ -4181,6 +4304,7 @@ function handlePadNoteRelease(note) {
     delete s.activePadPress[String(note)];
     if (!stored) return true;
     const addr = stored;
+    if (slotAt(addr.sec, addr.bank, addr.slot).loop > 0) return true;
 
     triggerPadOff(addr.sec, addr.bank, addr.slot, false);
     return true;
@@ -4292,6 +4416,14 @@ function handleParamKnob(cc, delta) {
     ensureFocusedEditTargetForKnobs();
 
     if (s.shiftHeld && s.volumeTouchHeld) {
+        if (cc === MoveKnob1) {
+            adjustFocusedBankFilter(delta);
+            return;
+        }
+        if (cc === MoveKnob2) {
+            adjustFocusedBankEmulation(delta);
+            return;
+        }
         if (cc === MoveKnob5) {
             toggleEditScope();
             return;
