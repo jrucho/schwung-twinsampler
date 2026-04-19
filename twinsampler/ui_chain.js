@@ -133,9 +133,6 @@ const COPY_TAP_MAX_TICKS = 48;
 const BINARY_KNOB_TURN_THRESHOLD = 2;
 const BINARY_KNOB_TOGGLE_COOLDOWN_MS = 160;
 const BINARY_KNOB_TURN_IDLE_RESET_MS = 220;
-const DJ_LP_MIN_HZ = 40.0;
-const DJ_LP_MAX_HZ = 20000.0;
-const DJ_LP_STEP = 0.04;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -199,16 +196,6 @@ function normalizeChopCount(v) {
 
 function normalizeTransientSensitivity(v) {
     return clampInt(v, 0, 100, 50);
-}
-
-function normalizeBankDjLowPass(v) {
-    return clampFloat(v, 0.0, 1.0, 1.0);
-}
-
-function bankDjLowPassHz(norm) {
-    const n = normalizeBankDjLowPass(norm);
-    const ratio = DJ_LP_MAX_HZ / DJ_LP_MIN_HZ;
-    return DJ_LP_MIN_HZ * Math.pow(ratio, n);
 }
 
 function chopIndex(v) {
@@ -330,7 +317,6 @@ function makeBank(bankIdx = 0) {
         chopCount: SOURCE_CHOP_COUNT,
         slicePage: 0,
         transientSensitivity: 50,
-        djLowPass: 1.0,
         sliceStarts: [],
         slots
     };
@@ -343,7 +329,6 @@ function cloneBank(b) {
         chopCount: normalizeChopCount(b.chopCount),
         slicePage: clampInt(b.slicePage, 0, 7, 0),
         transientSensitivity: normalizeTransientSensitivity(b.transientSensitivity),
-        djLowPass: normalizeBankDjLowPass(b.djLowPass),
         sliceStarts: Array.isArray(b.sliceStarts) ? b.sliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
         slots: b.slots.map((s) => cloneSlot(s))
     };
@@ -1140,14 +1125,6 @@ function syncBankSliceState(sec, bank) {
         starts.push(clampInt(n, 0, 0x7fffffff, 0));
     }
     if (starts.length === count + 1) b.sliceStarts = starts;
-}
-
-function sendBankDjLowPassToDsp(sec, bank, timeout = 200) {
-    const b = s.sections[sec].banks[bank];
-    if (!b) return;
-    b.djLowPass = normalizeBankDjLowPass(b.djLowPass);
-    const hz = Math.round(bankDjLowPassHz(b.djLowPass));
-    spb('section_dj_lowpass_hz', sec + ':' + bank + ':' + hz, timeout);
 }
 
 function showStatus(msg, ticks = STATUS_TICKS) {
@@ -2021,7 +1998,6 @@ function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
     spb('section_chop_count', sec + ':' + bank + ':' + SOURCE_CHOP_COUNT, 300);
     spb('section_transient_sensitivity', sec + ':' + bank + ':' + normalizeTransientSensitivity(b.transientSensitivity), 300);
     spb('section_source_path', sec + ':' + bank + ':' + (b.sourcePath || ''), 500);
-    sendBankDjLowPassToDsp(sec, bank, 250);
 
     const slicePayload = serializeSliceStarts(b.sliceStarts, b.chopCount);
     if (slicePayload && b.sourcePath) {
@@ -2374,17 +2350,6 @@ function adjustGlobalGain(delta) {
     s.dirty = true;
 }
 
-function adjustFocusedBankDjLowPass(delta) {
-    const sec = s.focusedSection;
-    const bank = focusedBankIndex(sec);
-    const b = s.sections[sec].banks[bank];
-    b.djLowPass = normalizeBankDjLowPass(b.djLowPass + delta * DJ_LP_STEP);
-    sendBankDjLowPassToDsp(sec, bank, 220);
-    showStatus('S' + (sec + 1) + 'B' + (bank + 1) + ' LP ' + Math.round(bankDjLowPassHz(b.djLowPass)) + 'Hz', 90);
-    markSessionChanged();
-    s.dirty = true;
-}
-
 function adjustGlobalPitch(delta) {
     s.globalPitch = clamp(s.globalPitch + delta * 0.5, -48.0, 48.0);
     sp('global_pitch', s.globalPitch.toFixed(2));
@@ -2470,10 +2435,6 @@ function adjustAllGain(delta) {
         setSlotGain(sec, bank, slot, v);
     });
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
-}
-
-function focusedSectionIsSourceMode() {
-    return s.sections[s.focusedSection].mode === MODE_SINGLE;
 }
 
 function adjustFocusedBankPitch(delta) {
@@ -2948,7 +2909,6 @@ function sanitizeBank(raw, bankIdx) {
         chopCount,
         slicePage: clampInt(raw.slicePage, 0, maxPages - 1, 0),
         transientSensitivity: normalizeTransientSensitivity(raw.transientSensitivity),
-        djLowPass: normalizeBankDjLowPass(raw.djLowPass),
         sliceStarts: parseSliceStartsString(Array.isArray(raw.sliceStarts) ? raw.sliceStarts.join(',') : raw.sliceStarts, chopCount),
         slots: []
     };
@@ -3381,7 +3341,6 @@ function knobTouchActionLabel(note) {
     if (s.view !== 'main') return 'No action';
 
     if (s.shiftHeld && s.volumeTouchHeld) {
-        if (idx === 0) return 'DJ low-pass';
         if (idx === 4) return 'Edit scope';
         if (idx === 5) return 'Source -> banks';
         if (idx === 6) return 'Bank color';
@@ -4333,10 +4292,6 @@ function handleParamKnob(cc, delta) {
     ensureFocusedEditTargetForKnobs();
 
     if (s.shiftHeld && s.volumeTouchHeld) {
-        if (cc === MoveKnob1) {
-            adjustFocusedBankDjLowPass(delta);
-            return;
-        }
         if (cc === MoveKnob5) {
             toggleEditScope();
             return;
@@ -4373,7 +4328,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob5) {
-            if (consumeBinaryKnobTurn('all-mode', delta)) toggleAllMode();
+            toggleAllMode();
             return;
         }
         if (cc === MoveKnob6) {
@@ -4381,8 +4336,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob7) {
-            if (focusedSectionIsSourceMode()) adjustGlobalGain(delta);
-            else adjustAllGain(delta);
+            adjustAllGain(delta);
             return;
         }
         if (cc === MoveKnob8) {
