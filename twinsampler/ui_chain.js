@@ -1799,38 +1799,38 @@ function resetEditCursorCache() {
     editCursorCache.slot = -1;
 }
 
-function setSlotAttack(sec, bank, slot, value) {
+function setSlotAttack(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, 1.0, 5000.0, 5.0);
     slotAt(sec, bank, slot).attack = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_attack_at', 'slot_attack', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_attack_at', 'slot_attack', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotDecay(sec, bank, slot, value) {
+function setSlotDecay(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, 1.0, 10000.0, 500.0);
     slotAt(sec, bank, slot).decay = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_decay_at', 'slot_decay', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_decay_at', 'slot_decay', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotStartTrim(sec, bank, slot, value) {
+function setSlotStartTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).startTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotEndTrim(sec, bank, slot, value) {
+function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotGain(sec, bank, slot, value) {
+function setSlotGain(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, 0.0, 4.0, 1.0);
     slotAt(sec, bank, slot).gain = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_gain_at', 'slot_gain', v.toFixed(3), 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_gain_at', 'slot_gain', v.toFixed(3), 180, !!forceDirect);
     markSessionChanged();
 }
 
@@ -1841,17 +1841,17 @@ function setSlotPitch(sec, bank, slot, value) {
     markSessionChanged();
 }
 
-function setSlotMode(sec, bank, slot, modeGate) {
+function setSlotMode(sec, bank, slot, modeGate, forceDirect = false) {
     const v = clampInt(modeGate, 0, 1, 1);
     slotAt(sec, bank, slot).modeGate = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_mode_at', 'slot_mode', v, 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_mode_at', 'slot_mode', v, 180, !!forceDirect);
     markSessionChanged();
 }
 
-function setSlotLoop(sec, bank, slot, loopMode) {
+function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const v = clampInt(loopMode, 0, 2, 0);
     slotAt(sec, bank, slot).loop = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180);
+    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
     markSessionChanged();
 }
 
@@ -2376,7 +2376,7 @@ function applyAllSlotsInFocusedBank(op) {
 function adjustAllAttack(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).attack + delta * 5.0;
-        setSlotAttack(sec, bank, slot, v);
+        setSlotAttack(sec, bank, slot, v, true);
     });
     showStatus('All atk ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).attack), 80);
 }
@@ -2384,7 +2384,7 @@ function adjustAllAttack(delta) {
 function adjustAllDecay(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).decay + delta * 20.0;
-        setSlotDecay(sec, bank, slot, v);
+        setSlotDecay(sec, bank, slot, v, true);
     });
     showStatus('All dec ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).decay), 80);
 }
@@ -2393,7 +2393,7 @@ function adjustAllStartTrim(delta) {
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).startTrim + delta * step;
-        setSlotStartTrim(sec, bank, slot, v);
+        setSlotStartTrim(sec, bank, slot, v, true);
     });
     showStatus('All start ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).startTrim), 80);
 }
@@ -2402,7 +2402,7 @@ function adjustAllEndTrim(delta) {
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).endTrim + delta * step;
-        setSlotEndTrim(sec, bank, slot, v);
+        setSlotEndTrim(sec, bank, slot, v, true);
     });
     showStatus('All end ' + Math.round(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).endTrim), 80);
 }
@@ -2412,7 +2412,7 @@ function toggleAllMode() {
     const bank = focusedBankIndex(sec);
     const first = slotAt(sec, bank, 0).modeGate;
     const next = first ? 0 : 1;
-    forEachSlotInBank(sec, bank, (slot) => setSlotMode(sec, bank, slot, next));
+    forEachSlotInBank(sec, bank, (slot) => setSlotMode(sec, bank, slot, next, true));
     showStatus('All mode ' + (next ? 'Gate' : 'Trig'), 80);
     s.dirty = true;
 }
@@ -2423,7 +2423,7 @@ function adjustAllLoop(delta) {
     forEachSlotInBank(sec, bank, (slot) => {
         const cur = slotAt(sec, bank, slot).loop;
         const next = clamp(cur + (delta > 0 ? 1 : -1), 0, 2);
-        setSlotLoop(sec, bank, slot, next);
+        setSlotLoop(sec, bank, slot, next, true);
     });
     showStatus('All loop ' + LOOP_LABELS[slotAt(sec, bank, 0).loop], 80);
     s.dirty = true;
@@ -2432,7 +2432,7 @@ function adjustAllLoop(delta) {
 function adjustAllGain(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).gain + delta * 0.05;
-        setSlotGain(sec, bank, slot, v);
+        setSlotGain(sec, bank, slot, v, true);
     });
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
 }
