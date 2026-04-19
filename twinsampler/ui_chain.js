@@ -130,6 +130,9 @@ const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
 const COPY_TAP_MAX_TICKS = 48;
+const BINARY_KNOB_TURN_THRESHOLD = 2;
+const BINARY_KNOB_TOGGLE_COOLDOWN_MS = 160;
+const BINARY_KNOB_TURN_IDLE_RESET_MS = 220;
 const LOOP_PAD_NOTES = [96, 97, 98, 99]; /* top row, right 4 pads */
 const LOOP_PAD_COLOR_OFF = Black;
 const LOOP_PAD_COLOR_RECORD = BrightRed;
@@ -400,6 +403,7 @@ const s = {
     deleteHeld: false,
     stepCopySource: null,
     activePadPress: {},
+    binaryKnobState: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
     midiEchoSuppression: true,
@@ -2216,6 +2220,40 @@ function adjustPadEndTrim(delta) {
     setSlotEndTrim(a.sec, a.bank, a.slot, v);
     showStatus('P' + (a.slot + 1) + ' End ' + Math.round(slotAt(a.sec, a.bank, a.slot).endTrim), 80);
     s.dirty = true;
+}
+
+function consumeBinaryKnobTurn(actionKey, delta) {
+    const key = String(actionKey || '');
+    if (!key || delta === 0) return false;
+
+    const nowMs = Date.now();
+    const sign = delta > 0 ? 1 : -1;
+    const existing = s.binaryKnobState[key] || { accum: 0, sign: 0, lastAtMs: 0, cooldownUntilMs: 0 };
+
+    if (nowMs < clampInt(existing.cooldownUntilMs, 0, 0x7fffffff, 0)) {
+        existing.accum = 0;
+        existing.sign = sign;
+        existing.lastAtMs = nowMs;
+        s.binaryKnobState[key] = existing;
+        return false;
+    }
+
+    if (existing.sign !== 0 && existing.sign !== sign) existing.accum = 0;
+    if (nowMs - clampInt(existing.lastAtMs, 0, 0x7fffffff, 0) > BINARY_KNOB_TURN_IDLE_RESET_MS) existing.accum = 0;
+
+    existing.accum += delta;
+    existing.sign = sign;
+    existing.lastAtMs = nowMs;
+
+    if (Math.abs(existing.accum) < BINARY_KNOB_TURN_THRESHOLD) {
+        s.binaryKnobState[key] = existing;
+        return false;
+    }
+
+    existing.accum = 0;
+    existing.cooldownUntilMs = nowMs + BINARY_KNOB_TOGGLE_COOLDOWN_MS;
+    s.binaryKnobState[key] = existing;
+    return true;
 }
 
 function togglePadMode() {
@@ -4294,7 +4332,7 @@ function handleParamKnob(cc, delta) {
             return;
         }
         if (cc === MoveKnob5) {
-            toggleAllMode();
+            if (consumeBinaryKnobTurn('all-mode', delta)) toggleAllMode();
             return;
         }
         if (cc === MoveKnob6) {
@@ -4319,7 +4357,7 @@ function handleParamKnob(cc, delta) {
         else if (cc === MoveKnob2) adjustPadDecay(delta);
         else if (cc === MoveKnob3) adjustPadStartTrim(delta);
         else if (cc === MoveKnob4) adjustPadEndTrim(delta);
-        else if (cc === MoveKnob5) togglePadMode();
+        else if (cc === MoveKnob5) { if (consumeBinaryKnobTurn('pad-mode', delta)) togglePadMode(); }
         else if (cc === MoveKnob6) adjustPadPitch(delta);
         else if (cc === MoveKnob7) adjustPadGain(delta);
         else if (cc === MoveKnob8) adjustPadLoop(delta);
@@ -4328,7 +4366,7 @@ function handleParamKnob(cc, delta) {
         else if (cc === MoveKnob2) adjustAllDecay(delta);
         else if (cc === MoveKnob3) adjustAllStartTrim(delta);
         else if (cc === MoveKnob4) adjustAllEndTrim(delta);
-        else if (cc === MoveKnob5) toggleAllMode();
+        else if (cc === MoveKnob5) { if (consumeBinaryKnobTurn('all-mode', delta)) toggleAllMode(); }
         else if (cc === MoveKnob6) adjustGlobalPitch(delta);
         else if (cc === MoveKnob7) adjustGlobalGain(delta);
         else if (cc === MoveKnob8) adjustAllLoop(delta);
@@ -4624,6 +4662,7 @@ function init() {
     s.ledQueue = [];
     s.ledsDirty = true;
     s.activePadPress = {};
+    s.binaryKnobState = {};
     s.padPressFlash = {};
     s.sections = [
         makeSection(MODE_SINGLE),
