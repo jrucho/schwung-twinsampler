@@ -135,6 +135,12 @@ Since the standard Move sequencer is unavailable in Overtake mode, Twin Sampler 
 * **INIT Session:** A clean baseline session that cannot be deleted or overwritten.
 * **Erase Session:** Press **Erase** to erase a session.
 
+### Overwrite Existing Session
+* **Press Shift + Copy** to open the save menu.
+* Select the target session name: Use K1 / K2 to enter the same name manually, or
+* Highlight an existing session and **press Copy** to load its name into the name field.
+* **Press Shift + Copy** again to save over that session.
+
 ---
 
 ## Pad Colours
