@@ -341,6 +341,10 @@ function makeSection(defaultMode) {
     };
 }
 
+function defaultPadModeGateForSectionMode(mode) {
+    return clampInt(mode, MODE_SINGLE, MODE_PER_SLOT, MODE_PER_SLOT) === MODE_SINGLE ? 1 : 0;
+}
+
 const s = {
     view: 'main',
     dirty: true,
@@ -1513,8 +1517,10 @@ function setSourcePath(sec, bank, path, sendToDsp) {
     const loadingNewSource = !!nextPath && (!hadSource || sb.sourcePath !== nextPath);
 
     if (loadingNewSource) {
+        const defaultModeGate = defaultPadModeGateForSectionMode(s.sections[sec].mode);
         for (let i = 0; i < GRID_SIZE; i++) {
             resetSlotSoundParamsToDefault(sb.slots[i]);
+            sb.slots[i].modeGate = defaultModeGate;
         }
     }
 
@@ -2317,7 +2323,7 @@ function adjustGlobalPitch(delta) {
 function toggleVelocitySens() {
     s.velocitySens = s.velocitySens ? 0 : 1;
     spb('velocity_sens', String(s.velocitySens), 120);
-    showStatus(s.velocitySens ? 'Velocity Sens ON' : 'Full Velocity ON', 80);
+    showStatus(s.velocitySens ? 'Pad Velocity ON' : 'Pad Velocity OFF (Full)', 80);
     markSessionChanged();
     s.dirty = true;
 }
@@ -3900,7 +3906,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     flashPadPress(sec, bank, slot);
     s.lastPadTriggerTick = s.transportTicks;
     const triggerNote = padNoteFor(sec, slot);
-    const vel = clampInt(velocity, 1, 127, 100);
+    const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
     const nowMs = Date.now();
     const key = addrKey(sec, bank, slot);
     const existing = activeVoicesByAddr[key];
@@ -4626,7 +4632,6 @@ function init() {
 
     initFromDspDefaults();
     activateStandaloneMidiPort();
-    browserOpen(SAMPLES_DIR, 'samples');
     s.copySource = null;
     s.copyHeld = false;
     s.copyPressTick = -1;
@@ -4647,6 +4652,9 @@ function init() {
     if (!restoredFromSession) {
         applyAllStateToDsp();
     }
+
+    s.velocitySens = 0;
+    spb('velocity_sens', '0', 120);
 
     s.view = 'main';
     s.muteHeld = false;
