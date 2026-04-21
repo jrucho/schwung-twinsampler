@@ -2378,9 +2378,16 @@ function adjustPadAttack(delta) {
     s.dirty = true;
 }
 
+function steppedDecayValue(current, delta) {
+    const cur = clampFloat(current, 1.0, DECAY_MAX_MS, DEFAULT_DECAY_MS);
+    if (delta > 0 && cur >= SOURCE_MODE_DEFAULT_DECAY_MS && cur < DECAY_MAX_MS) return DECAY_MAX_MS;
+    if (delta < 0 && cur >= DECAY_MAX_MS) return SOURCE_MODE_DEFAULT_DECAY_MS;
+    return cur + delta * 20.0;
+}
+
 function adjustPadDecay(delta) {
     const a = focusedAddr();
-    const v = slotAt(a.sec, a.bank, a.slot).decay + delta * 20.0;
+    const v = steppedDecayValue(slotAt(a.sec, a.bank, a.slot).decay, delta);
     setSlotDecay(a.sec, a.bank, a.slot, v);
     const next = slotAt(a.sec, a.bank, a.slot).decay;
     showStatus('P' + (a.slot + 1) + ' Dec ' + (next >= DECAY_MAX_MS ? 'INF' : Math.round(next)), 80);
@@ -2577,7 +2584,7 @@ function adjustAllAttack(delta) {
 
 function adjustAllDecay(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
-        const v = slotAt(sec, bank, slot).decay + delta * 20.0;
+        const v = steppedDecayValue(slotAt(sec, bank, slot).decay, delta);
         setSlotDecay(sec, bank, slot, v, true);
     });
     const next = slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).decay;
