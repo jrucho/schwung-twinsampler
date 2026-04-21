@@ -6,7 +6,7 @@ Twin Sampler is a high-performance "overtake" sampler module designed specifical
 
 ▶️ **Watch demo:** [https://youtu.be/dNPo0ITg-AQ](https://youtu.be/dNPo0ITg-AQ)
 
-▶️ **v0.2.2 - 16 Loopers demo:** https://youtu.be/D_-MyqxISjM?si=ceDgwZSeFdTEcinQ
+▶️ **v0.3.0 - 16 Loopers + Performance FX demo:** https://youtu.be/D_-MyqxISjM?si=ceDgwZSeFdTEcinQ
 
 ---
 
@@ -180,7 +180,6 @@ https://notebooklm.google.com/notebook/31678b7d-3a8e-4d41-8a5f-d2675b3e7298?arti
 <img width="1788" height="998" alt="9" src="https://github.com/user-attachments/assets/c91c4bb2-285d-4981-8deb-509b9fa69db1" />
 
 <img width="1787" height="997" alt="10" src="https://github.com/user-attachments/assets/19e6d9da-0ff9-4314-883f-f5f3932d6ed0" />
-
 
 
 
