@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 #include <limits.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +33,17 @@ typedef struct wrapper_instance {
     int bus_active_prev;
     int auto_hold_blocks;
     uint32_t dither_state;
+    int current_bank[2];
+    int pfx_bank_toggle[2][8][16];
+    float pfx_bank_param[2][8][16][8];
+    int pfx_global_toggle[16];
+    float pfx_global_param[16][8];
+    float pfx_lp_z_l;
+    float pfx_lp_z_r;
+    float pfx_hp_prev_in_l;
+    float pfx_hp_prev_in_r;
+    float pfx_hp_prev_out_l;
+    float pfx_hp_prev_out_r;
 } wrapper_instance_t;
 
 static const host_api_v1_t *g_host = NULL;
@@ -103,6 +115,28 @@ static float parse_float_clamped(const char *val, float min_v, float max_v, floa
     if (v < min_v) v = min_v;
     if (v > max_v) v = max_v;
     return (float)v;
+}
+
+static int parse_colon_ints(const char *val, int *out, int max_items) {
+    if (!val || !out || max_items <= 0) return 0;
+    int count = 0;
+    const char *p = val;
+    while (*p && count < max_items) {
+        char *end = NULL;
+        long v = strtol(p, &end, 10);
+        if (end == p) return count;
+        out[count++] = (int)v;
+        if (*end != ':') break;
+        p = end + 1;
+    }
+    return count;
+}
+
+static float parse_colon_float_tail(const char *val, float fallback) {
+    if (!val) return fallback;
+    const char *last = strrchr(val, ':');
+    const char *num = last ? (last + 1) : val;
+    return parse_float_clamped(num, -16.0f, 16.0f, fallback);
 }
 
 static int load_core_for_instance(wrapper_instance_t *inst, const char *module_dir) {
@@ -181,6 +215,23 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->bus_active_prev = 0;
     inst->auto_hold_blocks = 0;
     inst->dither_state = 0x6d2b79f5u;
+    inst->current_bank[0] = 0;
+    inst->current_bank[1] = 0;
+    for (int sec = 0; sec < 2; sec++) {
+        for (int bank = 0; bank < 8; bank++) {
+            for (int fx = 0; fx < 16; fx++) {
+                inst->pfx_bank_toggle[sec][bank][fx] = 0;
+                for (int p = 0; p < 8; p++) inst->pfx_bank_param[sec][bank][fx][p] = 0.5f;
+            }
+        }
+    }
+    for (int fx = 0; fx < 16; fx++) {
+        inst->pfx_global_toggle[fx] = 0;
+        for (int p = 0; p < 8; p++) inst->pfx_global_param[fx][p] = 0.5f;
+    }
+    inst->pfx_lp_z_l = inst->pfx_lp_z_r = 0.0f;
+    inst->pfx_hp_prev_in_l = inst->pfx_hp_prev_in_r = 0.0f;
+    inst->pfx_hp_prev_out_l = inst->pfx_hp_prev_out_r = 0.0f;
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
@@ -292,6 +343,68 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->debug_capture_logs = parse_bool(val);
         return;
     }
+    if (!strcmp(key, "section_bank")) {
+        int parts[2] = {0};
+        const int n = parse_colon_ints(val, parts, 2);
+        if (n >= 2) {
+            const int sec = (parts[0] < 0) ? 0 : (parts[0] > 1 ? 1 : parts[0]);
+            const int bank = (parts[1] < 0) ? 0 : (parts[1] > 7 ? 7 : parts[1]);
+            inst->current_bank[sec] = bank;
+        }
+    } else if (!strncmp(key, "section_bank_", 13)) {
+        const int sec = (key[13] == '1') ? 1 : 0;
+        int bank = parse_int_or_default(val, inst->current_bank[sec]);
+        if (bank < 0) bank = 0;
+        if (bank > 7) bank = 7;
+        inst->current_bank[sec] = bank;
+    }
+
+    if (!strcmp(key, "performance_fx_global_toggle") || !strcmp(key, "pfx_global_toggle")) {
+        int parts[2] = {0};
+        const int n = parse_colon_ints(val, parts, 2);
+        if (n >= 2) {
+            int fx = parts[0]; if (fx < 0) fx = 0; if (fx > 15) fx = 15;
+            inst->pfx_global_toggle[fx] = parts[1] ? 1 : 0;
+        }
+        return;
+    }
+    if (!strcmp(key, "performance_fx_global_param") || !strcmp(key, "pfx_global_param")) {
+        int parts[2] = {0};
+        const int n = parse_colon_ints(val, parts, 2);
+        if (n >= 2) {
+            int fx = parts[0]; if (fx < 0) fx = 0; if (fx > 15) fx = 15;
+            int p = parts[1]; if (p < 0) p = 0; if (p > 7) p = 7;
+            inst->pfx_global_param[fx][p] = parse_colon_float_tail(val, inst->pfx_global_param[fx][p]);
+            if (inst->pfx_global_param[fx][p] < 0.0f) inst->pfx_global_param[fx][p] = 0.0f;
+            if (inst->pfx_global_param[fx][p] > 1.0f) inst->pfx_global_param[fx][p] = 1.0f;
+        }
+        return;
+    }
+    if (!strcmp(key, "performance_fx_bank_toggle") || !strcmp(key, "pfx_bank_toggle")) {
+        int parts[4] = {0};
+        const int n = parse_colon_ints(val, parts, 4);
+        if (n >= 4) {
+            int sec = parts[0]; if (sec < 0) sec = 0; if (sec > 1) sec = 1;
+            int bank = parts[1]; if (bank < 0) bank = 0; if (bank > 7) bank = 7;
+            int fx = parts[2]; if (fx < 0) fx = 0; if (fx > 15) fx = 15;
+            inst->pfx_bank_toggle[sec][bank][fx] = parts[3] ? 1 : 0;
+        }
+        return;
+    }
+    if (!strcmp(key, "performance_fx_bank_param") || !strcmp(key, "pfx_bank_param")) {
+        int parts[4] = {0};
+        const int n = parse_colon_ints(val, parts, 4);
+        if (n >= 4) {
+            int sec = parts[0]; if (sec < 0) sec = 0; if (sec > 1) sec = 1;
+            int bank = parts[1]; if (bank < 0) bank = 0; if (bank > 7) bank = 7;
+            int fx = parts[2]; if (fx < 0) fx = 0; if (fx > 15) fx = 15;
+            int p = parts[3]; if (p < 0) p = 0; if (p > 7) p = 7;
+            inst->pfx_bank_param[sec][bank][fx][p] = parse_colon_float_tail(val, inst->pfx_bank_param[sec][bank][fx][p]);
+            if (inst->pfx_bank_param[sec][bank][fx][p] < 0.0f) inst->pfx_bank_param[sec][bank][fx][p] = 0.0f;
+            if (inst->pfx_bank_param[sec][bank][fx][p] > 1.0f) inst->pfx_bank_param[sec][bank][fx][p] = 1.0f;
+        }
+        return;
+    }
 
     if (!strcmp(key, "record_start")) {
         if (parse_bool(val)) inst->recording_cached = 1;
@@ -339,6 +452,9 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     if (!strcmp(key, "capture_bus_peak")) {
         return snprintf(buf, (size_t)buf_len, "%.4f", (double)inst->bus_peak_last);
     }
+    if (!strcmp(key, "performance_fx_active_banks")) {
+        return snprintf(buf, (size_t)buf_len, "%d:%d", inst->current_bank[0], inst->current_bank[1]);
+    }
 
     if (inst->core_api_v2 && inst->core_api_v2->get_param && inst->core_instance) {
         return inst->core_api_v2->get_param(inst->core_instance, key, buf, buf_len);
@@ -354,6 +470,102 @@ static int wrapper_get_error(void *instance, char *buf, int buf_len) {
         return inst->core_api_v2->get_error(inst->core_instance, buf, buf_len);
     }
     return 0;
+}
+
+static void collect_perf_profile(wrapper_instance_t *inst,
+                                 float *drive, float *crush, float *lp, float *hp,
+                                 float *transient, float *noise, float *tone, float *out_gain) {
+    if (!inst) return;
+    float d = 0.0f, c = 0.0f, l = 0.0f, h = 0.0f, t = 0.0f, n = 0.0f, q = 0.0f, g = 0.0f;
+    float count = 0.0f;
+    for (int fx = 0; fx < 16; fx++) {
+        const int g_on = inst->pfx_global_toggle[fx] ? 1 : 0;
+        const int b0_on = inst->pfx_bank_toggle[0][inst->current_bank[0]][fx] ? 1 : 0;
+        const int b1_on = inst->pfx_bank_toggle[1][inst->current_bank[1]][fx] ? 1 : 0;
+        const int on = g_on || b0_on || b1_on;
+        if (!on) continue;
+        const float *gp = inst->pfx_global_param[fx];
+        const float *p0 = inst->pfx_bank_param[0][inst->current_bank[0]][fx];
+        const float *p1 = inst->pfx_bank_param[1][inst->current_bank[1]][fx];
+        float p[8];
+        for (int i = 0; i < 8; i++) {
+            float sum = 0.0f;
+            int w = 0;
+            if (g_on) { sum += gp[i]; w++; }
+            if (b0_on) { sum += p0[i]; w++; }
+            if (b1_on) { sum += p1[i]; w++; }
+            p[i] = (w > 0) ? (sum / (float)w) : 0.5f;
+        }
+        d += p[0];
+        c += p[1];
+        l += p[2];
+        h += p[3];
+        t += p[4];
+        n += p[5];
+        q += p[6];
+        g += p[7];
+        count += 1.0f;
+    }
+    if (count < 1.0f) count = 1.0f;
+    *drive = d / count;
+    *crush = c / count;
+    *lp = l / count;
+    *hp = h / count;
+    *transient = t / count;
+    *noise = n / count;
+    *tone = q / count;
+    *out_gain = g / count;
+}
+
+static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_interleaved_lr, int frames) {
+    if (!inst || !out_interleaved_lr || frames <= 0) return;
+    float drive = 0.5f, crush = 0.5f, lp = 0.5f, hp = 0.5f, transient = 0.5f, noise = 0.5f, tone = 0.5f, out_gain = 0.5f;
+    collect_perf_profile(inst, &drive, &crush, &lp, &hp, &transient, &noise, &tone, &out_gain);
+
+    const float sat_drive = 1.0f + (drive * 8.0f);
+    const float crush_levels = 64.0f + (1.0f - crush) * 960.0f;
+    const float lp_a = 0.02f + lp * 0.95f;
+    const float hp_a = 0.02f + hp * 0.95f;
+    const float tr_amt = (transient - 0.5f) * 1.4f;
+    const float noise_amt = (noise > 0.52f) ? (noise - 0.52f) * 0.03f : 0.0f;
+    const float tone_amt = (tone - 0.5f) * 0.8f;
+    const float out_mul = 0.7f + out_gain * 1.6f;
+
+    for (int i = 0; i < frames; i++) {
+        for (int ch = 0; ch < 2; ch++) {
+            const int idx = i * 2 + ch;
+            float x = (float)out_interleaved_lr[idx] / 32768.0f;
+            float prev_in = (ch == 0) ? inst->pfx_hp_prev_in_l : inst->pfx_hp_prev_in_r;
+            float prev_out = (ch == 0) ? inst->pfx_hp_prev_out_l : inst->pfx_hp_prev_out_r;
+            float lp_z = (ch == 0) ? inst->pfx_lp_z_l : inst->pfx_lp_z_r;
+
+            x = tanhf(x * sat_drive);
+            if (crush_levels > 1.0f) x = floorf(x * crush_levels + 0.5f) / crush_levels;
+            lp_z += lp_a * (x - lp_z);
+            x = lp_z;
+            const float hp_y = hp_a * (prev_out + x - prev_in);
+            prev_in = x;
+            prev_out = hp_y;
+            x = hp_y;
+            x += tr_amt * (x - lp_z);
+            x += noise_amt * (((float)(xorshift32(&inst->dither_state) & 0xffffu) / 32768.0f) - 1.0f);
+            x = x * (1.0f + tone_amt) - (x * x * x * tone_amt * 0.5f);
+            x *= out_mul;
+            if (x > 1.0f) x = 1.0f;
+            if (x < -1.0f) x = -1.0f;
+            out_interleaved_lr[idx] = (int16_t)clip_i32_to_i16((int32_t)(x * 32767.0f));
+
+            if (ch == 0) {
+                inst->pfx_hp_prev_in_l = prev_in;
+                inst->pfx_hp_prev_out_l = prev_out;
+                inst->pfx_lp_z_l = lp_z;
+            } else {
+                inst->pfx_hp_prev_in_r = prev_in;
+                inst->pfx_hp_prev_out_r = prev_out;
+                inst->pfx_lp_z_r = lp_z;
+            }
+        }
+    }
 }
 
 static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
@@ -456,19 +668,21 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         memcpy(audio_in_rw, inst->input_backup, (size_t)total * sizeof(int16_t));
     }
 
-    if (!inst->monitor_enabled || !g_host || !g_host->mapped_memory) return;
-    if (inst->monitor_policy && core_is_recording(inst) && capture_source == 2) return;
-
-    if (g_host->audio_in_offset <= 0) return;
-    const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
-    if (!audio_in) return;
-
-    const float gain = inst->monitor_gain;
-    for (int i = 0; i < total; i++) {
-        const int32_t mon = (int32_t)((float)audio_in[i] * gain);
-        const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;
-        out_interleaved_lr[i] = (int16_t)clip_i32_to_i16(sum);
+    if (inst->monitor_enabled && g_host && g_host->mapped_memory &&
+        !(inst->monitor_policy && core_is_recording(inst) && capture_source == 2) &&
+        g_host->audio_in_offset > 0) {
+        const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
+        if (audio_in) {
+            const float gain = inst->monitor_gain;
+            for (int i = 0; i < total; i++) {
+                const int32_t mon = (int32_t)((float)audio_in[i] * gain);
+                const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;
+                out_interleaved_lr[i] = (int16_t)clip_i32_to_i16(sum);
+            }
+        }
     }
+
+    apply_perf_fx_to_output(inst, out_interleaved_lr, frames);
 }
 
 static plugin_api_v2_t g_wrapper_api_v2 = {
