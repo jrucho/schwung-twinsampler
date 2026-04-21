@@ -156,8 +156,8 @@ const FX_PARAM_LABELS = [
     ['Noise', 'Blur', 'Mix', 'Age', 'Tone', 'LoCut', 'HiCut', 'Out'],
     ['Depth', 'Release', 'Mix', 'Attack', 'Hold', 'Tone', 'Stereo', 'Out']
 ];
-const FX_PRIMARY_COLORS = [5, 9, 13, 17, 21, 29, 45, 53];
-const FX_PERF_COLOR = 49;
+const FX_PRIMARY_COLORS = [120, 9, 45, 53, 67, 77, 95, 117];
+const FX_PERF_COLOR = 127;
 const STATUS_TICKS = 120;
 const LEDS_PER_TICK = 8;
 const PREVIEW_DEBOUNCE_MS = 250;
@@ -167,6 +167,7 @@ const LED_RESYNC_INTERVAL_TICKS = 18;
 const LED_RESYNC_PASSES = 3;
 const LOOP_DOUBLE_PRESS_TICKS = 90;
 const LOOP_ERASE_HOLD_TICKS = 36;
+const LOOP_TOGGLE_HOLD_THRESHOLD_MS = 1000;
 const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
@@ -2261,13 +2262,13 @@ function rebuildLedQueue() {
                     const fxBase = slot < 8
                         ? FX_PRIMARY_COLORS[clampInt(slot, 0, FX_PRIMARY_COLORS.length - 1, 0)]
                         : FX_PERF_COLOR;
-                    color = eff.enabled ? fxBase : 2;
+                    color = eff.enabled ? fxBase : Black;
                 } else {
                     const eff = globalFxEffect(slot);
                     const fxBase = slot < 8
                         ? FX_PRIMARY_COLORS[clampInt(slot, 0, FX_PRIMARY_COLORS.length - 1, 0)]
                         : FX_PERF_COLOR;
-                    color = eff.enabled ? fxBase : 2;
+                    color = eff.enabled ? fxBase : Black;
                 }
                 s.ledQueue.push([note, color]);
             }
@@ -3913,6 +3914,28 @@ function toggleActiveLooperClipPlayback() {
     updateUtilityButtonLeds();
 }
 
+function activateSelectedLooperOverdub() {
+    const l = currentLooper();
+    if (!l || !Array.isArray(l.events) || !l.events.length || l.loopLengthMs <= 0) {
+        showStatus('Looper clip empty', 80);
+        return false;
+    }
+    if (l.state === 'overdub') {
+        showStatus('Looper: overdub', 70);
+        return true;
+    }
+    if (l.state === 'stopped') {
+        l.state = 'playing';
+        l.playStartMs = looperNowMs();
+        l.loopPosMs = 0;
+        l.lastLoopPosMs = 0;
+    } else if (l.state === 'recording') {
+        looperFinishRecordingStartPlayback();
+    }
+    if (l.state === 'playing') looperToggleOverdub();
+    return true;
+}
+
 function looperErase() {
     ensureValidActiveLooper();
     releaseVoicesByOwner('looper:', looperNowMs());
@@ -4604,7 +4627,15 @@ function handlePadNote(note, velocity) {
                 return true;
             }
             triggerPadOn(sec, bank, slot, velocity, false, true, 'pad-toggle:' + String(note));
-            delete s.activePadPress[String(note)];
+            s.activePadPress[String(note)] = {
+                sec,
+                bank,
+                slot,
+                triggerNote,
+                velocity: clampInt(velocity, 1, 127, 100),
+                loopHoldMode: true,
+                pressedAtMs: Date.now()
+            };
             s.editScope = 'P';
             setSelectedSlice(slice, false, false);
             return true;
@@ -4650,7 +4681,13 @@ function handlePadNoteRelease(note) {
     delete s.activePadPress[String(note)];
     if (!stored) return true;
     const addr = stored;
-    if (slotAt(addr.sec, addr.bank, addr.slot).loop > 0) return true;
+    if (slotAt(addr.sec, addr.bank, addr.slot).loop > 0) {
+        const heldMs = Math.max(0, Date.now() - clampInt(stored.pressedAtMs, 0, 0x7fffffff, Date.now()));
+        if (stored.loopHoldMode && heldMs >= LOOP_TOGGLE_HOLD_THRESHOLD_MS) {
+            triggerPadOff(addr.sec, addr.bank, addr.slot, false);
+        }
+        return true;
+    }
 
     triggerPadOff(addr.sec, addr.bank, addr.slot, false);
     return true;
@@ -5020,6 +5057,12 @@ function onMidiMessageInternal(data) {
         }
 
         if ((cc === MoveRec || cc === MoveRecord) && val > 0) {
+            if (s.view === 'main' && !s.shiftHeld && activateSelectedLooperOverdub()) {
+                updateUtilityButtonLeds();
+                markLedsDirty();
+                s.dirty = true;
+                return;
+            }
             handleRecordButtonPress();
             return;
         }
@@ -5135,6 +5178,7 @@ function onMidiMessageInternal(data) {
                 s.fxScreenScope = 'bank';
                 showStatus('FX screen', 70);
                 updateUtilityButtonLeds();
+                markLedsDirty();
                 s.dirty = true;
             }
             return;
@@ -5145,6 +5189,7 @@ function onMidiMessageInternal(data) {
                 s.view = 'main';
                 showStatus('Main screen', 70);
                 updateUtilityButtonLeds();
+                markLedsDirty();
                 s.dirty = true;
             }
             return;
