@@ -4269,6 +4269,9 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     if (isPadMuted(sec, bank, slot)) return false;
     flashPadPress(sec, bank, slot);
     s.lastPadTriggerTick = s.transportTicks;
+    const sl = slotAt(sec, bank, slot);
+    const sourceLoopNoChoke = (s.sections[sec].mode === MODE_SINGLE) && clampInt(sl.loop, 0, 2, 0) > 0;
+    const effectiveRouteBank = !!routeBank && !sourceLoopNoChoke;
     const triggerNote = padNoteFor(sec, slot);
     const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
     const nowMs = Date.now();
@@ -4283,7 +4286,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         flushPendingNoteOffs();
     }
     clearPendingOff(sec, bank, slot);
-    if (routeBank) {
+    if (effectiveRouteBank) {
         withPlaybackBank(sec, bank, () => {
             spe('pad_note_on', triggerNote + ':' + vel);
         });
@@ -4296,7 +4299,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         sec,
         bank,
         slot,
-        routeBank: !!routeBank,
+        routeBank: effectiveRouteBank,
         owner: src,
         sourceTag: src,
         startedMs: nowMs,
