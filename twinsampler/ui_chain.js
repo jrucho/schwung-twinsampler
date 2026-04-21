@@ -42,6 +42,8 @@ const MoveMaster = pickConst('MoveMaster', 79);
 const MoveMasterTouch = pickConst('MoveMasterTouch', 8);
 const MoveArrowLeft = pickConst('MoveArrowLeft', pickConst('MoveLeft', 44));
 const MoveArrowRight = pickConst('MoveArrowRight', pickConst('MoveRight', 45));
+const MoveArrowUp = pickConst('MoveArrowUp', pickConst('MoveUp', 46));
+const MoveArrowDown = pickConst('MoveArrowDown', pickConst('MoveDown', 47));
 const Black = pickConst('Black', 0);
 const BrightRed = pickConst('BrightRed', 127);
 
@@ -115,6 +117,8 @@ const CHOP_OPTIONS = [SOURCE_CHOP_COUNT];
 const LOOP_LABELS = ['Off', 'Loop', 'Ping'];
 const FILTER_TYPES = ['Low-pass', 'High-pass', 'Band-pass', 'Res LP'];
 const EMULATION_PRESETS = ['Clean', 'Punchy', 'Dusty', 'Vintage'];
+const FX_EFFECT_COUNT = 16;
+const FX_PARAM_COUNT = 8;
 const STATUS_TICKS = 120;
 const LEDS_PER_TICK = 8;
 const PREVIEW_DEBOUNCE_MS = 250;
@@ -172,6 +176,17 @@ function createLooperState() {
         eraseHoldTriggered: false,
         holdEraseArmed: false
     };
+}
+
+function createFxEffectState() {
+    return {
+        enabled: 0,
+        params: Array.from({ length: FX_PARAM_COUNT }, () => 0.5)
+    };
+}
+
+function createFxEffectArray() {
+    return Array.from({ length: FX_EFFECT_COUNT }, () => createFxEffectState());
 }
 
 const BANK_COLOR_SEQUENCE = [8, 15, 3, 21, 7, 31, 47, 1];
@@ -334,6 +349,7 @@ function makeBank(bankIdx = 0) {
         filterType: 0,
         filterValue: 0.5,
         emulationPreset: 0,
+        fxEffects: createFxEffectArray(),
         slots
     };
 }
@@ -349,6 +365,13 @@ function cloneBank(b) {
         filterType: clampInt(b.filterType, 0, FILTER_TYPES.length - 1, 0),
         filterValue: clampFloat(b.filterValue, 0.0, 1.0, 0.5),
         emulationPreset: clampInt(b.emulationPreset, 0, EMULATION_PRESETS.length - 1, 0),
+        fxEffects: Array.from({ length: FX_EFFECT_COUNT }, (_, idx) => {
+            const src = Array.isArray(b.fxEffects) ? b.fxEffects[idx] : null;
+            return {
+                enabled: clampInt(src && src.enabled, 0, 1, 0),
+                params: Array.from({ length: FX_PARAM_COUNT }, (_p, pIdx) => clampFloat(src && Array.isArray(src.params) ? src.params[pIdx] : 0.5, 0.0, 1.0, 0.5))
+            };
+        }),
         slots: b.slots.map((s) => cloneSlot(s))
     };
 }
@@ -380,6 +403,10 @@ const s = {
     volumeTouchHeld: false,
     knobPage: 'A',
     editScope: 'P', /* P=pad slot, G=focused section+bank */
+    fxScreenScope: 'bank', /* bank|global */
+    selectedBankFxEffect: 0,
+    selectedGlobalFxEffect: 0,
+    globalFxEffects: createFxEffectArray(),
 
     selectedSlice: 0,
     focusedSection: 0,
@@ -2037,6 +2064,44 @@ function sendBankToneStateToDsp(sec, bank) {
     spb('section_emulation_preset', sec + ':' + bank + ':' + clampInt(b.emulationPreset, 0, EMULATION_PRESETS.length - 1, 0), 120);
 }
 
+function bankFxEffect(sec, bank, effectIdx) {
+    const b = s.sections[sec].banks[bank];
+    const idx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
+    if (!Array.isArray(b.fxEffects)) b.fxEffects = createFxEffectArray();
+    return b.fxEffects[idx];
+}
+
+function globalFxEffect(effectIdx) {
+    const idx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
+    if (!Array.isArray(s.globalFxEffects)) s.globalFxEffects = createFxEffectArray();
+    return s.globalFxEffects[idx];
+}
+
+function sendFxStateToDsp(scope, sec, bank, effectIdx) {
+    const fxIdx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
+    if (scope === 'global') {
+        const eff = globalFxEffect(fxIdx);
+        sp('performance_fx_global_toggle', fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
+        sp('pfx_global_toggle', fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
+        for (let p = 0; p < FX_PARAM_COUNT; p++) {
+            const v = clampFloat(Array.isArray(eff.params) ? eff.params[p] : 0.5, 0.0, 1.0, 0.5);
+            sp('performance_fx_global_param', fxIdx + ':' + p + ':' + v.toFixed(3));
+            sp('pfx_global_param', fxIdx + ':' + p + ':' + v.toFixed(3));
+        }
+        return;
+    }
+    const sSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const sBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
+    const eff = bankFxEffect(sSec, sBank, fxIdx);
+    sp('performance_fx_bank_toggle', sSec + ':' + sBank + ':' + fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
+    sp('pfx_bank_toggle', sSec + ':' + sBank + ':' + fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
+    for (let p = 0; p < FX_PARAM_COUNT; p++) {
+        const v = clampFloat(Array.isArray(eff.params) ? eff.params[p] : 0.5, 0.0, 1.0, 0.5);
+        sp('performance_fx_bank_param', sSec + ':' + sBank + ':' + fxIdx + ':' + p + ':' + v.toFixed(3));
+        sp('pfx_bank_param', sSec + ':' + sBank + ':' + fxIdx + ':' + p + ':' + v.toFixed(3));
+    }
+}
+
 function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
     const b = s.sections[sec].banks[bank];
     b.chopCount = SOURCE_CHOP_COUNT;
@@ -2058,6 +2123,7 @@ function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
         sendSlotStateToDsp(sec, bank, slot, !!blockingSlots, !!forceDirect);
     }
     sendBankToneStateToDsp(sec, bank);
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) sendFxStateToDsp('bank', sec, bank, fx);
     if (sec === s.focusedSection && bank === focusedBankIndex(sec)) {
         invalidatePlaybackCompat();
     }
@@ -2128,6 +2194,32 @@ function effectivePadColor(sec, bankIdx, slotIdx) {
 
 function rebuildLedQueue() {
     s.ledQueue = [];
+
+    if (s.view === 'fx') {
+        const sec = s.focusedSection;
+        const bank = focusedBankIndex(sec);
+        for (let gridSec = 0; gridSec < GRID_COUNT; gridSec++) {
+            for (let slot = 0; slot < GRID_SIZE; slot++) {
+                const note = padNoteFor(gridSec, slot);
+                let color = Black;
+                if (gridSec === 0) {
+                    const eff = bankFxEffect(sec, bank, slot);
+                    color = eff.enabled ? 21 : 2;
+                    if (slot === s.selectedBankFxEffect) color = eff.enabled ? 120 : 118;
+                } else {
+                    const eff = globalFxEffect(slot);
+                    color = eff.enabled ? 47 : 2;
+                    if (slot === s.selectedGlobalFxEffect) color = eff.enabled ? 120 : 118;
+                }
+                s.ledQueue.push([note, color]);
+            }
+        }
+        if (USE_STEP_BANKS) {
+            for (let note = STEP_NOTE_MIN; note <= STEP_NOTE_MAX; note++) s.ledQueue.push([note, 0]);
+        }
+        s.ledsDirty = false;
+        return;
+    }
 
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         const bankIdx = s.sections[sec].currentBank;
@@ -2897,9 +2989,27 @@ function drawBrowser() {
     }
 }
 
+function drawFxScreen() {
+    clear_screen();
+    print(0, 0, shortText('FX Screen  L=Bank R=Global', 21), 1);
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
+    print(0, 10, shortText('Bank S' + (sec + 1) + 'B' + (bank + 1) + ' Sel:' + (s.selectedBankFxEffect + 1), 21), 1);
+    print(0, 20, shortText('Global Sel:' + (s.selectedGlobalFxEffect + 1), 21), 1);
+    const scope = s.fxScreenScope === 'global' ? 'GLOBAL' : 'BANK';
+    const effectIdx = s.fxScreenScope === 'global' ? s.selectedGlobalFxEffect : s.selectedBankFxEffect;
+    const eff = s.fxScreenScope === 'global' ? globalFxEffect(effectIdx) : bankFxEffect(sec, bank, effectIdx);
+    print(0, 30, shortText('Edit ' + scope + ' FX' + (effectIdx + 1) + ' ' + (eff.enabled ? 'ON' : 'OFF'), 21), 1);
+    const p = Array.isArray(eff.params) ? eff.params : [];
+    print(0, 40, shortText('K1-4 ' + [0, 1, 2, 3].map((i) => Math.round(clampFloat(p[i], 0.0, 1.0, 0.5) * 100)).join(' '), 21), 1);
+    print(0, 50, shortText('K5-8 ' + [4, 5, 6, 7].map((i) => Math.round(clampFloat(p[i], 0.0, 1.0, 0.5) * 100)).join(' '), 21), 1);
+}
+
 function draw() {
     if (s.view === 'browser') {
         drawBrowser();
+    } else if (s.view === 'fx') {
+        drawFxScreen();
     } else {
         drawMain();
     }
@@ -2914,9 +3024,19 @@ function serializeSession() {
         knobPage: s.knobPage,
         editScope: s.editScope,
         browserAssignMode: s.browserAssignMode,
+        fxScreenScope: s.fxScreenScope,
+        selectedBankFxEffect: clampInt(s.selectedBankFxEffect, 0, FX_EFFECT_COUNT - 1, 0),
+        selectedGlobalFxEffect: clampInt(s.selectedGlobalFxEffect, 0, FX_EFFECT_COUNT - 1, 0),
         globalGain: s.globalGain,
         globalPitch: s.globalPitch,
         velocitySens: s.velocitySens,
+        globalFxEffects: Array.from({ length: FX_EFFECT_COUNT }, (_, idx) => {
+            const eff = globalFxEffect(idx);
+            return {
+                enabled: clampInt(eff.enabled, 0, 1, 0),
+                params: Array.from({ length: FX_PARAM_COUNT }, (_p, pIdx) => clampFloat(Array.isArray(eff.params) ? eff.params[pIdx] : 0.5, 0.0, 1.0, 0.5))
+            };
+        }),
         recordMaxSeconds: s.recordMaxSeconds,
         activeLooper: clampInt(s.activeLooper, 0, s.midiLoopers.length - 1, 0),
         loopPadMode: !!s.loopPadMode,
@@ -2993,6 +3113,13 @@ function sanitizeBank(raw, bankIdx) {
         filterType: clampInt(raw.filterType, 0, FILTER_TYPES.length - 1, base.filterType),
         filterValue: clampFloat(raw.filterValue, 0.0, 1.0, base.filterValue),
         emulationPreset: clampInt(raw.emulationPreset, 0, EMULATION_PRESETS.length - 1, base.emulationPreset),
+        fxEffects: Array.from({ length: FX_EFFECT_COUNT }, (_eff, effIdx) => {
+            const src = Array.isArray(raw.fxEffects) ? raw.fxEffects[effIdx] : null;
+            return {
+                enabled: clampInt(src && src.enabled, 0, 1, 0),
+                params: Array.from({ length: FX_PARAM_COUNT }, (_p, pIdx) => clampFloat(src && Array.isArray(src.params) ? src.params[pIdx] : 0.5, 0.0, 1.0, 0.5))
+            };
+        }),
         slots: []
     };
 
@@ -3089,6 +3216,7 @@ function applyAllStateToDsp() {
         const bank = s.sections[sec].currentBank;
         spb('section_bank', sec + ':' + bank, 200);
     }
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) sendFxStateToDsp('global', 0, 0, fx);
 
     setSelectedSlice(s.selectedSlice);
     markLedsDirty();
@@ -3106,11 +3234,21 @@ function applyParsedSession(parsed, silent, label) {
     s.focusedSection = LEFT_GRID_ONLY ? 0 : sectionFromSlice(s.selectedSlice);
     s.knobPage = parsed.knobPage === 'B' ? 'B' : 'A';
     s.editScope = parsed.editScope === 'G' ? 'G' : 'P';
+    s.fxScreenScope = parsed.fxScreenScope === 'global' ? 'global' : 'bank';
+    s.selectedBankFxEffect = clampInt(parsed.selectedBankFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
+    s.selectedGlobalFxEffect = clampInt(parsed.selectedGlobalFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
     s.browserAssignMode = parsed.browserAssignMode === 'slot' || parsed.browserAssignMode === 'source' ? parsed.browserAssignMode : 'auto';
 
     s.globalGain = clampFloat(parsed.globalGain, 0.0, 4.0, 1.0);
     s.globalPitch = clampFloat(parsed.globalPitch, -48.0, 48.0, 0.0);
     s.velocitySens = clampInt(parsed.velocitySens, 0, 1, 0);
+    s.globalFxEffects = Array.from({ length: FX_EFFECT_COUNT }, (_, idx) => {
+        const src = Array.isArray(parsed.globalFxEffects) ? parsed.globalFxEffects[idx] : null;
+        return {
+            enabled: clampInt(src && src.enabled, 0, 1, 0),
+            params: Array.from({ length: FX_PARAM_COUNT }, (_p, pIdx) => clampFloat(src && Array.isArray(src.params) ? src.params[pIdx] : 0.5, 0.0, 1.0, 0.5))
+        };
+    });
     s.recordMaxSeconds = clampInt(parsed.recordMaxSeconds, 1, 600, 30);
     const rawLoopers = Array.isArray(parsed.midiLoopers) ? parsed.midiLoopers : [];
     s.midiLoopers = Array.from({ length: LOOPER_COUNT }, (_, i) => sanitizeLooperState(rawLoopers[i]));
@@ -4209,9 +4347,59 @@ function flushPendingNoteOffs() {
     }
 }
 
+function toggleFxPadByNote(note) {
+    const slice = sliceFromPadNote(note);
+    if (slice < 0) return false;
+    const sec = sectionFromSlice(slice);
+    const slot = slotFromSlice(slice);
+    if (sec === 0) {
+        const bankSec = s.focusedSection;
+        const bank = focusedBankIndex(bankSec);
+        const eff = bankFxEffect(bankSec, bank, slot);
+        eff.enabled = eff.enabled ? 0 : 1;
+        s.selectedBankFxEffect = slot;
+        s.fxScreenScope = 'bank';
+        sendFxStateToDsp('bank', bankSec, bank, slot);
+        showStatus('Bank FX' + (slot + 1) + ' ' + (eff.enabled ? 'ON' : 'OFF'), 80);
+    } else {
+        const eff = globalFxEffect(slot);
+        eff.enabled = eff.enabled ? 0 : 1;
+        s.selectedGlobalFxEffect = slot;
+        s.fxScreenScope = 'global';
+        sendFxStateToDsp('global', 0, 0, slot);
+        showStatus('Global FX' + (slot + 1) + ' ' + (eff.enabled ? 'ON' : 'OFF'), 80);
+    }
+    markSessionChanged();
+    s.dirty = true;
+    return true;
+}
+
+function adjustSelectedFxParam(knobIdx, delta) {
+    if (delta === 0) return;
+    const paramIdx = clampInt(knobIdx, 0, FX_PARAM_COUNT - 1, 0);
+    if (s.fxScreenScope === 'global') {
+        const effectIdx = clampInt(s.selectedGlobalFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
+        const eff = globalFxEffect(effectIdx);
+        eff.params[paramIdx] = clamp(clampFloat(eff.params[paramIdx], 0.0, 1.0, 0.5) + delta * 0.02, 0.0, 1.0);
+        sendFxStateToDsp('global', 0, 0, effectIdx);
+        showStatus('GFX' + (effectIdx + 1) + ' P' + (paramIdx + 1) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
+    } else {
+        const sec = s.focusedSection;
+        const bank = focusedBankIndex(sec);
+        const effectIdx = clampInt(s.selectedBankFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
+        const eff = bankFxEffect(sec, bank, effectIdx);
+        eff.params[paramIdx] = clamp(clampFloat(eff.params[paramIdx], 0.0, 1.0, 0.5) + delta * 0.02, 0.0, 1.0);
+        sendFxStateToDsp('bank', sec, bank, effectIdx);
+        showStatus('BFX' + (effectIdx + 1) + ' P' + (paramIdx + 1) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
+    }
+    markSessionChanged();
+    s.dirty = true;
+}
+
 function handlePadNote(note, velocity) {
     if (velocity <= 0) return false;
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
+    if (s.view === 'fx') return toggleFxPadByNote(note);
     if (s.loopPadMode) {
         const lp = loopPadIndexFromPadNote(note);
         if (lp >= 0) {
@@ -4293,6 +4481,7 @@ function handlePadNote(note, velocity) {
 
 function handlePadNoteRelease(note) {
     if (note < PAD_NOTE_MIN || note > PAD_NOTE_MAX) return false;
+    if (s.view === 'fx') return true;
     if (s.loopPadMode) {
         const lp = loopPadIndexFromPadNote(note);
         if (lp >= 0) {
@@ -4404,6 +4593,13 @@ function handleParamKnob(cc, delta) {
     if (s.view === 'browser' && s.browserMode === 'sessions') {
         if (cc === MoveKnob1) adjustSessionNameIndex(delta);
         else if (cc === MoveKnob2) adjustSessionNameChar(delta);
+        return;
+    }
+
+    if (s.view === 'fx') {
+        if (cc >= MoveKnob1 && cc <= MoveKnob8) {
+            adjustSelectedFxParam(cc - MoveKnob1, delta);
+        }
         return;
     }
 
@@ -4761,6 +4957,25 @@ function onMidiMessageInternal(data) {
                 shiftLooperPadWindow(cc === MoveArrowRight ? 1 : -1);
                 return;
             }
+        }
+
+        if (cc === MoveArrowUp && val > 0) {
+            if (s.view === 'main') {
+                s.view = 'fx';
+                s.fxScreenScope = 'bank';
+                showStatus('FX screen', 70);
+                s.dirty = true;
+            }
+            return;
+        }
+
+        if (cc === MoveArrowDown && val > 0) {
+            if (s.view === 'fx') {
+                s.view = 'main';
+                showStatus('Main screen', 70);
+                s.dirty = true;
+            }
+            return;
         }
 
         if (cc === MoveMainKnob) {
