@@ -630,8 +630,7 @@ static void __attribute__((unused)) collect_perf_profile(wrapper_instance_t *ins
         int b_on = 0;
         for (int sec = 0; sec < 2; sec++) {
             int bank = inst->current_bank[sec];
-            if (bank < 0) bank = 0;
-            if (bank > 7) bank = 7;
+            if (bank < 0 || bank >= 8) bank = 0;
             if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
         }
         const int on = g_on || b_on;
@@ -643,8 +642,7 @@ static void __attribute__((unused)) collect_perf_profile(wrapper_instance_t *ins
             if (g_on) { sum += inst->pfx_global_param[fx][i]; w++; }
             for (int sec = 0; sec < 2; sec++) {
                 int bank = inst->current_bank[sec];
-                if (bank < 0) bank = 0;
-                if (bank > 7) bank = 7;
+                if (bank < 0 || bank >= 8) bank = 0;
                 if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
                 sum += inst->pfx_bank_param[sec][bank][fx][i];
                 w++;
@@ -684,8 +682,7 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
         int b_on = 0;
         for (int sec = 0; sec < 2; sec++) {
             int bank = inst->current_bank[sec];
-            if (bank < 0) bank = 0;
-            if (bank > 7) bank = 7;
+            if (bank < 0 || bank >= 8) bank = 0;
             if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
         }
         on[fx] = g_on || b_on;
@@ -694,8 +691,7 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             if (g_on) { sum += inst->pfx_global_param[fx][p]; w++; }
             for (int sec = 0; sec < 2; sec++) {
                 int bank = inst->current_bank[sec];
-                if (bank < 0) bank = 0;
-                if (bank > 7) bank = 7;
+                if (bank < 0 || bank >= 8) bank = 0;
                 if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
                 sum += inst->pfx_bank_param[sec][bank][fx][p];
                 w++;
