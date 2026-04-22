@@ -511,6 +511,17 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         if (sec > 1) sec = 1;
         inst->pfx_active_section = sec;
     }
+    if (!strcmp(key, "section_bank_route")) {
+        /*
+         * Route-only bank switch used by MIDI looper playback.
+         * Forward to core as section_bank, but keep wrapper PFX focus untouched
+         * so bank FX do not flicker when routing cross-bank note events.
+         */
+        if (inst->core_api_v2 && inst->core_api_v2->set_param && inst->core_instance) {
+            inst->core_api_v2->set_param(inst->core_instance, "section_bank", val ? val : "");
+        }
+        return;
+    }
     if (!strcmp(key, "section_bank")) {
         int parts[2] = {0};
         const int n = parse_colon_ints(val, parts, 2);

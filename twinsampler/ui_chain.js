@@ -5096,11 +5096,12 @@ function withPlaybackBank(sec, bank, fn) {
     const targetBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
     const visibleBank = clampInt(s.sections[sSec].currentBank, 0, BANK_COUNT - 1, 0);
 
-    spb('section_bank', sSec + ':' + targetBank, 120);
+    /* Route playback without moving wrapper PFX focus. */
+    spb('section_bank_route', sSec + ':' + targetBank, 120);
     try {
         fn();
     } finally {
-        if (targetBank !== visibleBank) spb('section_bank', sSec + ':' + visibleBank, 120);
+        if (targetBank !== visibleBank) spb('section_bank_route', sSec + ':' + visibleBank, 120);
     }
 }
 
