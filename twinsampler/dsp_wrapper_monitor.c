@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
+#include "dsp_core_blob.h"
 #include "plugin_api_v1.h"
 
 #ifndef M_PI
@@ -18,6 +20,7 @@ typedef struct wrapper_instance {
     void *core_handle;
     plugin_api_v2_t *core_api_v2;
     void *core_instance;
+    int core_is_static;
     int monitor_enabled;
     float monitor_gain;
     int record_mix_schwung;
@@ -50,17 +53,24 @@ typedef struct wrapper_instance {
     float pfx_hp_prev_out_r;
     float pfx_loop_length_ms;
     float pfx_comp_env;
+    float pfx_duck_env;
     float pfx_phase_flanger;
     float pfx_phase_chorus;
-    int pfx_sr_hold_count;
-    float pfx_sr_hold_l;
-    float pfx_sr_hold_r;
+    float pfx_phase_vinyl;
+    int pfx_sr_hold_count_comp;
+    int pfx_sr_hold_count_crush;
+    float pfx_sr_hold_l_comp;
+    float pfx_sr_hold_r_comp;
+    float pfx_sr_hold_l_crush;
+    float pfx_sr_hold_r_crush;
     float *pfx_delay_buf;
     int pfx_delay_len;
     int pfx_delay_pos;
 } wrapper_instance_t;
 
 static const host_api_v1_t *g_host = NULL;
+/* Optional symbol for monolithic builds that link core directly into dsp.so. */
+extern plugin_api_v2_t *twinsampler_core_move_plugin_init_v2(const host_api_v1_t *host) __attribute__((weak));
 
 static void log_msg(const char *msg) {
     if (g_host && g_host->log) g_host->log(msg);
@@ -70,6 +80,12 @@ static int clip_i32_to_i16(int32_t x) {
     if (x > 32767) return 32767;
     if (x < -32768) return -32768;
     return (int)x;
+}
+
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }
 
 static uint32_t xorshift32(uint32_t *state) {
@@ -107,8 +123,13 @@ static int parse_int_or_default(const char *val, int fallback);
 static int parse_capture_mode(const char *val, int fallback) {
     if (!val || !val[0]) return fallback;
     if (!strcmp(val, "auto")) return 0;
+    if (!strcmp(val, "line_in")) return 1;
+    if (!strcmp(val, "linein")) return 1;
     if (!strcmp(val, "input")) return 1;
+    if (!strcmp(val, "internal")) return 2;
+    if (!strcmp(val, "move_mix")) return 2;
     if (!strcmp(val, "bus")) return 2;
+    if (!strcmp(val, "master")) return 3;
     if (!strcmp(val, "mix")) return 3;
     return parse_int_or_default(val, fallback);
 }
@@ -153,42 +174,132 @@ static float parse_colon_float_tail(const char *val, float fallback) {
     return parse_float_clamped(num, -16.0f, 16.0f, fallback);
 }
 
-static int load_core_for_instance(wrapper_instance_t *inst, const char *module_dir) {
-    if (!inst) return 0;
-    if (!module_dir || !module_dir[0]) {
-        log_msg("TwinSampler monitor wrapper: missing module_dir");
-        return 0;
-    }
+static int validate_core_api(plugin_api_v2_t *api) {
+    return api && api->create_instance && api->render_block;
+}
 
-    char core_path[PATH_MAX];
-    snprintf(core_path, sizeof(core_path), "%s/dsp_core.so", module_dir);
-
-    void *handle = dlopen(core_path, RTLD_NOW | RTLD_LOCAL);
-    if (!handle) {
-        const char *err = dlerror();
-        log_msg(err ? err : "TwinSampler monitor wrapper: dlopen core failed");
-        return 0;
-    }
+static int try_load_core_from_handle(wrapper_instance_t *inst, void *handle, int owns_handle) {
+    if (!inst || !handle) return 0;
 
     move_plugin_init_v2_fn init_v2 =
         (move_plugin_init_v2_fn)dlsym(handle, MOVE_PLUGIN_INIT_V2_SYMBOL);
     if (!init_v2) {
-        dlclose(handle);
-        log_msg("TwinSampler monitor wrapper: core missing move_plugin_init_v2");
+        init_v2 = (move_plugin_init_v2_fn)dlsym(handle, "twinsampler_core_move_plugin_init_v2");
+    }
+    if (!init_v2) {
+        if (owns_handle) dlclose(handle);
         return 0;
     }
 
     plugin_api_v2_t *api = init_v2(g_host);
-    if (!api || !api->create_instance || !api->render_block) {
-        dlclose(handle);
-        log_msg("TwinSampler monitor wrapper: invalid core API v2");
+    if (!validate_core_api(api)) {
+        if (owns_handle) dlclose(handle);
         return 0;
     }
 
-    inst->core_handle = handle;
+    inst->core_handle = owns_handle ? handle : NULL;
     inst->core_api_v2 = api;
-    log_msg("TwinSampler monitor wrapper: core loaded (per-instance)");
+    inst->core_is_static = owns_handle ? 0 : 1;
     return 1;
+}
+
+static int write_all_bytes(int fd, const uint8_t *data, size_t len) {
+    if (fd < 0 || !data || len == 0) return 0;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t n = write(fd, data + off, len - off);
+        if (n <= 0) return 0;
+        off += (size_t)n;
+    }
+    return 1;
+}
+
+static int try_load_embedded_core(wrapper_instance_t *inst) {
+    if (!inst) return 0;
+    if (dsp_core_so_len == 0) return 0;
+
+    char tmp_path[] = "/tmp/twinsampler_core_XXXXXX.so";
+    int fd = mkstemps(tmp_path, 3);
+    if (fd < 0) return 0;
+
+    const int ok = write_all_bytes(fd, (const uint8_t *)dsp_core_so, (size_t)dsp_core_so_len);
+    close(fd);
+    if (!ok) {
+        unlink(tmp_path);
+        return 0;
+    }
+
+    void *handle = dlopen(tmp_path, RTLD_NOW | RTLD_LOCAL);
+    /* Keep filesystem clean; the binary stays mapped if dlopen succeeds. */
+    unlink(tmp_path);
+    if (!handle) return 0;
+
+    if (try_load_core_from_handle(inst, handle, 1)) {
+        log_msg("TwinSampler monitor wrapper: core loaded (embedded)");
+        return 1;
+    }
+    return 0;
+}
+
+static int load_core_for_instance(wrapper_instance_t *inst, const char *module_dir) {
+    if (!inst) return 0;
+    inst->core_handle = NULL;
+    inst->core_api_v2 = NULL;
+    inst->core_is_static = 0;
+
+    /* 1) Monolithic build where core is linked into this shared object. */
+    if (twinsampler_core_move_plugin_init_v2) {
+        plugin_api_v2_t *api = twinsampler_core_move_plugin_init_v2(g_host);
+        if (validate_core_api(api)) {
+            inst->core_api_v2 = api;
+            inst->core_is_static = 1;
+            log_msg("TwinSampler monitor wrapper: core loaded (static)");
+            return 1;
+        }
+    }
+
+    /* 2) Self-symbol lookup for alternate linked layouts. */
+    void *self_handle = dlopen(NULL, RTLD_NOW | RTLD_LOCAL);
+    if (self_handle) {
+        if (try_load_core_from_handle(inst, self_handle, 0)) {
+            dlclose(self_handle);
+            log_msg("TwinSampler monitor wrapper: core loaded (self)");
+            return 1;
+        }
+        dlclose(self_handle);
+    }
+
+    /* 3) Sidecar core shared object lookup. */
+    char core_path_primary[PATH_MAX];
+    core_path_primary[0] = '\0';
+    if (module_dir && module_dir[0]) {
+        snprintf(core_path_primary, sizeof(core_path_primary), "%s/dsp_core.so", module_dir);
+    }
+
+    const char *paths[] = {
+        core_path_primary,
+        "./dsp_core.so",
+        "dsp_core.so"
+    };
+    for (size_t i = 0; i < (sizeof(paths) / sizeof(paths[0])); i++) {
+        const char *path = paths[i];
+        if (!path || !path[0]) continue;
+        void *handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        if (!handle) continue;
+        if (try_load_core_from_handle(inst, handle, 1)) {
+            log_msg("TwinSampler monitor wrapper: core loaded (sidecar)");
+            return 1;
+        }
+    }
+
+    /* 4) Last-resort embedded sidecar payload. */
+    if (try_load_embedded_core(inst)) {
+        return 1;
+    }
+
+    const char *err = dlerror();
+    log_msg(err ? err : "TwinSampler monitor wrapper: core load failed");
+    return 0;
 }
 
 static float peak_abs_i16(const int16_t *buf, int samples) {
@@ -248,10 +359,14 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->pfx_hp_prev_out_l = inst->pfx_hp_prev_out_r = 0.0f;
     inst->pfx_loop_length_ms = 500.0f;
     inst->pfx_comp_env = 0.0f;
+    inst->pfx_duck_env = 0.0f;
     inst->pfx_phase_flanger = 0.0f;
     inst->pfx_phase_chorus = 0.0f;
-    inst->pfx_sr_hold_count = 0;
-    inst->pfx_sr_hold_l = inst->pfx_sr_hold_r = 0.0f;
+    inst->pfx_phase_vinyl = 0.0f;
+    inst->pfx_sr_hold_count_comp = 0;
+    inst->pfx_sr_hold_count_crush = 0;
+    inst->pfx_sr_hold_l_comp = inst->pfx_sr_hold_r_comp = 0.0f;
+    inst->pfx_sr_hold_l_crush = inst->pfx_sr_hold_r_crush = 0.0f;
     const int sr = (g_host && g_host->sample_rate > 1000) ? g_host->sample_rate : MOVE_SAMPLE_RATE;
     inst->pfx_delay_len = sr * 2;
     inst->pfx_delay_pos = 0;
@@ -277,7 +392,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->core_instance = inst->core_api_v2->create_instance(module_dir, json_defaults);
 
     if (!inst->core_instance) {
-        if (inst->core_handle) {
+        if (inst->core_handle && !inst->core_is_static) {
             dlclose(inst->core_handle);
             inst->core_handle = NULL;
         }
@@ -301,7 +416,7 @@ static void wrapper_destroy_instance(void *instance) {
     if (inst->core_api_v2 && inst->core_api_v2->destroy_instance && inst->core_instance) {
         inst->core_api_v2->destroy_instance(inst->core_instance);
     }
-    if (inst->core_handle) {
+    if (inst->core_handle && !inst->core_is_static) {
         dlclose(inst->core_handle);
         inst->core_handle = NULL;
     }
@@ -504,9 +619,9 @@ static int wrapper_get_error(void *instance, char *buf, int buf_len) {
     return 0;
 }
 
-static void collect_perf_profile(wrapper_instance_t *inst,
-                                 float *drive, float *crush, float *lp, float *hp,
-                                 float *transient, float *noise, float *tone, float *out_gain) {
+static void __attribute__((unused)) collect_perf_profile(wrapper_instance_t *inst,
+                                                         float *drive, float *crush, float *lp, float *hp,
+                                                         float *transient, float *noise, float *tone, float *out_gain) {
     if (!inst) return;
     float d = 0.0f, c = 0.0f, l = 0.0f, h = 0.0f, t = 0.0f, n = 0.0f, q = 0.0f, g = 0.0f;
     float count = 0.0f;
@@ -514,10 +629,10 @@ static void collect_perf_profile(wrapper_instance_t *inst,
         const int g_on = inst->pfx_global_toggle[fx] ? 1 : 0;
         int b_on = 0;
         for (int sec = 0; sec < 2; sec++) {
-            for (int bank = 0; bank < 8; bank++) {
-                if (inst->pfx_bank_toggle[sec][bank][fx]) { b_on = 1; break; }
-            }
-            if (b_on) break;
+            int bank = inst->current_bank[sec];
+            if (bank < 0) bank = 0;
+            if (bank > 7) bank = 7;
+            if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
         }
         const int on = g_on || b_on;
         if (!on) continue;
@@ -527,11 +642,12 @@ static void collect_perf_profile(wrapper_instance_t *inst,
             int w = 0;
             if (g_on) { sum += inst->pfx_global_param[fx][i]; w++; }
             for (int sec = 0; sec < 2; sec++) {
-                for (int bank = 0; bank < 8; bank++) {
-                    if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
-                    sum += inst->pfx_bank_param[sec][bank][fx][i];
-                    w++;
-                }
+                int bank = inst->current_bank[sec];
+                if (bank < 0) bank = 0;
+                if (bank > 7) bank = 7;
+                if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
+                sum += inst->pfx_bank_param[sec][bank][fx][i];
+                w++;
             }
             p[i] = (w > 0) ? (sum / (float)w) : 0.5f;
         }
@@ -567,38 +683,52 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
         const int g_on = inst->pfx_global_toggle[fx] ? 1 : 0;
         int b_on = 0;
         for (int sec = 0; sec < 2; sec++) {
-            for (int bank = 0; bank < 8; bank++) {
-                if (inst->pfx_bank_toggle[sec][bank][fx]) {
-                    b_on = 1;
-                    break;
-                }
-            }
-            if (b_on) break;
+            int bank = inst->current_bank[sec];
+            if (bank < 0) bank = 0;
+            if (bank > 7) bank = 7;
+            if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
         }
         on[fx] = g_on || b_on;
         for (int p = 0; p < 8; p++) {
             float sum = 0.0f; int w = 0;
             if (g_on) { sum += inst->pfx_global_param[fx][p]; w++; }
             for (int sec = 0; sec < 2; sec++) {
-                for (int bank = 0; bank < 8; bank++) {
-                    if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
-                    sum += inst->pfx_bank_param[sec][bank][fx][p];
-                    w++;
-                }
+                int bank = inst->current_bank[sec];
+                if (bank < 0) bank = 0;
+                if (bank > 7) bank = 7;
+                if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
+                sum += inst->pfx_bank_param[sec][bank][fx][p];
+                w++;
             }
             mix_params[fx][p] = (w > 0) ? (sum / (float)w) : 0.5f;
         }
     }
 
     for (int i = 0; i < frames; i++) {
-        float dl = 0.0f, dr = 0.0f;
         int dpos = inst->pfx_delay_pos;
+        if (on[4]) {
+            const float rate = 0.05f + mix_params[4][1] * 2.0f;
+            inst->pfx_phase_flanger += (2.0f * (float)M_PI * rate) / (float)sr;
+            if (inst->pfx_phase_flanger > 2.0f * (float)M_PI) inst->pfx_phase_flanger -= 2.0f * (float)M_PI;
+        }
+        if (on[5]) {
+            const float rate = 0.05f + mix_params[5][1] * 0.9f;
+            inst->pfx_phase_chorus += (2.0f * (float)M_PI * rate) / (float)sr;
+            if (inst->pfx_phase_chorus > 2.0f * (float)M_PI) inst->pfx_phase_chorus -= 2.0f * (float)M_PI;
+        }
+        if (on[9]) {
+            const float wow_rate = 0.05f + mix_params[9][4] * 1.2f;
+            inst->pfx_phase_vinyl += (2.0f * (float)M_PI * wow_rate) / (float)sr;
+            if (inst->pfx_phase_vinyl > 2.0f * (float)M_PI) inst->pfx_phase_vinyl -= 2.0f * (float)M_PI;
+        }
+
         for (int ch = 0; ch < 2; ch++) {
             const int idx = i * 2 + ch;
             float x = (float)out_interleaved_lr[idx] / 32768.0f;
             float prev_in = (ch == 0) ? inst->pfx_hp_prev_in_l : inst->pfx_hp_prev_in_r;
             float prev_out = (ch == 0) ? inst->pfx_hp_prev_out_l : inst->pfx_hp_prev_out_r;
             float lp_z = (ch == 0) ? inst->pfx_lp_z_l : inst->pfx_lp_z_r;
+            inst->pfx_delay_buf[dpos * 2 + ch] = x; /* keep delay memory warm for instant toggles */
 
             /* FX1: Compression + color + sampler controls */
             if (on[0]) {
@@ -628,13 +758,13 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
                 } else {
                     x = tanhf(x * 1.7f) + 0.08f * sinf(2.0f * (float)M_PI * x); /* vintage */
                 }
-                if (inst->pfx_sr_hold_count <= 0) {
-                    if (ch == 0) inst->pfx_sr_hold_l = x;
-                    else inst->pfx_sr_hold_r = x;
-                    inst->pfx_sr_hold_count = sr_hold;
+                if (inst->pfx_sr_hold_count_comp <= 0) {
+                    if (ch == 0) inst->pfx_sr_hold_l_comp = x;
+                    else inst->pfx_sr_hold_r_comp = x;
+                    inst->pfx_sr_hold_count_comp = sr_hold;
                 }
-                x = (ch == 0) ? inst->pfx_sr_hold_l : inst->pfx_sr_hold_r;
-                if (ch == 1) inst->pfx_sr_hold_count--;
+                x = (ch == 0) ? inst->pfx_sr_hold_l_comp : inst->pfx_sr_hold_r_comp;
+                if (ch == 1) inst->pfx_sr_hold_count_comp--;
                 const float levels = powf(2.0f, bit_depth);
                 x = floorf(x * levels + 0.5f) / levels;
             }
@@ -642,82 +772,146 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             if (on[1]) {
                 const float drive = 1.0f + mix_params[1][0] * 12.0f;
                 const float mix = mix_params[1][1];
-                const float sat = tanhf(x * drive);
-                x = x * (1.0f - mix) + sat * mix;
+                const float tone = (mix_params[1][2] - 0.5f) * 1.2f;
+                const float output = 0.3f + mix_params[1][3] * 1.7f;
+                const float bias = (mix_params[1][4] - 0.5f) * 0.8f;
+                const float dynamics = 0.2f + mix_params[1][5] * 1.8f;
+                const float lo_cut = mix_params[1][6];
+                const float hi_cut = mix_params[1][7];
+                const float dyn_drive = drive * (1.0f + (1.0f - clampf(fabsf(x), 0.0f, 1.0f)) * dynamics * 0.5f);
+                float sat = tanhf((x + bias) * dyn_drive) - bias * 0.35f;
+                const float hp_c = 0.01f + lo_cut * 0.45f;
+                const float hp_sat = hp_c * (prev_out + sat - prev_in);
+                prev_in = sat;
+                prev_out = hp_sat;
+                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
+                lp_z += lp_c * (hp_sat - lp_z);
+                sat = lp_z + tone * (lp_z - x) * 0.35f;
+                x = (x * (1.0f - mix) + sat * mix) * output;
             }
             /* FX3 filter isolator */
             if (on[2]) {
                 const float mode = mix_params[2][0];
-                const float cut = 0.01f + mix_params[2][1] * 0.94f;
-                lp_z += cut * (x - lp_z);
-                const float hp = cut * (prev_out + x - prev_in);
-                prev_in = x;
+                const float drive = 1.0f + mix_params[2][3] * 8.0f;
+                const float mix = mix_params[2][4];
+                const float env_amt = mix_params[2][5] * 0.2f;
+                const float lo = mix_params[2][6];
+                const float hi = mix_params[2][7];
+                const float in = tanhf(x * drive);
+                const float cut = clampf(0.01f + mix_params[2][1] * 0.92f + fabsf(in) * env_amt, 0.01f, 0.98f);
+                const float res = 0.6f + mix_params[2][2] * 1.4f;
+                lp_z += cut * (in - lp_z);
+                const float hp = cut * (prev_out + in - prev_in);
+                prev_in = in;
                 prev_out = hp;
-                if (mode < 0.33f) x = lp_z;
-                else if (mode < 0.66f) x = lp_z - hp;
-                else x = hp;
+                const float band = (lp_z - hp) * res;
+                float y = hp;
+                if (mode < 0.33f) y = lp_z;
+                else if (mode < 0.66f) y = band;
+                y += (lo - 0.5f) * lp_z * 0.35f;
+                y += (hi - 0.5f) * hp * 0.35f;
+                x = in * (1.0f - mix) + y * mix;
             }
             /* FX4 bit crush */
             if (on[3]) {
                 const float bits = 2.0f + mix_params[3][0] * 14.0f;
-                const int hold = 1 + (int)((1.0f - mix_params[3][1]) * 96.0f);
-                if (inst->pfx_sr_hold_count <= 0) {
-                    if (ch == 0) inst->pfx_sr_hold_l = x;
-                    else inst->pfx_sr_hold_r = x;
-                    inst->pfx_sr_hold_count = hold;
+                const int hold_base = 1 + (int)((1.0f - mix_params[3][1]) * 96.0f);
+                const float jitter = mix_params[3][2];
+                const float mix = mix_params[3][3];
+                const float pre = 0.5f + mix_params[3][4] * 1.5f;
+                const float post = 0.5f + mix_params[3][5] * 1.5f;
+                const float tilt = (mix_params[3][6] - 0.5f) * 0.8f;
+                const float out = 0.3f + mix_params[3][7] * 1.7f;
+                const int jitter_delta = (int)(sinf((float)(i * 13 + ch * 97) * (0.017f + jitter * 0.11f)) * ((float)hold_base * jitter * 0.6f));
+                int hold = hold_base + jitter_delta;
+                if (hold < 1) hold = 1;
+                if (hold > 256) hold = 256;
+                const float pre_x = tanhf(x * pre);
+                if (inst->pfx_sr_hold_count_crush <= 0) {
+                    if (ch == 0) inst->pfx_sr_hold_l_crush = pre_x;
+                    else inst->pfx_sr_hold_r_crush = pre_x;
+                    inst->pfx_sr_hold_count_crush = hold;
                 }
-                x = (ch == 0) ? inst->pfx_sr_hold_l : inst->pfx_sr_hold_r;
-                if (ch == 1) inst->pfx_sr_hold_count--;
+                float crushed = (ch == 0) ? inst->pfx_sr_hold_l_crush : inst->pfx_sr_hold_r_crush;
+                if (ch == 1) inst->pfx_sr_hold_count_crush--;
                 const float levels = powf(2.0f, bits);
-                x = floorf(x * levels + 0.5f) / levels;
+                crushed = floorf(crushed * levels + 0.5f) / levels;
+                crushed = crushed + tilt * (crushed - x) * 0.5f;
+                x = (x * (1.0f - mix) + crushed * mix) * post * out;
             }
             /* FX5 flanger */
             if (on[4]) {
                 const float depth_ms = 0.2f + mix_params[4][0] * 6.0f;
-                const float rate = 0.05f + mix_params[4][1] * 2.0f;
                 const float fb = (mix_params[4][2] - 0.5f) * 0.8f;
                 const float mix = mix_params[4][3];
-                inst->pfx_phase_flanger += (2.0f * (float)M_PI * rate) / (float)sr;
-                if (inst->pfx_phase_flanger > 2.0f * (float)M_PI) inst->pfx_phase_flanger -= 2.0f * (float)M_PI;
-                const float mod_ms = depth_ms * (0.5f + 0.5f * sinf(inst->pfx_phase_flanger));
+                const float phase_ofs = mix_params[4][4] * 2.0f * (float)M_PI;
+                const float color = mix_params[4][5];
+                const float stereo = (mix_params[4][6] - 0.5f) * 1.5f;
+                const float out = 0.35f + mix_params[4][7] * 1.65f;
+                const float mod_phase = inst->pfx_phase_flanger + phase_ofs + ((ch == 0) ? -stereo : stereo);
+                const float mod_ms = depth_ms * (0.5f + 0.5f * sinf(mod_phase));
                 int d = (int)((mod_ms / 1000.0f) * (float)sr);
-                if (d < 1) d = 1; if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
+                if (d < 1) d = 1;
+                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
                 int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
                 const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                const float y = x + delayed * fb;
-                x = x * (1.0f - mix) + delayed * mix;
+                const float colored = delayed * (1.0f - color * 0.5f) + tanhf(delayed * (1.0f + color * 3.0f)) * color * 0.5f;
+                const float y = x + colored * fb;
+                x = (x * (1.0f - mix) + colored * mix) * out;
                 inst->pfx_delay_buf[dpos * 2 + ch] = y;
             }
             /* FX6 chorus */
             if (on[5]) {
                 const float depth_ms = 2.0f + mix_params[5][0] * 18.0f;
-                const float rate = 0.05f + mix_params[5][1] * 0.9f;
                 const float mix = mix_params[5][2] * 0.8f;
-                inst->pfx_phase_chorus += (2.0f * (float)M_PI * rate) / (float)sr;
-                if (inst->pfx_phase_chorus > 2.0f * (float)M_PI) inst->pfx_phase_chorus -= 2.0f * (float)M_PI;
-                int d = (int)(((depth_ms * (0.5f + 0.5f * sinf(inst->pfx_phase_chorus))) / 1000.0f) * (float)sr);
-                if (d < 1) d = 1; if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
-                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                inst->pfx_delay_buf[dpos * 2 + ch] = x;
-                x = x * (1.0f - mix) + delayed * mix;
-            }
-            /* FX7 reverb */
-            if (on[6]) {
-                const float mix = mix_params[6][0] * 0.7f;
-                const float fb = 0.2f + mix_params[6][1] * 0.75f;
-                int d = (int)((0.12f + mix_params[6][2] * 0.65f) * (float)sr);
+                const float spread = (mix_params[5][3] - 0.5f) * 1.4f;
+                const float color = mix_params[5][4];
+                const float pre = 0.5f + mix_params[5][5] * 1.5f;
+                const float post = 0.5f + mix_params[5][6] * 1.5f;
+                const float out = 0.35f + mix_params[5][7] * 1.65f;
+                const float in = tanhf(x * pre);
+                const float mod_phase = inst->pfx_phase_chorus + ((ch == 0) ? -spread : spread);
+                int d = (int)(((depth_ms * (0.5f + 0.5f * sinf(mod_phase))) / 1000.0f) * (float)sr);
+                if (d < 1) d = 1;
                 if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
                 int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
                 const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                inst->pfx_delay_buf[dpos * 2 + ch] = x + delayed * fb;
-                x = x * (1.0f - mix) + delayed * mix;
+                const float colored = delayed * (1.0f - color * 0.4f) + tanhf(delayed * (1.0f + color * 2.5f)) * color * 0.4f;
+                inst->pfx_delay_buf[dpos * 2 + ch] = in;
+                x = (in * (1.0f - mix) + colored * mix) * post * out;
+            }
+            /* FX7 reverb */
+            if (on[6]) {
+                const float mix = mix_params[6][0] * 0.8f;
+                const float fb = 0.15f + mix_params[6][1] * 0.8f;
+                const float damp = mix_params[6][3];
+                const float pre = 0.5f + mix_params[6][4] * 1.5f;
+                const float tone = (mix_params[6][5] - 0.5f) * 0.9f;
+                const float stereo = (mix_params[6][6] - 0.5f) * 0.5f;
+                const float out = 0.35f + mix_params[6][7] * 1.65f;
+                int d = (int)((0.08f + mix_params[6][2] * 0.65f) * (float)sr);
+                d += (int)(stereo * 0.02f * (float)sr);
+                if (d < 1) d = 1;
+                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
+                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
+                const float in = tanhf(x * pre);
+                const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
+                const float damp_c = 0.02f + (1.0f - damp) * 0.35f;
+                lp_z += damp_c * (delayed - lp_z);
+                const float wet = lp_z + tone * (lp_z - in) * 0.35f;
+                inst->pfx_delay_buf[dpos * 2 + ch] = in + wet * fb;
+                x = (in * (1.0f - mix) + wet * mix) * out;
             }
             /* FX8 delay synced to loop length */
             if (on[7]) {
                 const float syncSel = mix_params[7][0];
                 const float feedback = mix_params[7][1] * 0.92f;
-                const float mix = mix_params[7][2] * 0.8f;
+                const float mix = mix_params[7][2] * 0.85f;
+                const float hi_cut = mix_params[7][3];
+                const float lo_cut = mix_params[7][4];
+                const float duck_amt = mix_params[7][5];
+                const float stereo = (mix_params[7][6] - 0.5f) * 0.5f;
+                const float out = 0.35f + mix_params[7][7] * 1.65f;
                 float div = 0.25f;
                 if (syncSel < 0.2f) div = 0.125f;
                 else if (syncSel < 0.4f) div = 0.25f;
@@ -725,94 +919,210 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
                 else if (syncSel < 0.8f) div = 0.5f;
                 else div = 1.0f;
                 int d = (int)(((loop_ms * div) / 1000.0f) * (float)sr);
+                d += (int)(stereo * 0.03f * (float)sr);
                 if (d < 1) d = 1;
                 if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
                 int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
                 const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                inst->pfx_delay_buf[dpos * 2 + ch] = x + delayed * feedback;
-                x = x * (1.0f - mix) + delayed * mix;
-                if (ch == 1) {
-                    dl = inst->pfx_delay_buf[dpos * 2];
-                    dr = inst->pfx_delay_buf[dpos * 2 + 1];
-                }
+                const float hp_c = 0.01f + lo_cut * 0.45f;
+                const float hp = hp_c * (prev_out + delayed - prev_in);
+                prev_in = delayed;
+                prev_out = hp;
+                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
+                lp_z += lp_c * (hp - lp_z);
+                const float duck = 1.0f - duck_amt * clampf(fabsf(x), 0.0f, 1.0f) * 0.85f;
+                const float wet = lp_z * duck;
+                inst->pfx_delay_buf[dpos * 2 + ch] = x + wet * feedback;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
 
             /* FX9 beat repeat */
             if (on[8]) {
                 const float grid = mix_params[8][0];
                 const float hold_mix = mix_params[8][1];
+                const float mix = mix_params[8][2];
+                const float gate = 0.05f + mix_params[8][3] * 0.95f;
+                const float tone = (mix_params[8][4] - 0.5f) * 0.8f;
+                const float lo_cut = mix_params[8][5];
+                const float hi_cut = mix_params[8][6];
+                const float out = 0.35f + mix_params[8][7] * 1.65f;
                 const int div = (grid < 0.25f) ? 4 : (grid < 0.5f) ? 8 : (grid < 0.75f) ? 16 : 32;
                 int d = (int)(((loop_ms / (float)div) / 1000.0f) * (float)sr);
                 if (d < 1) d = 1;
                 if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
                 int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float rep = inst->pfx_delay_buf[ridx * 2 + ch];
+                float rep = inst->pfx_delay_buf[ridx * 2 + ch];
+                const float phase = fmodf((float)dpos / (float)d, 1.0f);
+                if (phase > gate) rep = 0.0f;
+                const float hp_c = 0.01f + lo_cut * 0.45f;
+                const float hp = hp_c * (prev_out + rep - prev_in);
+                prev_in = rep;
+                prev_out = hp;
+                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
+                lp_z += lp_c * (hp - lp_z);
+                rep = lp_z + tone * (lp_z - x) * 0.25f;
                 inst->pfx_delay_buf[dpos * 2 + ch] = x;
-                x = x * (1.0f - hold_mix) + rep * hold_mix;
+                const float wet = x * (1.0f - hold_mix) + rep * hold_mix;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
             /* FX10 vinyl stop */
             if (on[9]) {
                 const float amt = mix_params[9][0];
+                const float texture = mix_params[9][1];
+                const float mix = mix_params[9][2];
+                const float noise = (mix_params[9][3] - 0.5f) * 0.06f;
+                const float flutter_rate = 2.0f + mix_params[9][5] * 18.0f;
+                const float tone = (mix_params[9][6] - 0.5f) * 0.9f;
+                const float out = 0.35f + mix_params[9][7] * 1.65f;
                 float slow = 1.0f - amt * 0.92f;
                 if (slow < 0.04f) slow = 0.04f;
                 if (slow > 1.0f) slow = 1.0f;
-                const float hyst = mix_params[9][1];
-                x = (x * slow) + (tanhf(x * 0.8f) * (1.0f - slow) * hyst);
+                const float wow = sinf(inst->pfx_phase_vinyl + (ch == 0 ? 0.0f : 0.3f)) * 0.12f;
+                const float flutter = sinf((float)(i + dpos * 3) * (flutter_rate * 2.0f * (float)M_PI / (float)sr)) * 0.04f;
+                float mod = slow + wow + flutter;
+                mod = clampf(mod, 0.02f, 1.2f);
+                float wet = tanhf(x * (0.6f + texture * 1.8f) * mod);
+                wet += noise * sinf((float)(dpos * 73 + ch * 31));
+                wet += tone * (wet - x) * 0.3f;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
             /* FX11 stutter gate */
             if (on[10]) {
                 const float rateSel = mix_params[10][0];
-                const float duty = 0.1f + mix_params[10][1] * 0.8f;
+                const float duty = 0.05f + mix_params[10][1] * 0.9f;
+                const float mix = mix_params[10][2];
+                const float swing = (mix_params[10][3] - 0.5f) * 0.8f;
+                const float shape = 0.2f + mix_params[10][4] * 6.0f;
+                const float tone = (mix_params[10][5] - 0.5f) * 0.8f;
+                const float stereo = (mix_params[10][6] - 0.5f) * 0.25f;
+                const float out = 0.35f + mix_params[10][7] * 1.65f;
                 const int div = (rateSel < 0.2f) ? 2 : (rateSel < 0.4f) ? 4 : (rateSel < 0.6f) ? 8 : (rateSel < 0.8f) ? 16 : 32;
-                const float ph = fmodf(((float)i / (float)sr) * ((float)div / (loop_ms / 1000.0f)), 1.0f);
-                x *= (ph <= duty) ? 1.0f : 0.0f;
+                float ph = fmodf(((float)dpos / (float)sr) * ((float)div / (loop_ms / 1000.0f)), 1.0f);
+                ph += (ph < 0.5f) ? swing : -swing;
+                ph += (ch == 0) ? -stereo : stereo;
+                ph = ph - floorf(ph);
+                if (ph < 0.0f) ph += 1.0f;
+                float gate = (ph <= duty) ? 1.0f : 0.0f;
+                if (shape > 1.0f) {
+                    const float edge = duty * 0.5f;
+                    if (edge > 0.001f) {
+                        const float dist = fabsf(ph - duty * 0.5f) / edge;
+                        const float shaped = 1.0f - clampf(dist, 0.0f, 1.0f);
+                        gate = powf(shaped, shape);
+                    }
+                }
+                float wet = x * gate;
+                wet += tone * (wet - x) * 0.2f;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
             /* FX12 scatter */
             if (on[11]) {
                 const float amt = mix_params[11][0];
                 const float jitter = mix_params[11][1];
+                const float mix = mix_params[11][2];
+                const float gate = mix_params[11][3];
+                const float lo_cut = mix_params[11][4];
+                const float hi_cut = mix_params[11][5];
+                const float stereo = (mix_params[11][6] - 0.5f) * 0.4f;
+                const float out = 0.35f + mix_params[11][7] * 1.65f;
                 const int max_d = (int)(amt * 0.06f * (float)sr);
-                int d = max_d > 0 ? (int)(fabsf(sinf((float)(i + ch * 131) * (3.0f + jitter * 21.0f))) * (float)max_d) : 0;
+                int d = max_d > 0 ? (int)(fabsf(sinf((float)(dpos + i + ch * 131) * (3.0f + jitter * 27.0f))) * (float)max_d) : 0;
+                d += (int)(stereo * (float)max_d);
+                if (d < 0) d = 0;
                 if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
                 int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float tap = inst->pfx_delay_buf[ridx * 2 + ch];
+                float tap = inst->pfx_delay_buf[ridx * 2 + ch];
                 inst->pfx_delay_buf[dpos * 2 + ch] = x;
-                x = x * (1.0f - amt) + tap * amt;
+                const float gate_open = (fabsf(sinf((float)(dpos + ch * 17) * (0.37f + jitter))) <= (0.05f + gate * 0.95f)) ? 1.0f : 0.0f;
+                tap *= gate_open;
+                const float hp_c = 0.01f + lo_cut * 0.45f;
+                const float hp = hp_c * (prev_out + tap - prev_in);
+                prev_in = tap;
+                prev_out = hp;
+                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
+                lp_z += lp_c * (hp - lp_z);
+                const float wet = lp_z;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
             /* FX13 resonator */
             if (on[12]) {
                 const float tone = mix_params[12][0];
                 const float res = 0.3f + mix_params[12][1] * 0.68f;
-                const float f = 0.01f + tone * 0.45f;
-                lp_z += f * (x - lp_z);
-                x = x * (1.0f - res) + lp_z * res;
+                const float mix = mix_params[12][2];
+                const float drive = 1.0f + mix_params[12][3] * 8.0f;
+                const float keytrk = mix_params[12][4];
+                const float spread = (mix_params[12][5] - 0.5f) * 0.2f;
+                const float lo = mix_params[12][6];
+                const float hi = mix_params[12][7];
+                float f = 0.01f + tone * 0.45f + keytrk * fabsf(x) * 0.18f;
+                f += (ch == 0) ? -spread : spread;
+                f = clampf(f, 0.005f, 0.95f);
+                const float in = tanhf(x * drive);
+                lp_z += f * (in - lp_z);
+                float wet = in * (1.0f - res) + lp_z * res;
+                wet += (lo - 0.5f) * lp_z * 0.25f;
+                wet += (hi - 0.5f) * (in - lp_z) * 0.25f;
+                x = in * (1.0f - mix) + wet * mix;
             }
             /* FX14 phaser */
             if (on[13]) {
                 const float rate = 0.05f + mix_params[13][0] * 1.8f;
-                const float depth = mix_params[13][1] * 0.85f;
-                const float phase = sinf(((float)i * rate / (float)sr) * 2.0f * (float)M_PI);
+                const float depth = mix_params[13][1] * 0.9f;
+                const float mix = mix_params[13][2];
+                const float feedback = (mix_params[13][3] - 0.5f) * 0.7f;
+                const float color = mix_params[13][4];
+                const float stereo = (mix_params[13][5] - 0.5f) * 0.6f;
+                const float phase_ofs = mix_params[13][6] * 2.0f * (float)M_PI;
+                const float out = 0.35f + mix_params[13][7] * 1.65f;
+                const float phase = sinf((((float)dpos * rate) / (float)sr) * 2.0f * (float)M_PI + phase_ofs + ((ch == 0) ? -stereo : stereo));
                 const float allp = x - depth * phase * prev_out;
-                x = allp * 0.7f + x * 0.3f;
+                const float wet = allp * (0.4f + color * 0.6f) + x * (0.6f - color * 0.2f);
+                prev_out = wet + prev_out * feedback * 0.35f;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
             /* FX15 lofi wash */
             if (on[14]) {
                 const float noise = (mix_params[14][0] - 0.5f) * 0.08f;
                 const float blur = 0.01f + mix_params[14][1] * 0.2f;
+                const float mix = mix_params[14][2];
+                const float age = mix_params[14][3];
+                const float tone = (mix_params[14][4] - 0.5f) * 0.8f;
+                const float lo_cut = mix_params[14][5];
+                const float hi_cut = mix_params[14][6];
+                const float out = 0.35f + mix_params[14][7] * 1.65f;
                 lp_z += blur * (x - lp_z);
-                x = lp_z + noise * sinf((float)(i * 97 + ch * 53));
+                float crackle = noise * sinf((float)(dpos * 97 + ch * 53));
+                if (fabsf(sinf((float)(dpos + ch * 17) * (0.007f + age * 0.08f))) < age * 0.12f) crackle *= 2.0f;
+                float wet = lp_z + crackle;
+                wet += tone * (wet - x) * 0.25f;
+                const float hp_c = 0.01f + lo_cut * 0.45f;
+                const float hp = hp_c * (prev_out + wet - prev_in);
+                prev_in = wet;
+                prev_out = hp;
+                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
+                lp_z += lp_c * (hp - lp_z);
+                wet = lp_z;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
             /* FX16 ducker */
             if (on[15]) {
                 const float depth = mix_params[15][0] * 0.9f;
-                const float release = 0.001f + mix_params[15][1] * 0.02f;
-                const float env = fabsf(x);
-                float clip = env * 2.0f;
-                if (clip < 0.0f) clip = 0.0f;
-                if (clip > 1.0f) clip = 1.0f;
-                const float duck = 1.0f - depth * clip;
-                const float sm = duck + (1.0f - duck) * release;
-                x *= sm;
+                const float release = 0.0005f + mix_params[15][1] * 0.03f;
+                const float mix = mix_params[15][2];
+                const float attack = 0.0005f + mix_params[15][3] * 0.03f;
+                const float hold = mix_params[15][4];
+                const float tone = (mix_params[15][5] - 0.5f) * 0.8f;
+                const float stereo = (mix_params[15][6] - 0.5f) * 0.3f;
+                const float out = 0.35f + mix_params[15][7] * 1.65f;
+                const float env = fabsf(x) * (1.0f + hold * 1.5f);
+                if (env > inst->pfx_duck_env) inst->pfx_duck_env += (env - inst->pfx_duck_env) * attack;
+                else inst->pfx_duck_env += (env - inst->pfx_duck_env) * release;
+                float duck = 1.0f - depth * clampf(inst->pfx_duck_env, 0.0f, 1.0f);
+                duck += (ch == 0) ? (-stereo * 0.1f) : (stereo * 0.1f);
+                duck = clampf(duck, 0.05f, 1.2f);
+                float wet = x * duck;
+                wet += tone * (wet - x) * 0.25f;
+                x = (x * (1.0f - mix) + wet * mix) * out;
             }
 
             if (x > 1.0f) x = 1.0f;
@@ -831,7 +1141,6 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
         }
         inst->pfx_delay_pos++;
         if (inst->pfx_delay_pos >= inst->pfx_delay_len) inst->pfx_delay_pos = 0;
-        (void)dl; (void)dr;
     }
 }
 

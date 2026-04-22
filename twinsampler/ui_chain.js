@@ -156,9 +156,11 @@ const FX_PARAM_LABELS = [
     ['Noise', 'Blur', 'Mix', 'Age', 'Tone', 'LoCut', 'HiCut', 'Out'],
     ['Depth', 'Release', 'Mix', 'Attack', 'Hold', 'Tone', 'Stereo', 'Out']
 ];
-const FX_PRIMARY_COLORS = [120, 9, 45, 53, 67, 77, 95, 117];
-const FX_PERF_COLOR = 127;
-const FX_OFF_COLOR = 122; /* dim white when inactive in FX screen */
+const FX_BANK_COLORS = [9, 11, 12, 14, 15, 16, 47, 48];
+const FX_GLOBAL_COLORS = [3, 7, 21, 45, 53, 67, 77, 95];
+const FX_BANK_PERF_COLOR = 117;
+const FX_GLOBAL_PERF_COLOR = 125;
+const FX_OFF_COLOR = 1; /* extra-dim when inactive in FX screen */
 const STATUS_TICKS = 120;
 const LEDS_PER_TICK = 8;
 const PREVIEW_DEBOUNCE_MS = 250;
@@ -2133,29 +2135,45 @@ function globalFxEffect(effectIdx) {
     return s.globalFxEffects[idx];
 }
 
-function sendFxStateToDsp(scope, sec, bank, effectIdx) {
+function sendFxToggleToDsp(scope, sec, bank, effectIdx) {
     const fxIdx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
     if (scope === 'global') {
         const eff = globalFxEffect(fxIdx);
-        sp('performance_fx_global_toggle', fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
-        sp('pfx_global_toggle', fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
-        for (let p = 0; p < FX_PARAM_COUNT; p++) {
-            const v = clampFloat(Array.isArray(eff.params) ? eff.params[p] : 0.5, 0.0, 1.0, 0.5);
-            sp('performance_fx_global_param', fxIdx + ':' + p + ':' + v.toFixed(3));
-            sp('pfx_global_param', fxIdx + ':' + p + ':' + v.toFixed(3));
-        }
+        const enabled = clampInt(eff.enabled, 0, 1, 0);
+        sp('performance_fx_global_toggle', fxIdx + ':' + enabled);
+        sp('pfx_global_toggle', fxIdx + ':' + enabled);
         return;
     }
     const sSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
     const sBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
     const eff = bankFxEffect(sSec, sBank, fxIdx);
-    sp('performance_fx_bank_toggle', sSec + ':' + sBank + ':' + fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
-    sp('pfx_bank_toggle', sSec + ':' + sBank + ':' + fxIdx + ':' + clampInt(eff.enabled, 0, 1, 0));
-    for (let p = 0; p < FX_PARAM_COUNT; p++) {
+    const enabled = clampInt(eff.enabled, 0, 1, 0);
+    sp('performance_fx_bank_toggle', sSec + ':' + sBank + ':' + fxIdx + ':' + enabled);
+    sp('pfx_bank_toggle', sSec + ':' + sBank + ':' + fxIdx + ':' + enabled);
+}
+
+function sendFxParamToDsp(scope, sec, bank, effectIdx, paramIdx) {
+    const fxIdx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
+    const p = clampInt(paramIdx, 0, FX_PARAM_COUNT - 1, 0);
+    if (scope === 'global') {
+        const eff = globalFxEffect(fxIdx);
         const v = clampFloat(Array.isArray(eff.params) ? eff.params[p] : 0.5, 0.0, 1.0, 0.5);
-        sp('performance_fx_bank_param', sSec + ':' + sBank + ':' + fxIdx + ':' + p + ':' + v.toFixed(3));
-        sp('pfx_bank_param', sSec + ':' + sBank + ':' + fxIdx + ':' + p + ':' + v.toFixed(3));
+        sp('performance_fx_global_param', fxIdx + ':' + p + ':' + v.toFixed(3));
+        sp('pfx_global_param', fxIdx + ':' + p + ':' + v.toFixed(3));
+        return;
     }
+    const sSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const sBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
+    const eff = bankFxEffect(sSec, sBank, fxIdx);
+    const v = clampFloat(Array.isArray(eff.params) ? eff.params[p] : 0.5, 0.0, 1.0, 0.5);
+    sp('performance_fx_bank_param', sSec + ':' + sBank + ':' + fxIdx + ':' + p + ':' + v.toFixed(3));
+    sp('pfx_bank_param', sSec + ':' + sBank + ':' + fxIdx + ':' + p + ':' + v.toFixed(3));
+}
+
+function sendFxStateToDsp(scope, sec, bank, effectIdx) {
+    const fxIdx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
+    sendFxToggleToDsp(scope, sec, bank, fxIdx);
+    for (let p = 0; p < FX_PARAM_COUNT; p++) sendFxParamToDsp(scope, sec, bank, fxIdx, p);
 }
 
 function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
@@ -2258,19 +2276,14 @@ function rebuildLedQueue() {
             for (let slot = 0; slot < GRID_SIZE; slot++) {
                 const note = padNoteFor(gridSec, slot);
                 let color = Black;
-                if (gridSec === 0) {
-                    const eff = bankFxEffect(sec, bank, slot);
-                    const fxBase = slot < 8
-                        ? FX_PRIMARY_COLORS[clampInt(slot, 0, FX_PRIMARY_COLORS.length - 1, 0)]
-                        : FX_PERF_COLOR;
-                    color = eff.enabled ? fxBase : FX_OFF_COLOR;
-                } else {
-                    const eff = globalFxEffect(slot);
-                    const fxBase = slot < 8
-                        ? FX_PRIMARY_COLORS[clampInt(slot, 0, FX_PRIMARY_COLORS.length - 1, 0)]
-                        : FX_PERF_COLOR;
-                    color = eff.enabled ? fxBase : FX_OFF_COLOR;
-                }
+                const bankRow = gridSec === 0;
+                const eff = bankRow ? bankFxEffect(sec, bank, slot) : globalFxEffect(slot);
+                const palette = bankRow ? FX_BANK_COLORS : FX_GLOBAL_COLORS;
+                const perfColor = bankRow ? FX_BANK_PERF_COLOR : FX_GLOBAL_PERF_COLOR;
+                const fxBase = slot < 8
+                    ? palette[clampInt(slot, 0, palette.length - 1, 0)]
+                    : perfColor;
+                color = eff.enabled ? fxBase : FX_OFF_COLOR;
                 s.ledQueue.push([note, color]);
             }
         }
@@ -3101,7 +3114,10 @@ function drawFxScreen() {
     print(0, 30, shortText(name + ' ' + scope + ' ' + (eff.enabled ? 'ON' : 'OFF'), 21), 1);
     const p = Array.isArray(eff.params) ? eff.params : [];
     print(0, 40, shortText([0, 1, 2, 3].map((i) => 'K' + (i + 1) + ':' + fxParamName(effectIdx, i) + ' ' + Math.round(clampFloat(p[i], 0.0, 1.0, 0.5) * 100)).join(' | '), 21), 1);
-    print(0, 50, shortText([4, 5, 6, 7].map((i) => 'K' + (i + 1) + ':' + fxParamName(effectIdx, i) + ' ' + Math.round(clampFloat(p[i], 0.0, 1.0, 0.5) * 100)).join(' | '), 21), 1);
+    const footer = (s.statusTicks > 0)
+        ? s.statusText
+        : [4, 5, 6, 7].map((i) => 'K' + (i + 1) + ':' + fxParamName(effectIdx, i) + ' ' + Math.round(clampFloat(p[i], 0.0, 1.0, 0.5) * 100)).join(' | ');
+    print(0, 50, shortText(footer, 21), 1);
 }
 
 function draw() {
@@ -3659,6 +3675,17 @@ function knobTouchActionLabel(note) {
         return 'No action';
     }
 
+    if (s.view === 'fx') {
+        const sec = s.focusedSection;
+        const bank = focusedBankIndex(sec);
+        const effectIdx = s.fxScreenScope === 'global'
+            ? clampInt(s.selectedGlobalFxEffect, 0, FX_EFFECT_COUNT - 1, 0)
+            : clampInt(s.selectedBankFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
+        const eff = s.fxScreenScope === 'global' ? globalFxEffect(effectIdx) : bankFxEffect(sec, bank, effectIdx);
+        const value = Math.round(clampFloat(Array.isArray(eff.params) ? eff.params[idx] : 0.5, 0.0, 1.0, 0.5) * 100);
+        return (s.fxScreenScope === 'global' ? 'Global' : 'Bank') + ' ' + fxParamName(effectIdx, idx) + ' ' + value;
+    }
+
     if (s.view !== 'main') return 'No action';
 
     if (s.shiftHeld && s.volumeTouchHeld) {
@@ -3718,6 +3745,13 @@ function handleKnobTouch(note, velocity) {
         setSectionBank(s.focusedSection, note);
         s.knobPage = note < 4 ? 'A' : 'B';
         showStatus('K' + (note + 1) + ' Bank ' + (note + 1), 60);
+        return true;
+    }
+
+    if (s.view === 'fx') {
+        s.knobPage = note < 4 ? 'A' : 'B';
+        showStatus('K' + (note + 1) + ': ' + knobTouchActionLabel(note), 70);
+        s.dirty = true;
         return true;
     }
 
@@ -4502,7 +4536,7 @@ function toggleFxPadByNote(note) {
             showStatus('Bank ' + FX_EFFECT_NAMES[slot] + ' selected', 70);
         } else {
             eff.enabled = eff.enabled ? 0 : 1;
-            sendFxStateToDsp('bank', bankSec, bank, slot);
+            sendFxToggleToDsp('bank', bankSec, bank, slot);
             showStatus('Bank ' + FX_EFFECT_NAMES[slot] + ' ' + (eff.enabled ? 'ON' : 'OFF'), 80);
             markSessionChanged();
         }
@@ -4514,11 +4548,12 @@ function toggleFxPadByNote(note) {
             showStatus('Global ' + FX_EFFECT_NAMES[slot] + ' selected', 70);
         } else {
             eff.enabled = eff.enabled ? 0 : 1;
-            sendFxStateToDsp('global', 0, 0, slot);
+            sendFxToggleToDsp('global', 0, 0, slot);
             showStatus('Global ' + FX_EFFECT_NAMES[slot] + ' ' + (eff.enabled ? 'ON' : 'OFF'), 80);
             markSessionChanged();
         }
     }
+    markLedsDirty();
     updateUtilityButtonLeds();
     s.dirty = true;
     return true;
@@ -4539,7 +4574,7 @@ function adjustSelectedFxParam(knobIdx, delta) {
         const effectIdx = clampInt(s.selectedGlobalFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
         const eff = globalFxEffect(effectIdx);
         eff.params[paramIdx] = clamp(clampFloat(eff.params[paramIdx], 0.0, 1.0, 0.5) + delta * 0.02, 0.0, 1.0);
-        sendFxStateToDsp('global', 0, 0, effectIdx);
+        sendFxParamToDsp('global', 0, 0, effectIdx, paramIdx);
         showStatus('Global ' + FX_EFFECT_NAMES[effectIdx] + ' ' + fxParamName(effectIdx, paramIdx) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
     } else {
         const sec = s.focusedSection;
@@ -4547,7 +4582,7 @@ function adjustSelectedFxParam(knobIdx, delta) {
         const effectIdx = clampInt(s.selectedBankFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
         const eff = bankFxEffect(sec, bank, effectIdx);
         eff.params[paramIdx] = clamp(clampFloat(eff.params[paramIdx], 0.0, 1.0, 0.5) + delta * 0.02, 0.0, 1.0);
-        sendFxStateToDsp('bank', sec, bank, effectIdx);
+        sendFxParamToDsp('bank', sec, bank, effectIdx, paramIdx);
         showStatus('Bank ' + FX_EFFECT_NAMES[effectIdx] + ' ' + fxParamName(effectIdx, paramIdx) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
     }
     markSessionChanged();
@@ -4773,6 +4808,7 @@ function handleParamKnob(cc, delta) {
 
     if (s.view === 'fx') {
         if (cc >= MoveKnob1 && cc <= MoveKnob8) {
+            s.knobPage = (cc <= MoveKnob4) ? 'A' : 'B';
             adjustSelectedFxParam(cc - MoveKnob1, delta);
         }
         return;
