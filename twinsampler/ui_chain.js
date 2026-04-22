@@ -2902,7 +2902,7 @@ function startFocusedRecording() {
 
     const preferInternal = shouldPreferInternalCapture();
     spb('record_target', a.sec + ':' + a.bank + ':' + a.slot, 180);
-    spb('record_capture_mode', preferInternal ? 'internal' : 'line_in', 180);
+    spb('record_capture_mode', preferInternal ? 'internal' : 'auto', 180);
     spb('record_input_channels', 'stereo', 180);
     spb('record_input_stereo', '1', 180);
     spb('record_intent_internal', preferInternal ? '1' : '0', 180);
