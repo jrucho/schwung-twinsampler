@@ -1878,6 +1878,15 @@ function setSectionBank(sec, bank) {
     s.dirty = true;
 }
 
+function focusSectionForEditing(sec, blocking = false) {
+    const targetSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    if (s.focusedSection === targetSec) return false;
+    const slot = focusedSlotIndex();
+    const nextSlice = dspSliceFromSecSlot(targetSec, slot);
+    setSelectedSlice(nextSlice, !!blocking);
+    return true;
+}
+
 function setSectionChopCount(sec, bank, count) {
     const b = s.sections[sec].banks[bank];
     void count;
@@ -4099,6 +4108,7 @@ function handleStepBankNote(note, velocity) {
     s.stepCopySource = null;
     if (t.sec === 0) setSectionBank(0, t.bank);
     else setSectionBank(1, t.bank);
+    focusSectionForEditing(t.sec);
     if (!s.volumeTouchHeld && s.view === 'main') armStepFxHold(note);
     else clearStepFxHold(false);
     return true;

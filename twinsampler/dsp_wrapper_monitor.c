@@ -41,6 +41,7 @@ typedef struct wrapper_instance {
     int auto_hold_blocks;
     uint32_t dither_state;
     int current_bank[2];
+    int pfx_active_section;
     int pfx_bank_toggle[2][8][16];
     float pfx_bank_param[2][8][16][8];
     int pfx_global_toggle[16];
@@ -359,6 +360,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->dither_state = 0x6d2b79f5u;
     inst->current_bank[0] = 0;
     inst->current_bank[1] = 0;
+    inst->pfx_active_section = 0;
     for (int sec = 0; sec < 2; sec++) {
         for (int bank = 0; bank < 8; bank++) {
             for (int fx = 0; fx < 16; fx++) {
@@ -503,6 +505,12 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->debug_capture_logs = parse_bool(val);
         return;
     }
+    if (!strcmp(key, "keyboard_section")) {
+        int sec = parse_int_or_default(val, inst->pfx_active_section);
+        if (sec < 0) sec = 0;
+        if (sec > 1) sec = 1;
+        inst->pfx_active_section = sec;
+    }
     if (!strcmp(key, "section_bank")) {
         int parts[2] = {0};
         const int n = parse_colon_ints(val, parts, 2);
@@ -510,6 +518,7 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
             const int sec = (parts[0] < 0) ? 0 : (parts[0] > 1 ? 1 : parts[0]);
             const int bank = (parts[1] < 0) ? 0 : (parts[1] > 7 ? 7 : parts[1]);
             inst->current_bank[sec] = bank;
+            inst->pfx_active_section = sec;
         }
     } else if (!strncmp(key, "section_bank_", 13)) {
         const int sec = (key[13] == '1') ? 1 : 0;
@@ -517,6 +526,7 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         if (bank < 0) bank = 0;
         if (bank > 7) bank = 7;
         inst->current_bank[sec] = bank;
+        inst->pfx_active_section = sec;
     }
 
     if (!strcmp(key, "performance_fx_global_toggle") || !strcmp(key, "pfx_global_toggle")) {
@@ -619,6 +629,9 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     if (!strcmp(key, "performance_fx_active_banks")) {
         return snprintf(buf, (size_t)buf_len, "%d:%d", inst->current_bank[0], inst->current_bank[1]);
     }
+    if (!strcmp(key, "performance_fx_active_section")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->pfx_active_section ? 1 : 0);
+    }
 
     if (inst->core_api_v2 && inst->core_api_v2->get_param && inst->core_instance) {
         return inst->core_api_v2->get_param(inst->core_instance, key, buf, buf_len);
@@ -640,16 +653,14 @@ static void __attribute__((unused)) collect_perf_profile(wrapper_instance_t *ins
                                                          float *drive, float *crush, float *lp, float *hp,
                                                          float *transient, float *noise, float *tone, float *out_gain) {
     if (!inst) return;
+    const int active_sec = (inst->pfx_active_section == 1) ? 1 : 0;
+    int active_bank = inst->current_bank[active_sec];
+    if (active_bank < 0 || active_bank >= 8) active_bank = 0;
     float d = 0.0f, c = 0.0f, l = 0.0f, h = 0.0f, t = 0.0f, n = 0.0f, q = 0.0f, g = 0.0f;
     float count = 0.0f;
     for (int fx = 0; fx < 16; fx++) {
         const int g_on = inst->pfx_global_toggle[fx] ? 1 : 0;
-        int b_on = 0;
-        for (int sec = 0; sec < 2; sec++) {
-            int bank = inst->current_bank[sec];
-            if (bank < 0 || bank >= 8) bank = 0;
-            if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
-        }
+        const int b_on = inst->pfx_bank_toggle[active_sec][active_bank][fx] ? 1 : 0;
         const int on = g_on || b_on;
         if (!on) continue;
         float p[8];
@@ -657,13 +668,7 @@ static void __attribute__((unused)) collect_perf_profile(wrapper_instance_t *ins
             float sum = 0.0f;
             int w = 0;
             if (g_on) { sum += inst->pfx_global_param[fx][i]; w++; }
-            for (int sec = 0; sec < 2; sec++) {
-                int bank = inst->current_bank[sec];
-                if (bank < 0 || bank >= 8) bank = 0;
-                if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
-                sum += inst->pfx_bank_param[sec][bank][fx][i];
-                w++;
-            }
+            if (b_on) { sum += inst->pfx_bank_param[active_sec][active_bank][fx][i]; w++; }
             p[i] = (w > 0) ? (sum / (float)w) : 0.5f;
         }
         d += p[0];
@@ -691,6 +696,9 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
     if (!inst || !out_interleaved_lr || frames <= 0) return;
     if (!inst->pfx_delay_buf || inst->pfx_delay_len <= 0) return;
     const int sr = (g_host && g_host->sample_rate > 1000) ? g_host->sample_rate : MOVE_SAMPLE_RATE;
+    const int active_sec = (inst->pfx_active_section == 1) ? 1 : 0;
+    int active_bank = inst->current_bank[active_sec];
+    if (active_bank < 0 || active_bank >= 8) active_bank = 0;
     const float loop_ms = (inst->pfx_loop_length_ms > 50.0f) ? inst->pfx_loop_length_ms : 500.0f;
     float mix_params[16][8];
     int on[16];
@@ -702,24 +710,13 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             continue;
         }
         const int g_on = inst->pfx_global_toggle[fx] ? 1 : 0;
-        int b_on = 0;
-        for (int sec = 0; sec < 2; sec++) {
-            int bank = inst->current_bank[sec];
-            if (bank < 0 || bank >= 8) bank = 0;
-            if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
-        }
+        const int b_on = inst->pfx_bank_toggle[active_sec][active_bank][fx] ? 1 : 0;
         on[fx] = g_on || b_on;
         if (on[fx]) any_on = 1;
         for (int p = 0; p < 8; p++) {
             float sum = 0.0f; int w = 0;
             if (g_on) { sum += inst->pfx_global_param[fx][p]; w++; }
-            for (int sec = 0; sec < 2; sec++) {
-                int bank = inst->current_bank[sec];
-                if (bank < 0 || bank >= 8) bank = 0;
-                if (!inst->pfx_bank_toggle[sec][bank][fx]) continue;
-                sum += inst->pfx_bank_param[sec][bank][fx][p];
-                w++;
-            }
+            if (b_on) { sum += inst->pfx_bank_param[active_sec][active_bank][fx][p]; w++; }
             mix_params[fx][p] = (w > 0) ? (sum / (float)w) : 0.5f;
         }
     }
