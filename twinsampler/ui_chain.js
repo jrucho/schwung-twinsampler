@@ -158,6 +158,7 @@ const FX_PARAM_LABELS = [
 ];
 const FX_PRIMARY_COLORS = [120, 9, 45, 53, 67, 77, 95, 117];
 const FX_PERF_COLOR = 127;
+const FX_OFF_COLOR = 122; /* dim white when inactive in FX screen */
 const STATUS_TICKS = 120;
 const LEDS_PER_TICK = 8;
 const PREVIEW_DEBOUNCE_MS = 250;
@@ -2262,13 +2263,13 @@ function rebuildLedQueue() {
                     const fxBase = slot < 8
                         ? FX_PRIMARY_COLORS[clampInt(slot, 0, FX_PRIMARY_COLORS.length - 1, 0)]
                         : FX_PERF_COLOR;
-                    color = eff.enabled ? fxBase : Black;
+                    color = eff.enabled ? fxBase : FX_OFF_COLOR;
                 } else {
                     const eff = globalFxEffect(slot);
                     const fxBase = slot < 8
                         ? FX_PRIMARY_COLORS[clampInt(slot, 0, FX_PRIMARY_COLORS.length - 1, 0)]
                         : FX_PERF_COLOR;
-                    color = eff.enabled ? fxBase : Black;
+                    color = eff.enabled ? fxBase : FX_OFF_COLOR;
                 }
                 s.ledQueue.push([note, color]);
             }
@@ -3914,28 +3915,6 @@ function toggleActiveLooperClipPlayback() {
     updateUtilityButtonLeds();
 }
 
-function activateSelectedLooperOverdub() {
-    const l = currentLooper();
-    if (!l || !Array.isArray(l.events) || !l.events.length || l.loopLengthMs <= 0) {
-        showStatus('Looper clip empty', 80);
-        return false;
-    }
-    if (l.state === 'overdub') {
-        showStatus('Looper: overdub', 70);
-        return true;
-    }
-    if (l.state === 'stopped') {
-        l.state = 'playing';
-        l.playStartMs = looperNowMs();
-        l.loopPosMs = 0;
-        l.lastLoopPosMs = 0;
-    } else if (l.state === 'recording') {
-        looperFinishRecordingStartPlayback();
-    }
-    if (l.state === 'playing') looperToggleOverdub();
-    return true;
-}
-
 function looperErase() {
     ensureValidActiveLooper();
     releaseVoicesByOwner('looper:', looperNowMs());
@@ -4634,6 +4613,7 @@ function handlePadNote(note, velocity) {
                 triggerNote,
                 velocity: clampInt(velocity, 1, 127, 100),
                 loopHoldMode: true,
+                loopToggleCandidate: true,
                 pressedAtMs: Date.now()
             };
             s.editScope = 'P';
@@ -4682,6 +4662,7 @@ function handlePadNoteRelease(note) {
     if (!stored) return true;
     const addr = stored;
     if (slotAt(addr.sec, addr.bank, addr.slot).loop > 0) {
+        if (!stored.loopToggleCandidate) return true;
         const heldMs = Math.max(0, Date.now() - clampInt(stored.pressedAtMs, 0, 0x7fffffff, Date.now()));
         if (stored.loopHoldMode && heldMs >= LOOP_TOGGLE_HOLD_THRESHOLD_MS) {
             triggerPadOff(addr.sec, addr.bank, addr.slot, false);
@@ -5057,12 +5038,6 @@ function onMidiMessageInternal(data) {
         }
 
         if ((cc === MoveRec || cc === MoveRecord) && val > 0) {
-            if (s.view === 'main' && !s.shiftHeld && activateSelectedLooperOverdub()) {
-                updateUtilityButtonLeds();
-                markLedsDirty();
-                s.dirty = true;
-                return;
-            }
             handleRecordButtonPress();
             return;
         }
