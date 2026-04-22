@@ -129,10 +129,10 @@ const FX_EFFECT_NAMES = [
     'Chorus',
     'Reverb',
     'Delay Sync',
-    'Beat Repeat',
+    'Beat Repeat+',
     'Vinyl Stop',
     'Stutter Gate',
-    'Scatter',
+    'Kaos Pad',
     'Resonator',
     'Phaser',
     'LoFi Wash',
@@ -147,10 +147,10 @@ const FX_PARAM_LABELS = [
     ['Depth', 'Rate', 'Mix', 'Spread', 'Color', 'Pre', 'Post', 'Out'],
     ['Mix', 'Feedback', 'Size', 'Damp', 'Pre', 'Tone', 'Stereo', 'Out'],
     ['Division', 'Feedback', 'Mix', 'HiCut', 'LoCut', 'Duck', 'Stereo', 'Out'],
-    ['Grid', 'Hold', 'Mix', 'Gate', 'Tone', 'LoCut', 'HiCut', 'Out'],
+    ['Grid', 'Hold', 'Mix', 'Gate', 'Tone', 'LoCut', 'HiCut', 'Swing'],
     ['Slow', 'Texture', 'Mix', 'Noise', 'Wow', 'Flutter', 'Tone', 'Out'],
     ['Rate', 'Duty', 'Mix', 'Swing', 'Shape', 'Tone', 'Stereo', 'Out'],
-    ['Amount', 'Jitter', 'Mix', 'Gate', 'LoCut', 'HiCut', 'Stereo', 'Out'],
+    ['X', 'Y', 'Mix', 'Gate', 'LoCut', 'HiCut', 'Freeze', 'Out'],
     ['Tone', 'Res', 'Mix', 'Drive', 'Keytrk', 'Spread', 'Lo', 'Hi'],
     ['Rate', 'Depth', 'Mix', 'Feedback', 'Color', 'Stereo', 'Phase', 'Out'],
     ['Noise', 'Blur', 'Mix', 'Age', 'Tone', 'LoCut', 'HiCut', 'Out'],
@@ -452,6 +452,7 @@ const s = {
     fxScreenScope: 'bank', /* bank|global */
     selectedBankFxEffect: 0,
     selectedGlobalFxEffect: 0,
+    fxBankTargetSection: 0,
     globalFxEffects: createFxEffectArray(),
 
     selectedSlice: 0,
@@ -3103,7 +3104,7 @@ function drawBrowser() {
 function drawFxScreen() {
     clear_screen();
     print(0, 0, shortText('FX Screen  L=Bank R=Global', 21), 1);
-    const sec = s.focusedSection;
+    const sec = clampInt(s.fxBankTargetSection, 0, GRID_COUNT - 1, 0);
     const bank = focusedBankIndex(sec);
     print(0, 10, shortText('Bank S' + (sec + 1) + 'B' + (bank + 1) + ' Sel:' + (s.selectedBankFxEffect + 1), 21), 1);
     print(0, 20, shortText('Global Sel:' + (s.selectedGlobalFxEffect + 1), 21), 1);
@@ -3136,6 +3137,7 @@ function serializeSession() {
         sessionName: s.sessionName,
         selectedSlice: s.selectedSlice,
         focusedSection: s.focusedSection,
+        fxBankTargetSection: clampInt(s.fxBankTargetSection, 0, GRID_COUNT - 1, 0),
         knobPage: s.knobPage,
         editScope: s.editScope,
         browserAssignMode: s.browserAssignMode,
@@ -3348,6 +3350,7 @@ function applyParsedSession(parsed, silent, label) {
     s.selectedSlice = clampInt(parsed.selectedSlice, 0, TOTAL_PADS - 1, 0);
     if (LEFT_GRID_ONLY) s.selectedSlice = slotFromSlice(s.selectedSlice);
     s.focusedSection = LEFT_GRID_ONLY ? 0 : sectionFromSlice(s.selectedSlice);
+    s.fxBankTargetSection = clampInt(parsed.fxBankTargetSection, 0, GRID_COUNT - 1, s.focusedSection);
     s.knobPage = parsed.knobPage === 'B' ? 'B' : 'A';
     s.editScope = parsed.editScope === 'G' ? 'G' : 'P';
     s.fxScreenScope = parsed.fxScreenScope === 'global' ? 'global' : 'bank';
@@ -3817,6 +3820,7 @@ function handleStepBankNote(note, velocity) {
     s.stepCopySource = null;
     if (t.sec === 0) setSectionBank(0, t.bank);
     else setSectionBank(1, t.bank);
+    if (s.view === 'fx') s.fxBankTargetSection = t.sec;
     return true;
 }
 
@@ -4527,7 +4531,7 @@ function toggleFxPadByNote(note) {
     const slot = slotFromSlice(slice);
     const selectOnly = !!s.shiftHeld;
     if (sec === 0) {
-        const bankSec = s.focusedSection;
+        const bankSec = clampInt(s.fxBankTargetSection, 0, GRID_COUNT - 1, 0);
         const bank = focusedBankIndex(bankSec);
         const eff = bankFxEffect(bankSec, bank, slot);
         s.selectedBankFxEffect = slot;
@@ -4577,7 +4581,7 @@ function adjustSelectedFxParam(knobIdx, delta) {
         sendFxParamToDsp('global', 0, 0, effectIdx, paramIdx);
         showStatus('Global ' + FX_EFFECT_NAMES[effectIdx] + ' ' + fxParamName(effectIdx, paramIdx) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
     } else {
-        const sec = s.focusedSection;
+        const sec = clampInt(s.fxBankTargetSection, 0, GRID_COUNT - 1, 0);
         const bank = focusedBankIndex(sec);
         const effectIdx = clampInt(s.selectedBankFxEffect, 0, FX_EFFECT_COUNT - 1, 0);
         const eff = bankFxEffect(sec, bank, effectIdx);
@@ -5187,6 +5191,7 @@ function onMidiMessageInternal(data) {
             if (s.view === 'main') {
                 s.view = 'fx';
                 s.fxScreenScope = 'bank';
+                s.fxBankTargetSection = s.focusedSection;
                 showStatus('FX screen', 70);
                 updateUtilityButtonLeds();
                 markLedsDirty();
