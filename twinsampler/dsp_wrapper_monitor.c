@@ -110,6 +110,23 @@ static int16_t float_to_i16_dithered(float x, uint32_t *state) {
     return (int16_t)s;
 }
 
+/* Old TwinSampler UI exposes only these 8 DSP FX indices. */
+static int is_active_ui_fx_index(int fx_idx) {
+    switch (fx_idx) {
+        case 12: /* Resonator */
+        case 4:  /* Flanger */
+        case 5:  /* Chorus */
+        case 6:  /* Reverb */
+        case 0:  /* Comp Color */
+        case 1:  /* Saturation */
+        case 2:  /* Isolator */
+        case 3:  /* Bit Crush */
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 static int parse_bool(const char *val) {
     if (!val) return 0;
     if (!strcmp(val, "1")) return 1;
@@ -677,7 +694,13 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
     const float loop_ms = (inst->pfx_loop_length_ms > 50.0f) ? inst->pfx_loop_length_ms : 500.0f;
     float mix_params[16][8];
     int on[16];
+    int any_on = 0;
     for (int fx = 0; fx < 16; fx++) {
+        if (!is_active_ui_fx_index(fx)) {
+            on[fx] = 0;
+            for (int p = 0; p < 8; p++) mix_params[fx][p] = 0.5f;
+            continue;
+        }
         const int g_on = inst->pfx_global_toggle[fx] ? 1 : 0;
         int b_on = 0;
         for (int sec = 0; sec < 2; sec++) {
@@ -686,6 +709,7 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             if (inst->pfx_bank_toggle[sec][bank][fx]) b_on = 1;
         }
         on[fx] = g_on || b_on;
+        if (on[fx]) any_on = 1;
         for (int p = 0; p < 8; p++) {
             float sum = 0.0f; int w = 0;
             if (g_on) { sum += inst->pfx_global_param[fx][p]; w++; }
@@ -699,6 +723,9 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             mix_params[fx][p] = (w > 0) ? (sum / (float)w) : 0.5f;
         }
     }
+
+    /* True bypass: do not touch samples when all FX are off. */
+    if (!any_on) return;
 
     for (int i = 0; i < frames; i++) {
         int dpos = inst->pfx_delay_pos;
