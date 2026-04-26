@@ -135,42 +135,42 @@ const DSP_FX_COUNT = 16;
 const FX_EFFECT_COUNT = 8;
 const FX_PARAM_COUNT = 8;
 const FX_EFFECT_NAMES = [
-    'Resonator',
-    'Flanger',
-    'Chorus',
-    'Reverb',
-    'Comp Color',
-    'Saturation',
+    '303 Vinyl Sim',
     'Isolator',
-    'Bit Crush 2'
+    'Filter + Drive',
+    'Tape Echo',
+    'Lo-Fi Crusher',
+    'Hard Comp',
+    'Chorus/Flanger',
+    'Resonator'
 ];
-const FX_DSP_INDEX = [12, 4, 5, 6, 0, 1, 2, 3];
-const LEGACY_FX_DSP_INDEX = FX_DSP_INDEX.slice();
+const FX_DSP_INDEX = [0, 1, 2, 3, 4, 5, 6, 7];
+const LEGACY_FX_DSP_INDEX = [12, 4, 5, 6, 0, 1, 2, 3];
 const FX_PAD_SLOT_MAP = [-1, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7];
 const FX_PARAM_LABELS = [
-    ['Preset', 'Res', 'Mix', 'Drive', 'Keytrk', 'Spread', 'Lo', 'Hi'],
-    ['Preset', 'Rate', 'Feedback', 'Mix', 'Phase', 'Color', 'Stereo', 'Out'],
-    ['Preset', 'Rate', 'Mix', 'Spread', 'Color', 'Pre', 'Post', 'Out'],
-    ['Preset', 'Feedback', 'Size', 'Damp', 'Pre', 'Tone', 'Stereo', 'Out'],
-    ['Preset', 'Amount', 'Thresh', 'Ratio', 'Attack', 'Release', 'Bits', 'Rate'],
-    ['Preset', 'Mix', 'Tone', 'Output', 'Bias', 'Dynamics', 'LoCut', 'HiCut'],
-    ['Preset', 'Cutoff', 'Res', 'Drive', 'Mix', 'Env', 'Lo', 'Hi'],
-    ['Preset', 'Rate', 'Jitter', 'Mix', 'Pre', 'Post', 'Tilt', 'Out']
+    ['Preset', 'Age', 'Wow', 'Flutter', 'Dust', 'Wear', 'Tone', 'Out'],
+    ['Preset', 'Low', 'Mid', 'High', 'Xover', 'Res', 'Drive', 'Out'],
+    ['Preset', 'Cutoff', 'Res', 'Drive', 'Type', 'Env', 'Mix', 'Out'],
+    ['Preset', 'Time', 'Feedback', 'Mix', 'Flutter', 'Tone', 'Duck', 'Out'],
+    ['Preset', 'Bits', 'Rate', 'Mix', 'Noise', 'Jitter', 'Tone', 'Out'],
+    ['Preset', 'Amount', 'Thresh', 'Ratio', 'Attack', 'Release', 'Drive', 'Out'],
+    ['Preset', 'Rate', 'Depth', 'Feedback', 'Mix', 'Mode', 'Stereo', 'Out'],
+    ['Preset', 'Tune', 'Res', 'Mix', 'Drive', 'Spread', 'Low', 'High']
 ];
 const FX_PRESET_COUNT = 5;
 const FX_PRESET_VALUES = [0.00, 0.25, 0.50, 0.75, 1.00];
 const FX_PRESET_STRENGTH = [0.40, 0.65, 0.85, 1.00, 1.18];
 const FX_DEFAULT_PARAMS = [
-    [0.75, 0.72, 0.70, 0.58, 0.58, 0.55, 0.42, 0.68], /* Resonator */
-    [0.50, 0.45, 0.68, 0.62, 0.42, 0.58, 0.60, 0.88], /* Flanger */
-    [0.50, 0.38, 0.66, 0.62, 0.54, 0.58, 0.82, 0.88], /* Chorus */
-    [0.50, 0.66, 0.72, 0.52, 0.48, 0.56, 0.62, 0.86], /* Reverb */
-    [0.50, 0.80, 0.60, 0.65, 0.36, 0.46, 0.72, 0.78], /* Comp Color */
-    [0.75, 0.72, 0.55, 0.82, 0.52, 0.58, 0.24, 0.74], /* Saturation */
-    [0.50, 0.62, 0.74, 0.48, 0.72, 0.55, 0.50, 0.50], /* Isolator */
-    [0.75, 0.55, 0.45, 0.66, 0.62, 0.82, 0.52, 0.86]  /* Bit Crush 2 */
+    [0.50, 0.42, 0.28, 0.22, 0.18, 0.35, 0.56, 0.86], /* 303 Vinyl Sim */
+    [0.50, 0.58, 0.58, 0.56, 0.50, 0.30, 0.20, 0.86], /* Isolator */
+    [0.50, 0.62, 0.46, 0.42, 0.18, 0.16, 0.70, 0.82], /* Filter + Drive */
+    [0.50, 0.45, 0.52, 0.42, 0.30, 0.58, 0.34, 0.82], /* Tape Echo */
+    [0.50, 0.38, 0.28, 0.58, 0.14, 0.20, 0.52, 0.82], /* Lo-Fi Crusher */
+    [0.50, 0.72, 0.54, 0.72, 0.20, 0.45, 0.34, 0.82], /* Hard Comp */
+    [0.50, 0.34, 0.56, 0.38, 0.55, 0.56, 0.68, 0.84], /* Chorus/Flanger */
+    [0.50, 0.46, 0.70, 0.58, 0.34, 0.54, 0.46, 0.58]  /* Resonator */
 ];
-const FX_EFFECT_COLORS = [45, 47, 48, 53, 120, 9, 21, 15];
+const FX_EFFECT_COLORS = [9, 21, 47, 15, 53, 120, 48, 45];
 function fxPresetValueFromIndex(idx) {
     const i = clampInt(idx, 0, FX_PRESET_COUNT - 1, 0);
     return FX_PRESET_VALUES[i];
@@ -327,6 +327,7 @@ function createFxEffectArray(scope = 'bank') {
 function fxSourceEntry(srcEffects, effectIdx, scope = 'bank') {
     const idx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
     if (!Array.isArray(srcEffects) || !srcEffects.length) return null;
+    if (srcEffects.length === FX_EFFECT_COUNT) return srcEffects[idx] || null;
     if (srcEffects.length >= DSP_FX_COUNT) {
         const mapped = fxDspIndex(idx, scope);
         return srcEffects[mapped] || null;
@@ -1417,6 +1418,7 @@ function setSelectedSlice(sliceIdx, blocking = false, skipPlaybackCompat = false
 
     const send = (blocking || !REALTIME_NONBLOCKING) ? spb : sp;
     send('selected_slice', String(dspSlice), 100);
+    send('selected_slot', String(slotFromSlice(slice)), 100);
     send('keyboard_section', String(s.focusedSection), 100);
 
     ensureEditCursor(!!blocking);
@@ -1757,14 +1759,17 @@ function setSourcePath(sec, bank, path, sendToDsp) {
         spb('section_source_play_mode', sec + ':' + bank + ':' + sourcePlayModeForSection(sec), 300);
         spb('section_chop_count', sec + ':' + bank + ':' + SOURCE_CHOP_COUNT, 300);
         spb('section_slice_page', sec + ':' + bank + ':0', 300);
-        spb('section_source_path', sec + ':' + bank + ':' + sb.sourcePath, 500);
-        spb('section_randomize_transients', sec + ':' + bank + ':1', 500);
+        spb('section_source_path', sec + ':' + bank + ':' + sb.sourcePath, 1500);
+        spb('section_randomize_transients', sec + ':' + bank + ':1', 800);
         syncBankSliceState(sec, bank);
         if (loadingNewSource) {
             for (let i = 0; i < GRID_SIZE; i++) {
                 sendSlotStateToDsp(sec, bank, i, true, true);
             }
             scheduleTrimReplayAll();
+        }
+        if (sec === s.focusedSection && bank === focusedBankIndex(sec)) {
+            setSelectedSlice(s.selectedSlice, true, false);
         }
     }
     markSessionChanged();
@@ -1790,6 +1795,8 @@ function setSlotPath(sec, bank, slot, path, sendToDsp) {
         invalidatePlaybackCompat();
         syncFocusedSlotPlaybackCompat(true);
         scheduleFocusedSlotRefresh();
+    } else {
+        setSelectedSlice(s.selectedSlice, true, true);
     }
     markLedsDirty();
     markSessionChanged();
@@ -2011,6 +2018,7 @@ function sendDirectSlotParamCompat(sec, bank, slot, keyDirect, value, timeoutMs,
     const sliceKey = sliceCompatKeyFor(keyDirect);
     if (sliceKey) {
         send('selected_slice', String(dspSlice), tm);
+        send('selected_slot', String(slot), tm);
         send(sliceKey, v, tm);
     }
 }
@@ -2212,8 +2220,9 @@ function sendSlotStateToDsp(sec, bank, slot, blocking, forceDirect) {
     const sl = slotAt(sec, bank, slot);
     const send = blocking ? spb : sp;
     const timeout = blocking ? 250 : 0;
+    const sampleTimeout = blocking ? 1500 : timeout;
 
-    if (sl.path) send('slot_sample_path', sec + ':' + bank + ':' + slot + ':' + sl.path, timeout);
+    if (sl.path) send('slot_sample_path', sec + ':' + bank + ':' + slot + ':' + sl.path, sampleTimeout);
     else send('clear_slot_sample', sec + ':' + bank + ':' + slot, timeout);
 
     send('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)), timeout);
@@ -2982,6 +2991,7 @@ function lockRecordingTarget(target) {
        Force both deterministically before record_start. */
     spb('section_bank', t.sec + ':' + t.bank, 180);
     spb('selected_slice', String(slice), 120);
+    spb('selected_slot', String(t.slot), 120);
     spb('keyboard_section', String(t.sec), 120);
     spb('edit_section', String(t.sec), 120);
     spb('edit_bank', String(t.bank), 120);

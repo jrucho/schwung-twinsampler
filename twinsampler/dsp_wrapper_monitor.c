@@ -31,10 +31,12 @@ typedef struct wrapper_instance {
     int recording_cached;
     int16_t *input_backup;
     int16_t *input_mix;
+    int16_t *last_output;
     int scratch_samples;
     int capture_source_last; /* 0=none 1=input 2=bus 3=mix */
     float input_peak_last;
     float bus_peak_last;
+    float internal_peak_last;
     int debug_capture_logs;
     int input_active_prev;
     int bus_active_prev;
@@ -52,6 +54,11 @@ typedef struct wrapper_instance {
     float pfx_hp_prev_in_r;
     float pfx_hp_prev_out_l;
     float pfx_hp_prev_out_r;
+    float pfx_fx_lp_z[16][2];
+    float pfx_fx_bp_z[16][2];
+    float pfx_fx_hp_prev_in[16][2];
+    float pfx_fx_hp_prev_out[16][2];
+    float pfx_fx_env[16][2];
     float pfx_loop_length_ms;
     float pfx_comp_env;
     float pfx_duck_env;
@@ -89,6 +96,29 @@ static float clampf(float v, float lo, float hi) {
     return v;
 }
 
+static float pfx_softclip(float x) {
+    return tanhf(x);
+}
+
+static float pfx_xfade(float dry, float wet, float mix) {
+    const float m = clampf(mix, 0.0f, 1.0f);
+    return dry * (1.0f - m) + wet * m;
+}
+
+static float pfx_onepole_lp(float *z, float x, float coeff) {
+    const float c = clampf(coeff, 0.0005f, 0.98f);
+    *z += c * (x - *z);
+    return *z;
+}
+
+static float pfx_onepole_hp(float *prev_in, float *prev_out, float x, float coeff) {
+    const float c = clampf(coeff, 0.0005f, 0.98f);
+    const float y = c * (*prev_out + x - *prev_in);
+    *prev_in = x;
+    *prev_out = y;
+    return y;
+}
+
 static uint32_t xorshift32(uint32_t *state) {
     uint32_t x = (*state) ? (*state) : 0x12345678u;
     x ^= x << 13;
@@ -96,6 +126,10 @@ static uint32_t xorshift32(uint32_t *state) {
     x ^= x << 5;
     *state = x;
     return x;
+}
+
+static float pfx_noise_from_u32(uint32_t *state, float amount) {
+    return ((float)(xorshift32(state) & 0xffffu) / 32767.5f - 1.0f) * amount;
 }
 
 static float tpdf_dither_1lsb(uint32_t *state) {
@@ -111,21 +145,9 @@ static int16_t float_to_i16_dithered(float x, uint32_t *state) {
     return (int16_t)s;
 }
 
-/* Old TwinSampler UI exposes only these 8 DSP FX indices. */
+/* TwinSampler UI exposes these 8 performance FX slots directly. */
 static int is_active_ui_fx_index(int fx_idx) {
-    switch (fx_idx) {
-        case 12: /* Resonator */
-        case 4:  /* Flanger */
-        case 5:  /* Chorus */
-        case 6:  /* Reverb */
-        case 0:  /* Comp Color */
-        case 1:  /* Saturation */
-        case 2:  /* Isolator */
-        case 3:  /* Bit Crush */
-            return 1;
-        default:
-            return 0;
-    }
+    return fx_idx >= 0 && fx_idx < 8;
 }
 
 static int parse_bool(const char *val) {
@@ -353,6 +375,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->capture_source_last = 0;
     inst->input_peak_last = 0.0f;
     inst->bus_peak_last = 0.0f;
+    inst->internal_peak_last = 0.0f;
     inst->debug_capture_logs = 0;
     inst->input_active_prev = 0;
     inst->bus_active_prev = 0;
@@ -393,9 +416,11 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->scratch_samples = ((g_host && g_host->frames_per_block > 0) ? g_host->frames_per_block : 128) * 2;
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
-    if (!inst->input_backup || !inst->input_mix || !inst->pfx_delay_buf) {
+    inst->last_output = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
+    if (!inst->input_backup || !inst->input_mix || !inst->last_output || !inst->pfx_delay_buf) {
         free(inst->input_backup);
         free(inst->input_mix);
+        free(inst->last_output);
         free(inst->pfx_delay_buf);
         free(inst);
         log_msg("TwinSampler monitor wrapper: scratch alloc failed");
@@ -404,6 +429,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     if (!load_core_for_instance(inst, module_dir)) {
         free(inst->input_backup);
         free(inst->input_mix);
+        free(inst->last_output);
         free(inst->pfx_delay_buf);
         free(inst);
         return NULL;
@@ -418,6 +444,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
         inst->core_api_v2 = NULL;
         free(inst->input_backup);
         free(inst->input_mix);
+        free(inst->last_output);
         free(inst->pfx_delay_buf);
         free(inst);
         log_msg("TwinSampler monitor wrapper: core create_instance failed");
@@ -442,6 +469,7 @@ static void wrapper_destroy_instance(void *instance) {
     inst->core_api_v2 = NULL;
     free(inst->input_backup);
     free(inst->input_mix);
+    free(inst->last_output);
     free(inst->pfx_delay_buf);
     free(inst);
     log_msg("TwinSampler monitor wrapper: instance destroyed");
@@ -637,6 +665,9 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     if (!strcmp(key, "capture_bus_peak")) {
         return snprintf(buf, (size_t)buf_len, "%.4f", (double)inst->bus_peak_last);
     }
+    if (!strcmp(key, "capture_internal_peak")) {
+        return snprintf(buf, (size_t)buf_len, "%.4f", (double)inst->internal_peak_last);
+    }
     if (!strcmp(key, "performance_fx_active_banks")) {
         return snprintf(buf, (size_t)buf_len, "%d:%d", inst->current_bank[0], inst->current_bank[1]);
     }
@@ -737,20 +768,15 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
 
     for (int i = 0; i < frames; i++) {
         int dpos = inst->pfx_delay_pos;
-        if (on[4]) {
-            const float rate = 0.05f + mix_params[4][1] * 2.0f;
-            inst->pfx_phase_flanger += (2.0f * (float)M_PI * rate) / (float)sr;
-            if (inst->pfx_phase_flanger > 2.0f * (float)M_PI) inst->pfx_phase_flanger -= 2.0f * (float)M_PI;
-        }
-        if (on[5]) {
-            const float rate = 0.05f + mix_params[5][1] * 0.9f;
-            inst->pfx_phase_chorus += (2.0f * (float)M_PI * rate) / (float)sr;
-            if (inst->pfx_phase_chorus > 2.0f * (float)M_PI) inst->pfx_phase_chorus -= 2.0f * (float)M_PI;
-        }
-        if (on[9]) {
-            const float wow_rate = 0.05f + mix_params[9][4] * 1.2f;
+        if (on[0]) {
+            const float wow_rate = 0.08f + mix_params[0][2] * 1.2f;
             inst->pfx_phase_vinyl += (2.0f * (float)M_PI * wow_rate) / (float)sr;
             if (inst->pfx_phase_vinyl > 2.0f * (float)M_PI) inst->pfx_phase_vinyl -= 2.0f * (float)M_PI;
+        }
+        if (on[6]) {
+            const float rate = 0.03f + mix_params[6][1] * 2.2f;
+            inst->pfx_phase_chorus += (2.0f * (float)M_PI * rate) / (float)sr;
+            if (inst->pfx_phase_chorus > 2.0f * (float)M_PI) inst->pfx_phase_chorus -= 2.0f * (float)M_PI;
         }
 
         for (int ch = 0; ch < 2; ch++) {
@@ -761,103 +787,112 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             float lp_z = (ch == 0) ? inst->pfx_lp_z_l : inst->pfx_lp_z_r;
             inst->pfx_delay_buf[dpos * 2 + ch] = x; /* keep delay memory warm for instant toggles */
 
-            /* FX1: Compression + color + sampler controls */
+            /* FX1: 303 Vinyl Sim */
             if (on[0]) {
-                const float style = mix_params[0][0];
-                const float amt = 0.2f + mix_params[0][1] * 0.8f;
-                const float thresh = 0.05f + (1.0f - mix_params[0][2]) * 0.6f;
-                const float ratio = 1.0f + mix_params[0][3] * 10.0f;
-                const float attack = 0.0005f + mix_params[0][4] * 0.02f;
-                const float release = 0.0005f + mix_params[0][5] * 0.05f;
-                const float bit_depth = 4.0f + mix_params[0][6] * 20.0f;
-                const int sr_hold = 1 + (int)((1.0f - mix_params[0][7]) * 64.0f);
-                const float a = fabsf(x);
-                if (a > inst->pfx_comp_env) inst->pfx_comp_env += (a - inst->pfx_comp_env) * attack;
-                else inst->pfx_comp_env += (a - inst->pfx_comp_env) * release;
-                float gr = 1.0f;
-                if (inst->pfx_comp_env > thresh) {
-                    const float over = inst->pfx_comp_env - thresh;
-                    gr = 1.0f / (1.0f + over * ratio * 4.0f * amt);
+                const float age = mix_params[0][1];
+                const float wow = mix_params[0][2];
+                const float flutter = mix_params[0][3];
+                const float dust = mix_params[0][4];
+                const float wear = mix_params[0][5];
+                const float tone = mix_params[0][6];
+                const float out = 0.55f + mix_params[0][7] * 1.25f;
+                const float stereo_phase = (ch == 0) ? 0.0f : 0.37f;
+                const float slow = sinf(inst->pfx_phase_vinyl + stereo_phase) * wow * 5.0f;
+                const float fast = sinf((float)(dpos + ch * 41) * (0.013f + flutter * 0.09f)) * flutter * 2.2f;
+                int d = (int)(((2.0f + age * 8.0f + slow + fast) / 1000.0f) * (float)sr);
+                if (d < 1) d = 1;
+                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
+                const int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
+                float wet = inst->pfx_delay_buf[ridx * 2 + ch];
+                wet = wet * (0.62f + age * 0.22f) + x * (0.38f - age * 0.12f);
+                wet = pfx_softclip(wet * (1.0f + wear * 2.2f)) * (0.92f - wear * 0.12f);
+                wet += pfx_noise_from_u32(&inst->dither_state, dust * 0.018f);
+                if ((xorshift32(&inst->dither_state) & 0x3ffu) < (uint32_t)(dust * dust * 18.0f)) {
+                    wet += pfx_noise_from_u32(&inst->dither_state, 0.10f + dust * 0.10f);
                 }
-                x *= gr;
-                if (style < 0.25f) {
-                    /* clean */
-                } else if (style < 0.5f) {
-                    x = tanhf(x * 1.4f) * 0.9f; /* dusty */
-                } else if (style < 0.75f) {
-                    x = tanhf(x * 2.2f); /* punchy */
-                } else {
-                    x = tanhf(x * 1.7f) + 0.08f * sinf(2.0f * (float)M_PI * x); /* vintage */
-                }
-                if (inst->pfx_sr_hold_count_comp <= 0) {
-                    if (ch == 0) inst->pfx_sr_hold_l_comp = x;
-                    else inst->pfx_sr_hold_r_comp = x;
-                    inst->pfx_sr_hold_count_comp = sr_hold;
-                }
-                x = (ch == 0) ? inst->pfx_sr_hold_l_comp : inst->pfx_sr_hold_r_comp;
-                if (ch == 1) inst->pfx_sr_hold_count_comp--;
-                const float levels = powf(2.0f, bit_depth);
-                x = floorf(x * levels + 0.5f) / levels;
+                wet = pfx_onepole_lp(&inst->pfx_fx_lp_z[0][ch], wet, 0.035f + tone * 0.52f);
+                wet = pfx_onepole_hp(&inst->pfx_fx_hp_prev_in[0][ch], &inst->pfx_fx_hp_prev_out[0][ch], wet, 0.985f);
+                x = pfx_xfade(x, wet, 0.35f + age * 0.45f) * out;
             }
-            /* FX2 saturation */
+            /* FX2: Isolator */
             if (on[1]) {
-                const float drive = 1.0f + mix_params[1][0] * 12.0f;
-                const float mix = mix_params[1][1];
-                const float tone = (mix_params[1][2] - 0.5f) * 1.2f;
-                const float output = 0.3f + mix_params[1][3] * 1.7f;
-                const float bias = (mix_params[1][4] - 0.5f) * 0.8f;
-                const float dynamics = 0.2f + mix_params[1][5] * 1.8f;
-                const float lo_cut = mix_params[1][6];
-                const float hi_cut = mix_params[1][7];
-                const float dyn_drive = drive * (1.0f + (1.0f - clampf(fabsf(x), 0.0f, 1.0f)) * dynamics * 0.5f);
-                float sat = tanhf((x + bias) * dyn_drive) - bias * 0.35f;
-                const float hp_c = 0.01f + lo_cut * 0.45f;
-                const float hp_sat = hp_c * (prev_out + sat - prev_in);
-                prev_in = sat;
-                prev_out = hp_sat;
-                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
-                lp_z += lp_c * (hp_sat - lp_z);
-                sat = lp_z + tone * (lp_z - x) * 0.35f;
-                x = (x * (1.0f - mix) + sat * mix) * output;
+                const float low_gain = mix_params[1][1] * 2.2f;
+                const float mid_gain = mix_params[1][2] * 2.2f;
+                const float high_gain = mix_params[1][3] * 2.2f;
+                const float xover = mix_params[1][4];
+                const float res = mix_params[1][5];
+                const float drive = 1.0f + mix_params[1][6] * 3.0f;
+                const float out = 0.55f + mix_params[1][7] * 1.25f;
+                const float low_c = 0.012f + xover * xover * 0.16f;
+                const float high_c = 0.08f + sqrtf(xover) * 0.72f;
+                const float low = pfx_onepole_lp(&inst->pfx_fx_lp_z[1][ch], x, low_c);
+                const float high = pfx_onepole_hp(&inst->pfx_fx_hp_prev_in[1][ch], &inst->pfx_fx_hp_prev_out[1][ch], x, high_c);
+                const float mid = x - low - high;
+                float wet = low * low_gain + mid * mid_gain + high * high_gain;
+                wet = pfx_softclip(wet * drive * (1.0f + res * 0.35f));
+                x = wet * out;
             }
-            /* FX3 filter isolator */
+            /* FX3: Filter + Drive */
             if (on[2]) {
-                const float mode = mix_params[2][0];
-                const float drive = 1.0f + mix_params[2][3] * 8.0f;
-                const float mix = mix_params[2][4];
-                const float env_amt = mix_params[2][5] * 0.2f;
-                const float lo = mix_params[2][6];
-                const float hi = mix_params[2][7];
-                const float in = tanhf(x * drive);
-                const float cut = clampf(0.01f + mix_params[2][1] * 0.92f + fabsf(in) * env_amt, 0.01f, 0.98f);
-                const float res = 0.6f + mix_params[2][2] * 1.4f;
-                lp_z += cut * (in - lp_z);
-                const float hp = cut * (prev_out + in - prev_in);
-                prev_in = in;
-                prev_out = hp;
-                const float band = (lp_z - hp) * res;
-                float y = hp;
-                if (mode < 0.33f) y = lp_z;
-                else if (mode < 0.66f) y = band;
-                y += (lo - 0.5f) * lp_z * 0.35f;
-                y += (hi - 0.5f) * hp * 0.35f;
-                x = in * (1.0f - mix) + y * mix;
+                const float cutoff = mix_params[2][1];
+                const float res = mix_params[2][2];
+                const float drive = mix_params[2][3];
+                const float type = mix_params[2][4];
+                const float env_amt = mix_params[2][5];
+                const float mix = mix_params[2][6];
+                const float out = 0.50f + mix_params[2][7] * 1.35f;
+                const float in = pfx_softclip(x * (1.0f + drive * 8.0f));
+                float f = 0.008f + cutoff * cutoff * 0.34f + fabsf(in) * env_amt * 0.12f;
+                f = clampf(f, 0.005f, 0.36f);
+                const float damp = 0.35f + (1.0f - res) * 1.25f;
+                float *flp = &inst->pfx_fx_lp_z[2][ch];
+                float *fbp = &inst->pfx_fx_bp_z[2][ch];
+                const float hp = in - *flp - damp * *fbp;
+                *fbp += f * hp;
+                *flp += f * *fbp;
+                float wet = *flp;
+                if (type > 0.66f) wet = hp;
+                else if (type > 0.33f) wet = *fbp * (1.0f + res * 1.4f);
+                wet = pfx_softclip(wet * (1.0f + drive * 1.8f));
+                x = pfx_xfade(x, wet, mix) * out;
             }
-            /* FX4 bit crush */
+            /* FX4: Tape Echo / Delay */
             if (on[3]) {
-                const float bits = 2.0f + mix_params[3][0] * 14.0f;
-                const int hold_base = 1 + (int)((1.0f - mix_params[3][1]) * 96.0f);
-                const float jitter = mix_params[3][2];
-                const float mix = mix_params[3][3];
-                const float pre = 0.5f + mix_params[3][4] * 1.5f;
-                const float post = 0.5f + mix_params[3][5] * 1.5f;
-                const float tilt = (mix_params[3][6] - 0.5f) * 0.8f;
-                const float out = 0.3f + mix_params[3][7] * 1.7f;
-                const int jitter_delta = (int)(sinf((float)(i * 13 + ch * 97) * (0.017f + jitter * 0.11f)) * ((float)hold_base * jitter * 0.6f));
-                int hold = hold_base + jitter_delta;
+                const float time = mix_params[3][1];
+                const float feedback = mix_params[3][2] * 0.84f;
+                const float mix = mix_params[3][3] * 0.78f;
+                const float flutter = mix_params[3][4];
+                const float tone = mix_params[3][5];
+                const float duck_amt = mix_params[3][6];
+                const float out = 0.50f + mix_params[3][7] * 1.35f;
+                const float max_ms = clampf(loop_ms * 1.25f, 180.0f, 1400.0f);
+                float delay_ms = 55.0f + time * time * (max_ms - 55.0f);
+                delay_ms += sinf((float)(dpos + ch * 67) * (0.004f + flutter * 0.035f)) * flutter * 8.0f;
+                int d = (int)((delay_ms / 1000.0f) * (float)sr);
+                if (d < 1) d = 1;
+                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
+                const int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
+                float wet = inst->pfx_delay_buf[ridx * 2 + ch];
+                wet = pfx_onepole_lp(&inst->pfx_fx_lp_z[3][ch], wet, 0.025f + tone * 0.45f);
+                wet = pfx_onepole_hp(&inst->pfx_fx_hp_prev_in[3][ch], &inst->pfx_fx_hp_prev_out[3][ch], wet, 0.992f);
+                const float duck = 1.0f - duck_amt * clampf(fabsf(x), 0.0f, 1.0f) * 0.82f;
+                const float fb_in = pfx_softclip((x + wet * feedback) * (1.0f + flutter * 0.8f));
+                inst->pfx_delay_buf[dpos * 2 + ch] = fb_in;
+                x = pfx_xfade(x, wet * duck, mix) * out;
+            }
+            /* FX5: Lo-Fi / Bit Crusher */
+            if (on[4]) {
+                const float bits = 16.0f - mix_params[4][1] * 12.0f;
+                int hold = 1 + (int)(mix_params[4][2] * mix_params[4][2] * 96.0f);
+                const float mix = mix_params[4][3];
+                const float noise = mix_params[4][4];
+                const float jitter = mix_params[4][5];
+                const float tone = mix_params[4][6];
+                const float out = 0.50f + mix_params[4][7] * 1.35f;
+                hold += (int)(sinf((float)(dpos + ch * 103) * (0.021f + jitter * 0.11f)) * (float)hold * jitter * 0.55f);
                 if (hold < 1) hold = 1;
-                if (hold > 256) hold = 256;
-                const float pre_x = tanhf(x * pre);
+                if (hold > 192) hold = 192;
+                float pre_x = pfx_softclip(x * (1.0f + noise * 0.8f));
                 if (inst->pfx_sr_hold_count_crush <= 0) {
                     if (ch == 0) inst->pfx_sr_hold_l_crush = pre_x;
                     else inst->pfx_sr_hold_r_crush = pre_x;
@@ -867,104 +902,77 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
                 if (ch == 1) inst->pfx_sr_hold_count_crush--;
                 const float levels = powf(2.0f, bits);
                 crushed = floorf(crushed * levels + 0.5f) / levels;
-                crushed = crushed + tilt * (crushed - x) * 0.5f;
-                x = (x * (1.0f - mix) + crushed * mix) * post * out;
+                crushed += pfx_noise_from_u32(&inst->dither_state, noise * 0.025f);
+                crushed = pfx_onepole_lp(&inst->pfx_fx_lp_z[4][ch], crushed, 0.025f + tone * 0.58f);
+                x = pfx_xfade(x, crushed, mix) * out;
             }
-            /* FX5 flanger */
-            if (on[4]) {
-                const float depth_ms = 0.2f + mix_params[4][0] * 6.0f;
-                const float fb = (mix_params[4][2] - 0.5f) * 0.8f;
-                const float mix = mix_params[4][3];
-                const float phase_ofs = mix_params[4][4] * 2.0f * (float)M_PI;
-                const float color = mix_params[4][5];
-                const float stereo = (mix_params[4][6] - 0.5f) * 1.5f;
-                const float out = 0.35f + mix_params[4][7] * 1.65f;
-                const float mod_phase = inst->pfx_phase_flanger + phase_ofs + ((ch == 0) ? -stereo : stereo);
-                const float mod_ms = depth_ms * (0.5f + 0.5f * sinf(mod_phase));
-                int d = (int)((mod_ms / 1000.0f) * (float)sr);
-                if (d < 1) d = 1;
-                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
-                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                const float colored = delayed * (1.0f - color * 0.5f) + tanhf(delayed * (1.0f + color * 3.0f)) * color * 0.5f;
-                const float y = x + colored * fb;
-                x = (x * (1.0f - mix) + colored * mix) * out;
-                inst->pfx_delay_buf[dpos * 2 + ch] = y;
-            }
-            /* FX6 chorus */
+            /* FX6: Hard Compressor */
             if (on[5]) {
-                const float depth_ms = 2.0f + mix_params[5][0] * 18.0f;
-                const float mix = mix_params[5][2] * 0.8f;
-                const float spread = (mix_params[5][3] - 0.5f) * 1.4f;
-                const float color = mix_params[5][4];
-                const float pre = 0.5f + mix_params[5][5] * 1.5f;
-                const float post = 0.5f + mix_params[5][6] * 1.5f;
-                const float out = 0.35f + mix_params[5][7] * 1.65f;
-                const float in = tanhf(x * pre);
-                const float mod_phase = inst->pfx_phase_chorus + ((ch == 0) ? -spread : spread);
-                int d = (int)(((depth_ms * (0.5f + 0.5f * sinf(mod_phase))) / 1000.0f) * (float)sr);
-                if (d < 1) d = 1;
-                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
-                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                const float colored = delayed * (1.0f - color * 0.4f) + tanhf(delayed * (1.0f + color * 2.5f)) * color * 0.4f;
-                inst->pfx_delay_buf[dpos * 2 + ch] = in;
-                x = (in * (1.0f - mix) + colored * mix) * post * out;
+                const float amount = mix_params[5][1];
+                const float thresh = 0.86f - mix_params[5][2] * 0.78f;
+                const float ratio = 2.0f + mix_params[5][3] * 18.0f;
+                const float attack_ms = 0.25f + mix_params[5][4] * 25.0f;
+                const float release_ms = 25.0f + mix_params[5][5] * 260.0f;
+                const float drive = 1.0f + mix_params[5][6] * 3.5f;
+                const float out = 0.45f + mix_params[5][7] * 1.45f;
+                float *env = &inst->pfx_fx_env[5][ch];
+                const float a = fabsf(x);
+                const float coeff = 1.0f - expf(-1.0f / (((a > *env) ? attack_ms : release_ms) * 0.001f * (float)sr));
+                *env += (a - *env) * coeff;
+                float gain = 1.0f;
+                if (*env > thresh) {
+                    const float compressed = thresh + (*env - thresh) / ratio;
+                    gain = compressed / (*env + 1.0e-6f);
+                }
+                const float makeup = 1.0f + amount * (1.1f + ratio * 0.035f);
+                float wet = pfx_softclip(x * gain * makeup * drive) / pfx_softclip(drive);
+                x = pfx_xfade(x, wet, 0.25f + amount * 0.75f) * out;
             }
-            /* FX7 reverb */
+            /* FX7: Chorus / Flanger */
             if (on[6]) {
-                const float mix = mix_params[6][0] * 0.8f;
-                const float fb = 0.15f + mix_params[6][1] * 0.8f;
-                const float damp = mix_params[6][3];
-                const float pre = 0.5f + mix_params[6][4] * 1.5f;
-                const float tone = (mix_params[6][5] - 0.5f) * 0.9f;
-                const float stereo = (mix_params[6][6] - 0.5f) * 0.5f;
-                const float out = 0.35f + mix_params[6][7] * 1.65f;
-                int d = (int)((0.08f + mix_params[6][2] * 0.65f) * (float)sr);
-                d += (int)(stereo * 0.02f * (float)sr);
+                const float depth = mix_params[6][2];
+                const float feedback = (mix_params[6][3] - 0.5f) * 0.72f;
+                const float mix = mix_params[6][4] * 0.85f;
+                const float mode = mix_params[6][5];
+                const float stereo = (mix_params[6][6] - 0.5f) * 1.6f;
+                const float out = 0.50f + mix_params[6][7] * 1.35f;
+                const int chorus_mode = mode >= 0.5f;
+                const float base_ms = chorus_mode ? 7.0f : 0.35f;
+                const float depth_ms = chorus_mode ? (2.0f + depth * 22.0f) : (0.15f + depth * 6.0f);
+                const float mod_phase = inst->pfx_phase_chorus + ((ch == 0) ? -stereo : stereo);
+                int d = (int)(((base_ms + depth_ms * (0.5f + 0.5f * sinf(mod_phase))) / 1000.0f) * (float)sr);
                 if (d < 1) d = 1;
                 if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
-                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float in = tanhf(x * pre);
+                const int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
                 const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                const float damp_c = 0.02f + (1.0f - damp) * 0.35f;
-                lp_z += damp_c * (delayed - lp_z);
-                const float wet = lp_z + tone * (lp_z - in) * 0.35f;
-                inst->pfx_delay_buf[dpos * 2 + ch] = in + wet * fb;
-                x = (in * (1.0f - mix) + wet * mix) * out;
+                const float wet = chorus_mode ? pfx_onepole_lp(&inst->pfx_fx_lp_z[6][ch], delayed, 0.45f) : delayed;
+                const float fb = chorus_mode ? feedback * 0.25f : feedback;
+                inst->pfx_delay_buf[dpos * 2 + ch] = x + wet * fb;
+                x = pfx_xfade(x, wet, mix) * out;
             }
-            /* FX8 delay synced to loop length */
+            /* FX8: Resonator */
             if (on[7]) {
-                const float syncSel = mix_params[7][0];
-                const float feedback = mix_params[7][1] * 0.92f;
-                const float mix = mix_params[7][2] * 0.85f;
-                const float hi_cut = mix_params[7][3];
-                const float lo_cut = mix_params[7][4];
-                const float duck_amt = mix_params[7][5];
-                const float stereo = (mix_params[7][6] - 0.5f) * 0.5f;
-                const float out = 0.35f + mix_params[7][7] * 1.65f;
-                float div = 0.25f;
-                if (syncSel < 0.2f) div = 0.125f;
-                else if (syncSel < 0.4f) div = 0.25f;
-                else if (syncSel < 0.6f) div = 0.3333f;
-                else if (syncSel < 0.8f) div = 0.5f;
-                else div = 1.0f;
-                int d = (int)(((loop_ms * div) / 1000.0f) * (float)sr);
-                d += (int)(stereo * 0.03f * (float)sr);
-                if (d < 1) d = 1;
-                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
-                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                const float delayed = inst->pfx_delay_buf[ridx * 2 + ch];
-                const float hp_c = 0.01f + lo_cut * 0.45f;
-                const float hp = hp_c * (prev_out + delayed - prev_in);
-                prev_in = delayed;
-                prev_out = hp;
-                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
-                lp_z += lp_c * (hp - lp_z);
-                const float duck = 1.0f - duck_amt * clampf(fabsf(x), 0.0f, 1.0f) * 0.85f;
-                const float wet = lp_z * duck;
-                inst->pfx_delay_buf[dpos * 2 + ch] = x + wet * feedback;
-                x = (x * (1.0f - mix) + wet * mix) * out;
+                const float tune = mix_params[7][1];
+                const float res = mix_params[7][2];
+                const float mix = mix_params[7][3];
+                const float drive = mix_params[7][4];
+                const float spread = (mix_params[7][5] - 0.5f) * 0.20f;
+                const float low = mix_params[7][6] - 0.5f;
+                const float high = mix_params[7][7] - 0.5f;
+                float freq = 75.0f * powf(32.0f, clampf(tune + ((ch == 0) ? -spread : spread), 0.0f, 1.0f));
+                if (freq > (float)sr * 0.40f) freq = (float)sr * 0.40f;
+                const float f = clampf(2.0f * sinf((float)M_PI * freq / (float)sr), 0.002f, 0.72f);
+                const float q = 0.22f + (1.0f - res) * 1.55f;
+                const float in = pfx_softclip(x * (1.0f + drive * 6.0f));
+                float *flp = &inst->pfx_fx_lp_z[7][ch];
+                float *fbp = &inst->pfx_fx_bp_z[7][ch];
+                const float hp = in - *flp - q * *fbp;
+                *fbp += f * hp;
+                *flp += f * *fbp;
+                float wet = *fbp * (1.2f + res * 4.0f);
+                wet += low * *flp * 0.8f + high * hp * 0.6f;
+                wet = pfx_softclip(wet);
+                x = pfx_xfade(in, wet, mix);
             }
 
             /* FX9 beat repeat */
@@ -1193,14 +1201,23 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
         g_host->audio_out_offset > 0 &&
         core_is_recording(inst)) {
         audio_in_rw = (int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
-        const int16_t *schwung_bus = (const int16_t *)(g_host->mapped_memory + g_host->audio_out_offset);
-        if (audio_in_rw && schwung_bus) {
+        const int16_t *host_bus = (const int16_t *)(g_host->mapped_memory + g_host->audio_out_offset);
+        const int16_t *internal_bus = inst->last_output;
+        if (audio_in_rw && host_bus) {
             const float input_peak = peak_abs_i16(audio_in_rw, total);
-            const float bus_peak = peak_abs_i16(schwung_bus, total);
+            const float host_bus_peak = peak_abs_i16(host_bus, total);
+            const float internal_peak = (internal_bus && total <= inst->scratch_samples)
+                ? peak_abs_i16(internal_bus, total)
+                : 0.0f;
             const int input_active = (input_peak > 0.012f) || (inst->input_active_prev && input_peak > 0.006f);
+            const int internal_active = (internal_peak > 0.012f);
+            const int use_internal_bus = inst->record_intent_internal && internal_active;
+            const int16_t *capture_bus = use_internal_bus ? internal_bus : host_bus;
+            const float bus_peak = use_internal_bus ? internal_peak : host_bus_peak;
             const int bus_active = (bus_peak > 0.012f) || (inst->bus_active_prev && bus_peak > 0.006f);
             inst->input_peak_last = input_peak;
             inst->bus_peak_last = bus_peak;
+            inst->internal_peak_last = internal_peak;
             inst->input_active_prev = input_active;
             inst->bus_active_prev = bus_active;
 
@@ -1212,7 +1229,8 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             } else if (inst->record_capture_mode == 1) {
                 desired_capture_source = 1;
             } else {
-                if (input_active && bus_active) desired_capture_source = 3;
+                if (inst->record_intent_internal && internal_active) desired_capture_source = 2;
+                else if (input_active && bus_active) desired_capture_source = 3;
                 else if (input_active) desired_capture_source = 1;
                 else if (bus_active) desired_capture_source = 2;
                 else desired_capture_source = 1;
@@ -1234,7 +1252,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             if (capture_source == 2) {
                 const float rec_gain = inst->record_mix_gain;
                 for (int i = 0; i < total; i++) {
-                    const int32_t bus_only = (int32_t)((float)schwung_bus[i] * rec_gain);
+                    const int32_t bus_only = (int32_t)((float)capture_bus[i] * rec_gain);
                     inst->input_mix[i] = (int16_t)clip_i32_to_i16(bus_only);
                 }
                 memcpy(audio_in_rw, inst->input_mix, (size_t)total * sizeof(int16_t));
@@ -1244,7 +1262,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
                 const float dual_mix_gain = 0.70710678f;
                 for (int i = 0; i < total; i++) {
                     const float in_f = (float)audio_in_rw[i] * dual_mix_gain;
-                    const float bus_f = ((float)schwung_bus[i] * rec_gain) * dual_mix_gain;
+                    const float bus_f = ((float)capture_bus[i] * rec_gain) * dual_mix_gain;
                     const float rec_mix = in_f + bus_f;
                     inst->input_mix[i] = float_to_i16_dithered(rec_mix, &inst->dither_state);
                 }
@@ -1290,6 +1308,10 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
     }
 
     apply_perf_fx_to_output(inst, out_interleaved_lr, frames);
+
+    if (inst->last_output && total <= inst->scratch_samples) {
+        memcpy(inst->last_output, out_interleaved_lr, (size_t)total * sizeof(int16_t));
+    }
 }
 
 static plugin_api_v2_t g_wrapper_api_v2 = {
