@@ -1,12 +1,15 @@
 #define _GNU_SOURCE
 
 #include <dlfcn.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "dsp_core_blob.h"
@@ -15,6 +18,8 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+#define TS_SLOT_PATH_MAX 4096
 
 typedef struct wrapper_instance {
     void *core_handle;
@@ -38,11 +43,19 @@ typedef struct wrapper_instance {
     float bus_peak_last;
     float internal_peak_last;
     int debug_capture_logs;
+    int debug_sample_loads;
+    int sample_fallback_count;
+    char last_sample_diag[512];
     int input_active_prev;
     int bus_active_prev;
     int auto_hold_blocks;
     uint32_t dither_state;
     int current_bank[2];
+    int edit_section;
+    int edit_bank;
+    int edit_slot;
+    int slot_reverse[2][8][16];
+    char slot_sample_path[2][8][16][TS_SLOT_PATH_MAX];
     int pfx_active_section;
     int pfx_bank_toggle[2][8][16];
     float pfx_bank_param[2][8][16][8];
@@ -71,6 +84,11 @@ typedef struct wrapper_instance {
     float pfx_sr_hold_r_comp;
     float pfx_sr_hold_l_crush;
     float pfx_sr_hold_r_crush;
+    float *pfx_djfx_buf;
+    int pfx_djfx_buf_len;
+    int pfx_djfx_active;
+    int pfx_djfx_len;
+    float pfx_djfx_pos;
     float *pfx_delay_buf;
     int pfx_delay_len;
     int pfx_delay_pos;
@@ -91,6 +109,12 @@ static int clip_i32_to_i16(int32_t x) {
 }
 
 static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static int clampi(int v, int lo, int hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
@@ -145,9 +169,9 @@ static int16_t float_to_i16_dithered(float x, uint32_t *state) {
     return (int16_t)s;
 }
 
-/* TwinSampler UI exposes these 8 performance FX slots directly. */
+/* TwinSampler UI exposes the SP-404-style performance FX slots directly. */
 static int is_active_ui_fx_index(int fx_idx) {
-    return fx_idx >= 0 && fx_idx < 8;
+    return fx_idx >= 0 && fx_idx < 9;
 }
 
 static int parse_bool(const char *val) {
@@ -207,11 +231,710 @@ static int parse_colon_ints(const char *val, int *out, int max_items) {
     return count;
 }
 
+static int parse_prefixed_int_payload(const char *val, int *out, int count, const char **payload) {
+    if (!val || !out || count <= 0 || !payload) return 0;
+    const char *p = val;
+    for (int i = 0; i < count; i++) {
+        char *end = NULL;
+        long v = strtol(p, &end, 10);
+        if (end == p || *end != ':') return 0;
+        out[i] = (int)v;
+        p = end + 1;
+    }
+    if (!*p) return 0;
+    *payload = p;
+    return 1;
+}
+
 static float parse_colon_float_tail(const char *val, float fallback) {
     if (!val) return fallback;
     const char *last = strrchr(val, ':');
     const char *num = last ? (last + 1) : val;
     return parse_float_clamped(num, -16.0f, 16.0f, fallback);
+}
+
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+#define TS_SAMPLE_CACHE_DIR "/tmp/twinsampler_sample_cache"
+#define TS_SAMPLE_PARAM_BUF (PATH_MAX + 128)
+#define WAV_FORMAT_PCM 1
+#define WAV_FORMAT_IEEE_FLOAT 3
+#define WAV_FORMAT_EXTENSIBLE 0xfffe
+
+typedef struct wav_info {
+    int valid;
+    int unsupported;
+    int has_extra_chunks;
+    uint16_t original_format;
+    uint16_t audio_format;
+    uint16_t channels;
+    uint32_t sample_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    long data_offset;
+    uint32_t data_size;
+    char reason[160];
+} wav_info_t;
+
+static void set_sample_diag(wrapper_instance_t *inst, const char *fmt, ...) {
+    if (!inst || !fmt) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(inst->last_sample_diag, sizeof(inst->last_sample_diag), fmt, ap);
+    va_end(ap);
+}
+
+static void log_sample_diag(wrapper_instance_t *inst, const char *fmt, ...) {
+    if (!inst || !fmt) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(inst->last_sample_diag, sizeof(inst->last_sample_diag), fmt, ap);
+    va_end(ap);
+    log_msg(inst->last_sample_diag);
+}
+
+static int ascii_eq_ci(char a, char b) {
+    if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+    if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+    return a == b;
+}
+
+static int path_has_wav_ext(const char *path) {
+    if (!path) return 0;
+    const size_t len = strlen(path);
+    if (len < 4) return 0;
+    const char *ext = path + len - 4;
+    return ascii_eq_ci(ext[0], '.') && ascii_eq_ci(ext[1], 'w') &&
+        ascii_eq_ci(ext[2], 'a') && ascii_eq_ci(ext[3], 'v');
+}
+
+static const char *base_name_c(const char *path) {
+    if (!path) return "";
+    const char *slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+static uint16_t rd_u16_le(const uint8_t *p) {
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t rd_u32_le(const uint8_t *p) {
+    return (uint32_t)p[0] |
+        ((uint32_t)p[1] << 8) |
+        ((uint32_t)p[2] << 16) |
+        ((uint32_t)p[3] << 24);
+}
+
+static void wr_u16_le(uint8_t *p, uint16_t v) {
+    p[0] = (uint8_t)(v & 0xffu);
+    p[1] = (uint8_t)((v >> 8) & 0xffu);
+}
+
+static void wr_u32_le(uint8_t *p, uint32_t v) {
+    p[0] = (uint8_t)(v & 0xffu);
+    p[1] = (uint8_t)((v >> 8) & 0xffu);
+    p[2] = (uint8_t)((v >> 16) & 0xffu);
+    p[3] = (uint8_t)((v >> 24) & 0xffu);
+}
+
+static int read_exact(FILE *f, void *buf, size_t len) {
+    return f && buf && fread(buf, 1, len, f) == len;
+}
+
+static void wav_reason_append(wav_info_t *info, const char *reason) {
+    if (!info || !reason || !reason[0]) return;
+    const size_t cur = strlen(info->reason);
+    if (cur >= sizeof(info->reason) - 1) return;
+    snprintf(info->reason + cur, sizeof(info->reason) - cur, "%s%s", cur ? ", " : "", reason);
+}
+
+static int inspect_wav_file(const char *path, wav_info_t *info) {
+    if (!info) return 0;
+    memset(info, 0, sizeof(*info));
+    if (!path || !path[0]) {
+        snprintf(info->reason, sizeof(info->reason), "empty path");
+        return 0;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        snprintf(info->reason, sizeof(info->reason), "open failed errno=%d", errno);
+        return 0;
+    }
+
+    uint8_t hdr[12];
+    if (!read_exact(f, hdr, sizeof(hdr)) ||
+        memcmp(hdr, "RIFF", 4) ||
+        memcmp(hdr + 8, "WAVE", 4)) {
+        snprintf(info->reason, sizeof(info->reason), "not RIFF/WAVE");
+        fclose(f);
+        return 0;
+    }
+
+    int saw_fmt = 0;
+    int saw_data = 0;
+    int first_chunk = 1;
+    long expected_simple_data_offset = 44;
+    while (1) {
+        uint8_t chdr[8];
+        const long chunk_header_pos = ftell(f);
+        if (chunk_header_pos < 0) break;
+        if (!read_exact(f, chdr, sizeof(chdr))) break;
+        const uint32_t size = rd_u32_le(chdr + 4);
+        const long payload_pos = ftell(f);
+        if (payload_pos < 0) break;
+
+        if (memcmp(chdr, "fmt ", 4) == 0) {
+            uint8_t fmt[64];
+            const size_t to_read = size < sizeof(fmt) ? (size_t)size : sizeof(fmt);
+            if (size < 16 || !read_exact(f, fmt, to_read)) {
+                snprintf(info->reason, sizeof(info->reason), "bad fmt chunk");
+                fclose(f);
+                return 0;
+            }
+            info->original_format = rd_u16_le(fmt);
+            info->audio_format = info->original_format;
+            info->channels = rd_u16_le(fmt + 2);
+            info->sample_rate = rd_u32_le(fmt + 4);
+            info->block_align = rd_u16_le(fmt + 12);
+            info->bits_per_sample = rd_u16_le(fmt + 14);
+            if (info->original_format == WAV_FORMAT_EXTENSIBLE && size >= 40 && to_read >= 40) {
+                info->audio_format = rd_u16_le(fmt + 24);
+                wav_reason_append(info, "extensible fmt");
+            }
+            if (size != 16) wav_reason_append(info, "extended fmt chunk");
+            if (!first_chunk || chunk_header_pos != 12) info->has_extra_chunks = 1;
+            saw_fmt = 1;
+        } else if (memcmp(chdr, "data", 4) == 0) {
+            info->data_offset = payload_pos;
+            info->data_size = size;
+            if (!saw_fmt) info->has_extra_chunks = 1;
+            if (payload_pos != expected_simple_data_offset) info->has_extra_chunks = 1;
+            saw_data = 1;
+        } else {
+            info->has_extra_chunks = 1;
+        }
+
+        if (fseek(f, payload_pos + (long)size + (long)(size & 1u), SEEK_SET) != 0) break;
+        first_chunk = 0;
+        if (saw_fmt && saw_data) break;
+    }
+    fclose(f);
+
+    if (!saw_fmt) {
+        snprintf(info->reason, sizeof(info->reason), "missing fmt chunk");
+        return 0;
+    }
+    if (!saw_data || info->data_size == 0) {
+        snprintf(info->reason, sizeof(info->reason), "missing/empty data chunk");
+        return 0;
+    }
+    if (info->channels < 1 || info->channels > 16) {
+        snprintf(info->reason, sizeof(info->reason), "unsupported channel count %u", (unsigned)info->channels);
+        info->unsupported = 1;
+        return 0;
+    }
+    if (!info->block_align) {
+        snprintf(info->reason, sizeof(info->reason), "invalid block align");
+        info->unsupported = 1;
+        return 0;
+    }
+    if (info->sample_rate == 0) {
+        snprintf(info->reason, sizeof(info->reason), "invalid sample rate");
+        info->unsupported = 1;
+        return 0;
+    }
+    if (info->audio_format == WAV_FORMAT_PCM) {
+        if (info->bits_per_sample != 8 && info->bits_per_sample != 16 &&
+            info->bits_per_sample != 24 && info->bits_per_sample != 32) {
+            snprintf(info->reason, sizeof(info->reason), "unsupported PCM bits %u", (unsigned)info->bits_per_sample);
+            info->unsupported = 1;
+            return 0;
+        }
+    } else if (info->audio_format == WAV_FORMAT_IEEE_FLOAT) {
+        if (info->bits_per_sample != 32) {
+            snprintf(info->reason, sizeof(info->reason), "unsupported float bits %u", (unsigned)info->bits_per_sample);
+            info->unsupported = 1;
+            return 0;
+        }
+    } else {
+        snprintf(info->reason, sizeof(info->reason), "unsupported WAV format %u", (unsigned)info->original_format);
+        info->unsupported = 1;
+        return 0;
+    }
+
+    if (info->audio_format != WAV_FORMAT_PCM) wav_reason_append(info, "float samples");
+    if (info->bits_per_sample != 16) wav_reason_append(info, "non-16-bit samples");
+    if (info->channels > 2) wav_reason_append(info, "multichannel");
+    if (info->has_extra_chunks) wav_reason_append(info, "metadata/noncanonical chunks");
+    if (!info->reason[0]) snprintf(info->reason, sizeof(info->reason), "simple PCM16");
+    info->valid = 1;
+    return 1;
+}
+
+static uint32_t core_playback_sample_rate(void) {
+    const int sr = (g_host && g_host->sample_rate > 1000) ? g_host->sample_rate : MOVE_SAMPLE_RATE;
+    return (uint32_t)((sr > 1000) ? sr : MOVE_SAMPLE_RATE);
+}
+
+static int wav_is_simple_core_format(const wav_info_t *info, uint32_t target_sample_rate) {
+    return info && info->valid &&
+        info->original_format == WAV_FORMAT_PCM &&
+        info->audio_format == WAV_FORMAT_PCM &&
+        info->channels >= 1 && info->channels <= 2 &&
+        info->bits_per_sample == 16 &&
+        info->sample_rate == target_sample_rate &&
+        !info->has_extra_chunks &&
+        info->data_offset == 44;
+}
+
+static uint64_t fnv1a64_bytes(uint64_t h, const void *data, size_t len) {
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint64_t)p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+static uint64_t sample_cache_hash(const char *path, const wav_info_t *info, uint32_t target_sample_rate, int reverse) {
+    uint64_t h = 1469598103934665603ull;
+    if (path) h = fnv1a64_bytes(h, path, strlen(path));
+    struct stat st;
+    if (path && stat(path, &st) == 0) {
+        h = fnv1a64_bytes(h, &st.st_size, sizeof(st.st_size));
+        h = fnv1a64_bytes(h, &st.st_mtime, sizeof(st.st_mtime));
+    }
+    if (info) {
+        h = fnv1a64_bytes(h, &info->data_size, sizeof(info->data_size));
+        h = fnv1a64_bytes(h, &info->audio_format, sizeof(info->audio_format));
+        h = fnv1a64_bytes(h, &info->channels, sizeof(info->channels));
+        h = fnv1a64_bytes(h, &info->bits_per_sample, sizeof(info->bits_per_sample));
+    }
+    h = fnv1a64_bytes(h, &target_sample_rate, sizeof(target_sample_rate));
+    uint8_t reverse_flag = reverse ? 1u : 0u;
+    h = fnv1a64_bytes(h, &reverse_flag, sizeof(reverse_flag));
+    return h;
+}
+
+static int ensure_sample_cache_dir(void) {
+    if (mkdir(TS_SAMPLE_CACHE_DIR, 0755) == 0) return 1;
+    if (errno == EEXIST) return 1;
+    return 0;
+}
+
+static float decode_wav_sample(const uint8_t *p, const wav_info_t *info) {
+    if (!p || !info) return 0.0f;
+    if (info->audio_format == WAV_FORMAT_IEEE_FLOAT && info->bits_per_sample == 32) {
+        uint32_t u = rd_u32_le(p);
+        float f = 0.0f;
+        memcpy(&f, &u, sizeof(f));
+        return clampf(f, -1.0f, 1.0f);
+    }
+    if (info->audio_format != WAV_FORMAT_PCM) return 0.0f;
+    if (info->bits_per_sample == 8) {
+        return ((float)p[0] - 128.0f) / 128.0f;
+    }
+    if (info->bits_per_sample == 16) {
+        int16_t v = (int16_t)rd_u16_le(p);
+        return (float)v / 32768.0f;
+    }
+    if (info->bits_per_sample == 24) {
+        int32_t v = (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16));
+        if (v & 0x00800000) v |= (int32_t)0xff000000;
+        return (float)v / 8388608.0f;
+    }
+    if (info->bits_per_sample == 32) {
+        int32_t v = (int32_t)rd_u32_le(p);
+        return (float)((double)v / 2147483648.0);
+    }
+    return 0.0f;
+}
+
+static void encode_i16(uint8_t *p, float x) {
+    const float c = clampf(x, -1.0f, 1.0f);
+    int32_t v = (int32_t)lrintf(c * 32767.0f);
+    if (v > 32767) v = 32767;
+    if (v < -32768) v = -32768;
+    wr_u16_le(p, (uint16_t)(int16_t)v);
+}
+
+static int write_wav_header(FILE *out, uint16_t channels, uint32_t sample_rate, uint32_t data_bytes) {
+    uint8_t h[44];
+    memset(h, 0, sizeof(h));
+    memcpy(h, "RIFF", 4);
+    wr_u32_le(h + 4, 36u + data_bytes);
+    memcpy(h + 8, "WAVE", 4);
+    memcpy(h + 12, "fmt ", 4);
+    wr_u32_le(h + 16, 16);
+    wr_u16_le(h + 20, WAV_FORMAT_PCM);
+    wr_u16_le(h + 22, channels);
+    wr_u32_le(h + 24, sample_rate);
+    wr_u32_le(h + 28, sample_rate * (uint32_t)channels * 2u);
+    wr_u16_le(h + 32, (uint16_t)(channels * 2u));
+    wr_u16_le(h + 34, 16);
+    memcpy(h + 36, "data", 4);
+    wr_u32_le(h + 40, data_bytes);
+    return fwrite(h, 1, sizeof(h), out) == sizeof(h);
+}
+
+static int read_decoded_frame(FILE *in, const wav_info_t *info, uint8_t *frame_buf, uint16_t out_channels, float *left, float *right) {
+    if (!in || !info || !frame_buf || !left || !right) return 0;
+    if (fread(frame_buf, 1, (size_t)info->block_align, in) != (size_t)info->block_align) return 0;
+
+    const size_t bytes_per_sample = (size_t)((info->bits_per_sample + 7u) / 8u);
+    float l = 0.0f;
+    float r = 0.0f;
+    int lc = 0;
+    int rc = 0;
+    for (uint16_t ch = 0; ch < info->channels; ch++) {
+        const size_t off = (size_t)ch * bytes_per_sample;
+        if (off + bytes_per_sample > (size_t)info->block_align) continue;
+        const float x = decode_wav_sample(frame_buf + off, info);
+        if (out_channels == 1) {
+            l += x;
+            lc++;
+        } else if ((ch & 1u) == 0) {
+            l += x;
+            lc++;
+        } else {
+            r += x;
+            rc++;
+        }
+    }
+
+    if (lc > 0) l /= (float)lc;
+    if (out_channels == 1) r = l;
+    else if (rc > 0) r /= (float)rc;
+    else r = l;
+
+    *left = l;
+    *right = r;
+    return 1;
+}
+
+static int read_decoded_frame_at(FILE *in,
+                                 const wav_info_t *info,
+                                 uint8_t *frame_buf,
+                                 uint16_t out_channels,
+                                 uint64_t frame_idx,
+                                 float *left,
+                                 float *right) {
+    if (!in || !info || !frame_buf) return 0;
+    const uint64_t byte_off = (uint64_t)info->data_offset + frame_idx * (uint64_t)info->block_align;
+    if (fseeko(in, (off_t)byte_off, SEEK_SET) != 0) return 0;
+    return read_decoded_frame(in, info, frame_buf, out_channels, left, right);
+}
+
+static int convert_wav_to_core_pcm16(const char *src_path,
+                                     const wav_info_t *info,
+                                     uint32_t target_sample_rate,
+                                     int reverse,
+                                     char *out_path,
+                                     size_t out_len) {
+    if (!src_path || !info || !info->valid || !out_path || out_len == 0) return 0;
+    if (!ensure_sample_cache_dir()) return 0;
+    if (target_sample_rate < 1000) target_sample_rate = MOVE_SAMPLE_RATE;
+
+    const uint16_t out_channels = info->channels == 1 ? 1 : 2;
+    const uint64_t src_frames = info->data_size / info->block_align;
+    const uint64_t out_frames = (src_frames * (uint64_t)target_sample_rate + (uint64_t)(info->sample_rate / 2u)) /
+        (uint64_t)info->sample_rate;
+    const uint64_t out_data_bytes64 = out_frames * (uint64_t)out_channels * 2ull;
+    if (src_frames == 0 || out_frames == 0 || out_data_bytes64 > 0xffffffffull) return 0;
+    const uint32_t out_data_bytes = (uint32_t)out_data_bytes64;
+
+    const uint64_t hash = sample_cache_hash(src_path, info, target_sample_rate, reverse);
+    if (snprintf(out_path, out_len, "%s/%016llx.wav", TS_SAMPLE_CACHE_DIR, (unsigned long long)hash) >= (int)out_len) {
+        return 0;
+    }
+    struct stat st;
+    if (stat(out_path, &st) == 0 && st.st_size == (off_t)(44u + out_data_bytes)) return 1;
+
+    char tmp_path[PATH_MAX];
+    if (snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%ld", out_path, (long)getpid()) >= (int)sizeof(tmp_path)) return 0;
+
+    FILE *in = fopen(src_path, "rb");
+    if (!in) return 0;
+    FILE *out = fopen(tmp_path, "wb");
+    if (!out) {
+        fclose(in);
+        return 0;
+    }
+    if (fseek(in, info->data_offset, SEEK_SET) != 0 ||
+        !write_wav_header(out, out_channels, target_sample_rate, out_data_bytes)) {
+        fclose(in);
+        fclose(out);
+        unlink(tmp_path);
+        return 0;
+    }
+
+    uint8_t *frame_buf = (uint8_t *)malloc((size_t)info->block_align);
+    uint8_t out_frame[4];
+    if (!frame_buf) {
+        fclose(in);
+        fclose(out);
+        unlink(tmp_path);
+        return 0;
+    }
+
+    int ok = 1;
+    if (!reverse) {
+        uint64_t cur_idx = 0;
+        float cur_l = 0.0f, cur_r = 0.0f;
+        float next_l = 0.0f, next_r = 0.0f;
+        if (!read_decoded_frame(in, info, frame_buf, out_channels, &cur_l, &cur_r)) ok = 0;
+        if (ok) {
+            if (src_frames > 1) {
+                if (!read_decoded_frame(in, info, frame_buf, out_channels, &next_l, &next_r)) ok = 0;
+            } else {
+                next_l = cur_l;
+                next_r = cur_r;
+            }
+        }
+
+        for (uint64_t out_idx = 0; ok && out_idx < out_frames; out_idx++) {
+            const double src_pos = ((double)out_idx * (double)info->sample_rate) / (double)target_sample_rate;
+            uint64_t want_idx = (uint64_t)src_pos;
+            if (want_idx >= src_frames) want_idx = src_frames - 1;
+
+            while (cur_idx < want_idx) {
+                cur_l = next_l;
+                cur_r = next_r;
+                cur_idx++;
+                if (cur_idx + 1 < src_frames) {
+                    if (!read_decoded_frame(in, info, frame_buf, out_channels, &next_l, &next_r)) {
+                        ok = 0;
+                        break;
+                    }
+                } else {
+                    next_l = cur_l;
+                    next_r = cur_r;
+                }
+            }
+            if (!ok) break;
+
+            const float frac = clampf((float)(src_pos - (double)want_idx), 0.0f, 1.0f);
+            const float l = cur_l + (next_l - cur_l) * frac;
+            const float r = cur_r + (next_r - cur_r) * frac;
+            encode_i16(out_frame, l);
+            if (out_channels == 1) {
+                if (fwrite(out_frame, 1, 2, out) != 2) ok = 0;
+            } else {
+                encode_i16(out_frame + 2, r);
+                if (fwrite(out_frame, 1, 4, out) != 4) ok = 0;
+            }
+        }
+    } else {
+        for (uint64_t out_idx = 0; ok && out_idx < out_frames; out_idx++) {
+            double src_pos = (double)(src_frames - 1u) -
+                (((double)out_idx * (double)info->sample_rate) / (double)target_sample_rate);
+            if (src_pos < 0.0) src_pos = 0.0;
+            const double max_pos = (double)(src_frames - 1u);
+            if (src_pos > max_pos) src_pos = max_pos;
+
+            uint64_t idx0 = (uint64_t)src_pos;
+            if (idx0 >= src_frames) idx0 = src_frames - 1u;
+            uint64_t idx1 = idx0 + 1u;
+            if (idx1 >= src_frames) idx1 = idx0;
+
+            float l0 = 0.0f, r0 = 0.0f, l1 = 0.0f, r1 = 0.0f;
+            if (!read_decoded_frame_at(in, info, frame_buf, out_channels, idx0, &l0, &r0) ||
+                !read_decoded_frame_at(in, info, frame_buf, out_channels, idx1, &l1, &r1)) {
+                ok = 0;
+                break;
+            }
+
+            const float frac = clampf((float)(src_pos - (double)idx0), 0.0f, 1.0f);
+            const float l = l0 + (l1 - l0) * frac;
+            const float r = r0 + (r1 - r0) * frac;
+            encode_i16(out_frame, l);
+            if (out_channels == 1) {
+                if (fwrite(out_frame, 1, 2, out) != 2) ok = 0;
+            } else {
+                encode_i16(out_frame + 2, r);
+                if (fwrite(out_frame, 1, 4, out) != 4) ok = 0;
+            }
+        }
+    }
+
+    free(frame_buf);
+    if (fclose(out) != 0) ok = 0;
+    fclose(in);
+    if (!ok) {
+        unlink(tmp_path);
+        return 0;
+    }
+    if (rename(tmp_path, out_path) != 0) {
+        unlink(tmp_path);
+        return stat(out_path, &st) == 0 && st.st_size == (off_t)(44u + out_data_bytes);
+    }
+    return 1;
+}
+
+static int maybe_rewrite_sample_path(wrapper_instance_t *inst, const char *path, char *out_path, size_t out_len, int reverse) {
+    if (!path || !path[0] || !out_path || out_len == 0 || !path_has_wav_ext(path)) return 0;
+
+    wav_info_t info;
+    if (!inspect_wav_file(path, &info)) {
+        if (inst && (inst->debug_sample_loads || info.unsupported)) {
+            log_sample_diag(inst, "TwinSampler sample load: forwarding original %s (%s)",
+                base_name_c(path), info.reason[0] ? info.reason : "inspect failed");
+        } else {
+            set_sample_diag(inst, "TwinSampler sample load: %s (%s)",
+                base_name_c(path), info.reason[0] ? info.reason : "inspect failed");
+        }
+        return 0;
+    }
+    const uint32_t target_sample_rate = core_playback_sample_rate();
+    if (info.sample_rate != target_sample_rate) {
+        char sr_reason[64];
+        snprintf(sr_reason, sizeof(sr_reason), "resample %u->%u",
+            (unsigned)info.sample_rate, (unsigned)target_sample_rate);
+        wav_reason_append(&info, sr_reason);
+    }
+    if (reverse) wav_reason_append(&info, "reverse");
+
+    if (!reverse && wav_is_simple_core_format(&info, target_sample_rate)) {
+        if (inst && inst->debug_sample_loads) {
+            log_sample_diag(inst, "TwinSampler sample load: simple PCM16 %s", base_name_c(path));
+        } else {
+            set_sample_diag(inst, "TwinSampler sample load: simple PCM16 %s", base_name_c(path));
+        }
+        return 0;
+    }
+    if (!convert_wav_to_core_pcm16(path, &info, target_sample_rate, reverse, out_path, out_len)) {
+        log_sample_diag(inst, "TwinSampler sample load: conversion failed for %s (%s)",
+            base_name_c(path), info.reason[0] ? info.reason : "noncanonical WAV");
+        return 0;
+    }
+
+    if (inst) inst->sample_fallback_count++;
+    log_sample_diag(inst, "TwinSampler sample load: converted %s -> %s (%s)",
+        base_name_c(path), base_name_c(out_path), info.reason[0] ? info.reason : "noncanonical WAV");
+    return 1;
+}
+
+static int parse_slot_sample_value(const char *val, int *sec, int *bank, int *slot, const char **path) {
+    int parts[3] = {0};
+    const char *payload = NULL;
+    if (!parse_prefixed_int_payload(val, parts, 3, &payload)) return 0;
+    if (sec) *sec = clampi(parts[0], 0, 1);
+    if (bank) *bank = clampi(parts[1], 0, 7);
+    if (slot) *slot = clampi(parts[2], 0, 15);
+    if (path) *path = payload;
+    return 1;
+}
+
+static int build_slot_sample_value(wrapper_instance_t *inst,
+                                   int sec,
+                                   int bank,
+                                   int slot,
+                                   const char *path,
+                                   char *out,
+                                   size_t out_len) {
+    if (!inst || !path || !path[0] || !out || out_len == 0) return 0;
+    sec = clampi(sec, 0, 1);
+    bank = clampi(bank, 0, 7);
+    slot = clampi(slot, 0, 15);
+
+    const char *send_path = path;
+    char rewritten[PATH_MAX];
+    if (maybe_rewrite_sample_path(inst, path, rewritten, sizeof(rewritten), inst->slot_reverse[sec][bank][slot])) {
+        send_path = rewritten;
+    }
+
+    const int n = snprintf(out, out_len, "%d:%d:%d:%s", sec, bank, slot, send_path);
+    return n > 0 && n < (int)out_len;
+}
+
+static int rewrite_slot_sample_payload(wrapper_instance_t *inst, const char *val, char *out, size_t out_len) {
+    int sec = 0;
+    int bank = 0;
+    int slot = 0;
+    const char *path = NULL;
+    if (!parse_slot_sample_value(val, &sec, &bank, &slot, &path)) return 0;
+    return build_slot_sample_value(inst, sec, bank, slot, path, out, out_len);
+}
+
+static void remember_slot_sample_path(wrapper_instance_t *inst, const char *val) {
+    int sec = 0;
+    int bank = 0;
+    int slot = 0;
+    const char *path = NULL;
+    if (!inst || !parse_slot_sample_value(val, &sec, &bank, &slot, &path)) return;
+    snprintf(inst->slot_sample_path[sec][bank][slot], sizeof(inst->slot_sample_path[sec][bank][slot]), "%s", path);
+}
+
+static void clear_slot_sample_path_state(wrapper_instance_t *inst, const char *val) {
+    if (!inst) return;
+    int parts[3] = {0};
+    if (parse_colon_ints(val, parts, 3) < 3) return;
+    const int sec = clampi(parts[0], 0, 1);
+    const int bank = clampi(parts[1], 0, 7);
+    const int slot = clampi(parts[2], 0, 15);
+    inst->slot_sample_path[sec][bank][slot][0] = '\0';
+}
+
+static void reload_slot_sample_for_reverse(wrapper_instance_t *inst, int sec, int bank, int slot) {
+    if (!inst || !inst->core_api_v2 || !inst->core_api_v2->set_param || !inst->core_instance) return;
+    sec = clampi(sec, 0, 1);
+    bank = clampi(bank, 0, 7);
+    slot = clampi(slot, 0, 15);
+    const char *path = inst->slot_sample_path[sec][bank][slot];
+    if (!path[0]) return;
+
+    char value[TS_SAMPLE_PARAM_BUF];
+    if (!build_slot_sample_value(inst, sec, bank, slot, path, value, sizeof(value))) return;
+    inst->core_api_v2->set_param(inst->core_instance, "slot_sample_path", value);
+}
+
+static int rewrite_prefixed_sample_payload(wrapper_instance_t *inst,
+                                           const char *val,
+                                           int prefix_colons,
+                                           char *out,
+                                           size_t out_len) {
+    if (!val || !out || out_len == 0 || prefix_colons < 0) return 0;
+    const char *p = val;
+    int colons = 0;
+    while (*p && colons < prefix_colons) {
+        if (*p == ':') colons++;
+        p++;
+    }
+    if (colons < prefix_colons || !*p) return 0;
+
+    char rewritten[PATH_MAX];
+    if (!maybe_rewrite_sample_path(inst, p, rewritten, sizeof(rewritten), 0)) return 0;
+
+    const size_t prefix_len = (size_t)(p - val);
+    if (prefix_len + strlen(rewritten) + 1 > out_len) return 0;
+    memcpy(out, val, prefix_len);
+    strcpy(out + prefix_len, rewritten);
+    return 1;
+}
+
+static int rewrite_sample_param_value(wrapper_instance_t *inst,
+                                      const char *key,
+                                      const char *val,
+                                      char *out,
+                                      size_t out_len) {
+    if (!key || !val || !out || out_len == 0) return 0;
+    if (!strcmp(key, "slot_sample_path")) {
+        return rewrite_slot_sample_payload(inst, val, out, out_len);
+    }
+    if (!strcmp(key, "section_source_path")) {
+        return rewrite_prefixed_sample_payload(inst, val, 2, out, out_len);
+    }
+    if (!strcmp(key, "sample_path")) {
+        char rewritten[PATH_MAX];
+        if (!maybe_rewrite_sample_path(inst, val, rewritten, sizeof(rewritten), 0)) return 0;
+        if (strlen(rewritten) + 1 > out_len) return 0;
+        strcpy(out, rewritten);
+        return 1;
+    }
+    return 0;
 }
 
 static int validate_core_api(plugin_api_v2_t *api) {
@@ -377,6 +1100,9 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->bus_peak_last = 0.0f;
     inst->internal_peak_last = 0.0f;
     inst->debug_capture_logs = 0;
+    inst->debug_sample_loads = 0;
+    inst->sample_fallback_count = 0;
+    inst->last_sample_diag[0] = '\0';
     inst->input_active_prev = 0;
     inst->bus_active_prev = 0;
     inst->auto_hold_blocks = 0;
@@ -410,6 +1136,12 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->pfx_sr_hold_l_comp = inst->pfx_sr_hold_r_comp = 0.0f;
     inst->pfx_sr_hold_l_crush = inst->pfx_sr_hold_r_crush = 0.0f;
     const int sr = (g_host && g_host->sample_rate > 1000) ? g_host->sample_rate : MOVE_SAMPLE_RATE;
+    inst->pfx_djfx_buf_len = sr / 2;
+    if (inst->pfx_djfx_buf_len < 4096) inst->pfx_djfx_buf_len = 4096;
+    inst->pfx_djfx_active = 0;
+    inst->pfx_djfx_len = 1;
+    inst->pfx_djfx_pos = 0.0f;
+    inst->pfx_djfx_buf = (float *)calloc((size_t)inst->pfx_djfx_buf_len * 2u, sizeof(float));
     inst->pfx_delay_len = sr * 2;
     inst->pfx_delay_pos = 0;
     inst->pfx_delay_buf = (float *)calloc((size_t)inst->pfx_delay_len * 2u, sizeof(float));
@@ -417,10 +1149,11 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->input_backup = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->input_mix = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
     inst->last_output = (int16_t *)calloc((size_t)inst->scratch_samples, sizeof(int16_t));
-    if (!inst->input_backup || !inst->input_mix || !inst->last_output || !inst->pfx_delay_buf) {
+    if (!inst->input_backup || !inst->input_mix || !inst->last_output || !inst->pfx_delay_buf || !inst->pfx_djfx_buf) {
         free(inst->input_backup);
         free(inst->input_mix);
         free(inst->last_output);
+        free(inst->pfx_djfx_buf);
         free(inst->pfx_delay_buf);
         free(inst);
         log_msg("TwinSampler monitor wrapper: scratch alloc failed");
@@ -430,6 +1163,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
         free(inst->input_backup);
         free(inst->input_mix);
         free(inst->last_output);
+        free(inst->pfx_djfx_buf);
         free(inst->pfx_delay_buf);
         free(inst);
         return NULL;
@@ -445,6 +1179,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
         free(inst->input_backup);
         free(inst->input_mix);
         free(inst->last_output);
+        free(inst->pfx_djfx_buf);
         free(inst->pfx_delay_buf);
         free(inst);
         log_msg("TwinSampler monitor wrapper: core create_instance failed");
@@ -470,6 +1205,7 @@ static void wrapper_destroy_instance(void *instance) {
     free(inst->input_backup);
     free(inst->input_mix);
     free(inst->last_output);
+    free(inst->pfx_djfx_buf);
     free(inst->pfx_delay_buf);
     free(inst);
     log_msg("TwinSampler monitor wrapper: instance destroyed");
@@ -532,6 +1268,46 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
     if (!strcmp(key, "debug_capture_logs")) {
         inst->debug_capture_logs = parse_bool(val);
         return;
+    }
+    if (!strcmp(key, "debug_sample_loads")) {
+        inst->debug_sample_loads = parse_bool(val);
+        return;
+    }
+    if (!strcmp(key, "edit_section")) {
+        inst->edit_section = clampi(parse_int_or_default(val, inst->edit_section), 0, 1);
+    } else if (!strcmp(key, "edit_bank")) {
+        inst->edit_bank = clampi(parse_int_or_default(val, inst->edit_bank), 0, 7);
+    } else if (!strcmp(key, "edit_slot")) {
+        inst->edit_slot = clampi(parse_int_or_default(val, inst->edit_slot), 0, 15);
+    } else if (!strcmp(key, "slot_sample_path")) {
+        remember_slot_sample_path(inst, val ? val : "");
+    } else if (!strcmp(key, "clear_slot_sample")) {
+        clear_slot_sample_path_state(inst, val ? val : "");
+    } else if (!strcmp(key, "slot_reverse_at")) {
+        int sec = 0;
+        int bank = 0;
+        int slot = 0;
+        const char *payload = NULL;
+        if (parse_slot_sample_value(val ? val : "", &sec, &bank, &slot, &payload)) {
+            const int reverse = parse_int_or_default(payload, 0) ? 1 : 0;
+            if (inst->slot_reverse[sec][bank][slot] != reverse) {
+                inst->slot_reverse[sec][bank][slot] = reverse;
+                reload_slot_sample_for_reverse(inst, sec, bank, slot);
+            } else {
+                inst->slot_reverse[sec][bank][slot] = reverse;
+            }
+        }
+    } else if (!strcmp(key, "slot_reverse")) {
+        const int sec = clampi(inst->edit_section, 0, 1);
+        const int bank = clampi(inst->edit_bank, 0, 7);
+        const int slot = clampi(inst->edit_slot, 0, 15);
+        const int reverse = parse_int_or_default(val, 0) ? 1 : 0;
+        if (inst->slot_reverse[sec][bank][slot] != reverse) {
+            inst->slot_reverse[sec][bank][slot] = reverse;
+            reload_slot_sample_for_reverse(inst, sec, bank, slot);
+        } else {
+            inst->slot_reverse[sec][bank][slot] = reverse;
+        }
     }
     if (!strcmp(key, "keyboard_section")) {
         int sec = parse_int_or_default(val, inst->pfx_active_section);
@@ -630,7 +1406,12 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
     }
 
     if (inst->core_api_v2 && inst->core_api_v2->set_param && inst->core_instance) {
-        inst->core_api_v2->set_param(inst->core_instance, key, val ? val : "");
+        char rewritten_value[TS_SAMPLE_PARAM_BUF];
+        const char *forward_val = val ? val : "";
+        if (rewrite_sample_param_value(inst, key, forward_val, rewritten_value, sizeof(rewritten_value))) {
+            forward_val = rewritten_value;
+        }
+        inst->core_api_v2->set_param(inst->core_instance, key, forward_val);
     }
 }
 
@@ -673,6 +1454,15 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
     }
     if (!strcmp(key, "performance_fx_active_section")) {
         return snprintf(buf, (size_t)buf_len, "%d", inst->pfx_active_section ? 1 : 0);
+    }
+    if (!strcmp(key, "sample_load_diag")) {
+        return snprintf(buf, (size_t)buf_len, "%s", inst->last_sample_diag);
+    }
+    if (!strcmp(key, "sample_load_fallback_count")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->sample_fallback_count);
+    }
+    if (!strcmp(key, "debug_sample_loads")) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst->debug_sample_loads ? 1 : 0);
     }
 
     if (inst->core_api_v2 && inst->core_api_v2->get_param && inst->core_instance) {
@@ -762,6 +1552,8 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
             mix_params[fx][p] = (w > 0) ? (sum / (float)w) : 0.5f;
         }
     }
+
+    if (!on[8]) inst->pfx_djfx_active = 0;
 
     /* True bypass: do not touch samples when all FX are off. */
     if (!any_on) return;
@@ -975,34 +1767,59 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
                 x = pfx_xfade(in, wet, mix);
             }
 
-            /* FX9 beat repeat */
+            /* FX9: DJFX Looper */
             if (on[8]) {
-                const float grid = mix_params[8][0];
-                const float hold_mix = mix_params[8][1];
-                const float mix = mix_params[8][2];
-                const float gate = 0.05f + mix_params[8][3] * 0.95f;
-                const float tone = (mix_params[8][4] - 0.5f) * 0.8f;
-                const float lo_cut = mix_params[8][5];
-                const float hi_cut = mix_params[8][6];
+                const float length = mix_params[8][1];
+                const float speed_param = mix_params[8][2];
+                const int loop_sw = mix_params[8][3] >= 0.5f;
+                const float mix = mix_params[8][4];
+                const float gate = 0.05f + mix_params[8][5] * 0.95f;
+                const float tone = (mix_params[8][6] - 0.5f) * 0.8f;
                 const float out = 0.35f + mix_params[8][7] * 1.65f;
-                const int div = (grid < 0.25f) ? 4 : (grid < 0.5f) ? 8 : (grid < 0.75f) ? 16 : 32;
-                int d = (int)(((loop_ms / (float)div) / 1000.0f) * (float)sr);
-                if (d < 1) d = 1;
-                if (d >= inst->pfx_delay_len) d = inst->pfx_delay_len - 1;
-                int ridx = (dpos - d + inst->pfx_delay_len) % inst->pfx_delay_len;
-                float rep = inst->pfx_delay_buf[ridx * 2 + ch];
-                const float phase = fmodf((float)dpos / (float)d, 1.0f);
-                if (phase > gate) rep = 0.0f;
-                const float hp_c = 0.01f + lo_cut * 0.45f;
-                const float hp = hp_c * (prev_out + rep - prev_in);
-                prev_in = rep;
-                prev_out = hp;
-                const float lp_c = 0.01f + (1.0f - hi_cut) * 0.45f;
-                lp_z += lp_c * (hp - lp_z);
-                rep = lp_z + tone * (lp_z - x) * 0.25f;
-                inst->pfx_delay_buf[dpos * 2 + ch] = x;
-                const float wet = x * (1.0f - hold_mix) + rep * hold_mix;
-                x = (x * (1.0f - mix) + wet * mix) * out;
+                const float length_ms = 230.0f - length * 218.0f;
+                int loop_len = (int)((length_ms / 1000.0f) * (float)sr);
+                if (loop_len < 1) loop_len = 1;
+                if (loop_len > inst->pfx_djfx_buf_len) loop_len = inst->pfx_djfx_buf_len;
+
+                if (!loop_sw) {
+                    inst->pfx_djfx_active = 0;
+                } else if (!inst->pfx_djfx_active || inst->pfx_djfx_len != loop_len) {
+                    inst->pfx_djfx_active = 1;
+                    inst->pfx_djfx_len = loop_len;
+                    inst->pfx_djfx_pos = speed_param >= 0.5f ? 0.0f : (float)(loop_len - 1);
+                    for (int n = 0; n < loop_len; n++) {
+                        int src = dpos - loop_len + n;
+                        while (src < 0) src += inst->pfx_delay_len;
+                        src %= inst->pfx_delay_len;
+                        inst->pfx_djfx_buf[n * 2] = inst->pfx_delay_buf[src * 2];
+                        inst->pfx_djfx_buf[n * 2 + 1] = inst->pfx_delay_buf[src * 2 + 1];
+                    }
+                }
+
+                if (inst->pfx_djfx_active && inst->pfx_djfx_len > 0) {
+                    int pos0 = (int)floorf(inst->pfx_djfx_pos);
+                    float frac = inst->pfx_djfx_pos - (float)pos0;
+                    while (pos0 < 0) pos0 += inst->pfx_djfx_len;
+                    pos0 %= inst->pfx_djfx_len;
+                    int pos1 = (pos0 + 1) % inst->pfx_djfx_len;
+                    float wet = inst->pfx_djfx_buf[pos0 * 2 + ch] * (1.0f - frac) +
+                        inst->pfx_djfx_buf[pos1 * 2 + ch] * frac;
+                    const float phase = inst->pfx_djfx_len > 1
+                        ? (inst->pfx_djfx_pos / (float)inst->pfx_djfx_len)
+                        : 0.0f;
+                    const float wrapped_phase = phase - floorf(phase);
+                    if (wrapped_phase > gate) wet = 0.0f;
+                    wet = pfx_onepole_lp(&inst->pfx_fx_lp_z[8][ch], wet, 0.08f + (tone + 0.5f) * 0.45f);
+                    wet = pfx_onepole_hp(&inst->pfx_fx_hp_prev_in[8][ch], &inst->pfx_fx_hp_prev_out[8][ch], wet, 0.995f - (tone + 0.5f) * 0.18f);
+                    x = pfx_xfade(x, wet, mix) * out;
+                    if (ch == 1) {
+                        float speed = (speed_param - 0.5f) * 2.0f;
+                        if (fabsf(speed) < 0.015f) speed = 0.0f;
+                        inst->pfx_djfx_pos += speed;
+                        while (inst->pfx_djfx_pos < 0.0f) inst->pfx_djfx_pos += (float)inst->pfx_djfx_len;
+                        while (inst->pfx_djfx_pos >= (float)inst->pfx_djfx_len) inst->pfx_djfx_pos -= (float)inst->pfx_djfx_len;
+                    }
+                }
             }
             /* FX10 vinyl stop */
             if (on[9]) {

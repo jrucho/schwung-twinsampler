@@ -132,45 +132,48 @@ const LOOP_LABELS = ['Off', 'Loop', 'Ping'];
 const FILTER_TYPES = ['Low-pass', 'High-pass', 'Band-pass', 'Res LP'];
 const EMULATION_PRESETS = ['Clean', 'Punchy', 'Dusty', 'Vintage'];
 const DSP_FX_COUNT = 16;
-const FX_EFFECT_COUNT = 8;
+const FX_EFFECT_COUNT = 9;
 const FX_PARAM_COUNT = 8;
 const FX_EFFECT_NAMES = [
-    '303 Vinyl Sim',
+    '404 VinylSim',
     'Isolator',
     'Filter + Drive',
     'Tape Echo',
-    'Lo-Fi Crusher',
-    'Hard Comp',
-    'Chorus/Flanger',
-    'Resonator'
+    'Lo-fi',
+    'Compressor',
+    'Chorus',
+    'Resonator',
+    'DJFX Looper'
 ];
-const FX_DSP_INDEX = [0, 1, 2, 3, 4, 5, 6, 7];
+const FX_DSP_INDEX = [0, 1, 2, 3, 4, 5, 6, 7, 8];
 const LEGACY_FX_DSP_INDEX = [12, 4, 5, 6, 0, 1, 2, 3];
-const FX_PAD_SLOT_MAP = [-1, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5, 6, 7];
+const FX_PAD_SLOT_MAP = [-1, -1, -1, -1, -1, -1, -1, 8, 0, 1, 2, 3, 4, 5, 6, 7];
 const FX_PARAM_LABELS = [
-    ['Preset', 'Age', 'Wow', 'Flutter', 'Dust', 'Wear', 'Tone', 'Out'],
+    ['Preset', 'Age', 'Wow', 'Flutter', 'Noise', 'Wear', 'Tone', 'Out'],
     ['Preset', 'Low', 'Mid', 'High', 'Xover', 'Res', 'Drive', 'Out'],
     ['Preset', 'Cutoff', 'Res', 'Drive', 'Type', 'Env', 'Mix', 'Out'],
     ['Preset', 'Time', 'Feedback', 'Mix', 'Flutter', 'Tone', 'Duck', 'Out'],
-    ['Preset', 'Bits', 'Rate', 'Mix', 'Noise', 'Jitter', 'Tone', 'Out'],
+    ['Preset', 'Bits', 'SampRate', 'Mix', 'Noise', 'Jitter', 'Tone', 'Out'],
     ['Preset', 'Amount', 'Thresh', 'Ratio', 'Attack', 'Release', 'Drive', 'Out'],
     ['Preset', 'Rate', 'Depth', 'Feedback', 'Mix', 'Mode', 'Stereo', 'Out'],
-    ['Preset', 'Tune', 'Res', 'Mix', 'Drive', 'Spread', 'Low', 'High']
+    ['Preset', 'Tune', 'Res', 'Mix', 'Drive', 'Spread', 'Low', 'High'],
+    ['Preset', 'Length', 'Speed', 'LoopSw', 'Mix', 'Gate', 'Tone', 'Out']
 ];
 const FX_PRESET_COUNT = 5;
 const FX_PRESET_VALUES = [0.00, 0.25, 0.50, 0.75, 1.00];
 const FX_PRESET_STRENGTH = [0.40, 0.65, 0.85, 1.00, 1.18];
 const FX_DEFAULT_PARAMS = [
-    [0.50, 0.42, 0.28, 0.22, 0.18, 0.35, 0.56, 0.86], /* 303 Vinyl Sim */
+    [0.50, 0.52, 0.26, 0.18, 0.16, 0.32, 0.54, 0.86], /* 404 VinylSim */
     [0.50, 0.58, 0.58, 0.56, 0.50, 0.30, 0.20, 0.86], /* Isolator */
     [0.50, 0.62, 0.46, 0.42, 0.18, 0.16, 0.70, 0.82], /* Filter + Drive */
     [0.50, 0.45, 0.52, 0.42, 0.30, 0.58, 0.34, 0.82], /* Tape Echo */
-    [0.50, 0.38, 0.28, 0.58, 0.14, 0.20, 0.52, 0.82], /* Lo-Fi Crusher */
-    [0.50, 0.72, 0.54, 0.72, 0.20, 0.45, 0.34, 0.82], /* Hard Comp */
-    [0.50, 0.34, 0.56, 0.38, 0.55, 0.56, 0.68, 0.84], /* Chorus/Flanger */
-    [0.50, 0.46, 0.70, 0.58, 0.34, 0.54, 0.46, 0.58]  /* Resonator */
+    [0.50, 0.42, 0.34, 0.62, 0.16, 0.18, 0.50, 0.82], /* Lo-fi */
+    [0.50, 0.68, 0.50, 0.70, 0.16, 0.42, 0.22, 0.82], /* Compressor */
+    [0.50, 0.30, 0.54, 0.30, 0.52, 0.78, 0.62, 0.84], /* Chorus */
+    [0.50, 0.46, 0.70, 0.58, 0.34, 0.54, 0.46, 0.58], /* Resonator */
+    [0.50, 0.44, 0.75, 1.00, 0.90, 1.00, 0.50, 0.86]  /* DJFX Looper */
 ];
-const FX_EFFECT_COLORS = [9, 21, 47, 15, 53, 120, 48, 45];
+const FX_EFFECT_COLORS = [9, 21, 47, 15, 53, 120, 48, 45, 118];
 function fxPresetValueFromIndex(idx) {
     const i = clampInt(idx, 0, FX_PRESET_COUNT - 1, 0);
     return FX_PRESET_VALUES[i];
@@ -328,6 +331,7 @@ function fxSourceEntry(srcEffects, effectIdx, scope = 'bank') {
     const idx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
     if (!Array.isArray(srcEffects) || !srcEffects.length) return null;
     if (srcEffects.length === FX_EFFECT_COUNT) return srcEffects[idx] || null;
+    if (srcEffects.length === FX_EFFECT_COUNT - 1) return idx < srcEffects.length ? (srcEffects[idx] || null) : null;
     if (srcEffects.length >= DSP_FX_COUNT) {
         const mapped = fxDspIndex(idx, scope);
         return srcEffects[mapped] || null;
@@ -606,6 +610,8 @@ const s = {
     browserMode: 'samples', /* samples|sessions */
     sessionBrowserIntent: 'load', /* load|save */
     browserAssignMode: 'auto', /* auto|slot|source */
+    browserLastSamplePath: '',
+    browserFocusByPath: {},
     previewPendingPath: '',
     previewPendingAt: 0,
     previewCurrentPath: '',
@@ -649,6 +655,7 @@ const s = {
     focusedParamRefreshTicks: 0,
     trimReplayTicks: 0,
     trimReplayPendingAll: false,
+    trimPreviewSerial: 0,
 
     undoHistory: [],
     redoHistory: [],
@@ -1278,7 +1285,7 @@ function replayAllSlotParamsToDsp() {
                 sp('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)));
                 sp('slot_decay_at', fmtAt(sec, bank, slot, sl.decay.toFixed(2)));
                 sp('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)));
-                sp('slot_end_trim_at', fmtAt(sec, bank, slot, sl.endTrim.toFixed(2)));
+                sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2));
                 sp('slot_gain_at', fmtAt(sec, bank, slot, sl.gain.toFixed(3)));
                 sp('slot_pan_at', fmtAt(sec, bank, slot, sl.pan.toFixed(3)));
                 sp('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)));
@@ -1468,7 +1475,7 @@ function syncFocusedSlotPlaybackCompat(force = false) {
     sendDirectSlotParamCompat(sec, bank, slot, 'slot_attack', sl.attack.toFixed(2), 120);
     sendDirectSlotParamCompat(sec, bank, slot, 'slot_decay', sl.decay.toFixed(2), 120);
     sendDirectSlotParamCompat(sec, bank, slot, 'slot_start_trim', sl.startTrim.toFixed(2), 120);
-    sendDirectSlotParamCompat(sec, bank, slot, 'slot_end_trim', sl.endTrim.toFixed(2), 120);
+    sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2), 120, false, true);
     sendDirectSlotParamCompat(sec, bank, slot, 'slot_gain', sl.gain.toFixed(3), 120);
     sendDirectSlotParamCompat(sec, bank, slot, 'slot_pan', sl.pan.toFixed(3), 120);
     sendDirectSlotParamCompat(sec, bank, slot, 'slot_pitch', sl.pitch.toFixed(2), 120);
@@ -1653,6 +1660,29 @@ function selectSessionEntryByName(name) {
     return true;
 }
 
+function updateBrowserScrollForCursor() {
+    if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
+    else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
+    if (s.browserScroll < 0) s.browserScroll = 0;
+}
+
+function rememberSampleBrowserFocus() {
+    if (s.browserMode !== 'samples' || !s.browserPath) return;
+    const e = s.browserEntries[s.browserCursor];
+    if (!e || !e.path) return;
+    s.browserFocusByPath[s.browserPath] = e.path;
+}
+
+function selectBrowserEntryByPath(path) {
+    if (!path || !s.browserEntries.length) return false;
+    const target = String(path);
+    const idx = s.browserEntries.findIndex((e) => e && e.path === target);
+    if (idx < 0) return false;
+    s.browserCursor = idx;
+    updateBrowserScrollForCursor();
+    return true;
+}
+
 function nextAutoSessionName() {
     const entries = listSessionEntries();
     const used = new Set(entries.map((e) => sanitizeSessionName(e.name)));
@@ -1685,14 +1715,40 @@ function openSessionBrowser(intent, preferAutoName) {
     s.dirty = true;
 }
 
-function browserOpen(path, mode) {
+function browserOpen(path, mode, preferredPath = '') {
+    rememberSampleBrowserFocus();
+
+    const prevMode = s.browserMode;
+    const prevPath = s.browserPath;
+    const prevCursor = s.browserCursor;
+    const prevScroll = s.browserScroll;
+    const prevEntry = s.browserEntries[prevCursor];
+
     s.browserMode = (mode === 'sessions') ? 'sessions' : 'samples';
     s.browserPath = (s.browserMode === 'sessions') ? SESSIONS_DIR : (path || SAMPLES_DIR);
-    s.browserCursor = 0;
-    s.browserScroll = 0;
     s.browserEntries = (s.browserMode === 'sessions') ? listSessionEntries() : listSampleEntries(s.browserPath);
 
     if (s.browserMode === 'sessions' && !s.sessionBrowserIntent) s.sessionBrowserIntent = 'load';
+
+    s.browserCursor = 0;
+    s.browserScroll = 0;
+    if (s.browserEntries.length) {
+        let focusPath = String(preferredPath || '');
+        if (!focusPath && prevMode === s.browserMode && prevPath === s.browserPath && prevEntry && prevEntry.path) {
+            focusPath = prevEntry.path;
+        }
+        if (!focusPath && s.browserMode === 'samples') {
+            focusPath = s.browserFocusByPath[s.browserPath] || '';
+        }
+        if (!focusPath && s.browserMode === 'samples' && dirName(s.browserLastSamplePath) === s.browserPath) {
+            focusPath = s.browserLastSamplePath;
+        }
+        if (!selectBrowserEntryByPath(focusPath) && prevMode === s.browserMode && prevPath === s.browserPath) {
+            s.browserCursor = clamp(prevCursor, 0, s.browserEntries.length - 1);
+            s.browserScroll = clamp(prevScroll, 0, Math.max(0, s.browserEntries.length - 1));
+            updateBrowserScrollForCursor();
+        }
+    }
 
     if (s.browserMode === 'samples') previewQueueForCursor();
     else previewStop();
@@ -1712,16 +1768,16 @@ function refreshBrowserList() {
     let idx = s.browserEntries.findIndex((e) => e.name === curName);
     if (idx < 0) idx = clamp(s.browserCursor, 0, s.browserEntries.length - 1);
     s.browserCursor = idx;
-    if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
-    else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
+    updateBrowserScrollForCursor();
+    rememberSampleBrowserFocus();
 }
 
 function browserScrollBy(delta) {
     const maxIdx = Math.max(0, s.browserEntries.length - 1);
     s.browserCursor = clamp(s.browserCursor + delta, 0, maxIdx);
 
-    if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
-    else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
+    updateBrowserScrollForCursor();
+    rememberSampleBrowserFocus();
 
     previewQueueForCursor();
     s.dirty = true;
@@ -1818,7 +1874,8 @@ function browserSelect() {
     }
 
     if (e.dir) {
-        browserOpen(e.path, 'samples');
+        const focusPath = e.name === '..' ? s.browserPath : '';
+        browserOpen(e.path, 'samples', focusPath);
         return;
     }
 
@@ -1835,6 +1892,8 @@ function browserSelect() {
         showStatus('S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' loaded', 110);
     }
 
+    s.browserLastSamplePath = e.path;
+    rememberSampleBrowserFocus();
     previewStop();
     s.view = 'main';
     ensureEditCursor();
@@ -1985,7 +2044,6 @@ function sliceCompatKeyFor(slotKey) {
     if (slotKey === 'slot_attack') return 'slice_attack';
     if (slotKey === 'slot_decay') return 'slice_decay';
     if (slotKey === 'slot_start_trim') return 'slice_start_trim';
-    if (slotKey === 'slot_end_trim') return 'slice_end_trim';
     if (slotKey === 'slot_gain') return 'slice_gain';
     if (slotKey === 'slot_pan') return 'slice_pan';
     if (slotKey === 'slot_pitch') return 'slice_pitch';
@@ -2065,10 +2123,23 @@ function setSlotStartTrim(sec, bank, slot, value, forceDirect = false) {
     markSessionChanged();
 }
 
+function sendSlotEndTrimToDsp(sec, bank, slot, value, timeoutMs = 180, blocking = false, sendDirect = false) {
+    const v = (-clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0)).toFixed(2);
+    const tm = timeoutMs || 180;
+    if (blocking || !REALTIME_NONBLOCKING) spb('slot_end_trim_at', fmtAt(sec, bank, slot, v), tm);
+    else sp('slot_end_trim_at', fmtAt(sec, bank, slot, v));
+    if (sendDirect) sendDirectSlotParamCompat(sec, bank, slot, 'slot_end_trim', v, tm, !!blocking);
+}
+
 function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_end_trim_at', 'slot_end_trim', v.toFixed(2), 180, !!forceDirect);
+    /*
+     * Keep end trim on the addressed `_at` key and send it with the inverse
+     * sign. The core's trim convention uses positive offsets from the start;
+     * a negative value trims back from the sample end.
+     */
+    sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, !!forceDirect, true);
     markSessionChanged();
 }
 
@@ -2228,7 +2299,7 @@ function sendSlotStateToDsp(sec, bank, slot, blocking, forceDirect) {
     send('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)), timeout);
     send('slot_decay_at', fmtAt(sec, bank, slot, sl.decay.toFixed(2)), timeout);
     send('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)), timeout);
-    send('slot_end_trim_at', fmtAt(sec, bank, slot, sl.endTrim.toFixed(2)), timeout);
+    sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2), timeout, !!blocking);
     send('slot_gain_at', fmtAt(sec, bank, slot, sl.gain.toFixed(3)), timeout);
     send('slot_pan_at', fmtAt(sec, bank, slot, sl.pan.toFixed(3)), timeout);
     send('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)), timeout);
@@ -2244,7 +2315,7 @@ function sendSlotStateToDsp(sec, bank, slot, blocking, forceDirect) {
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_attack', sl.attack.toFixed(2), directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_decay', sl.decay.toFixed(2), directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_start_trim', sl.startTrim.toFixed(2), directTimeout, !!blocking);
-        sendDirectSlotParamCompat(sec, bank, slot, 'slot_end_trim', sl.endTrim.toFixed(2), directTimeout, !!blocking);
+        sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2), directTimeout, true, true);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_gain', sl.gain.toFixed(3), directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_pan', sl.pan.toFixed(3), directTimeout, !!blocking);
         sendDirectSlotParamCompat(sec, bank, slot, 'slot_pitch', sl.pitch.toFixed(2), directTimeout, !!blocking);
@@ -2653,7 +2724,7 @@ function adjustPadStartTrim(delta) {
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
-    setSlotStartTrim(a.sec, a.bank, a.slot, v);
+    setSlotStartTrim(a.sec, a.bank, a.slot, v, true);
     if (!silentTrimEdit) retriggerFocusedPadForStartTrim();
     showStatus('P' + (a.slot + 1) + ' Start ' + Math.round(slotAt(a.sec, a.bank, a.slot).startTrim), 80);
     s.dirty = true;
@@ -2665,7 +2736,7 @@ function adjustPadEndTrim(delta) {
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * step;
-    setSlotEndTrim(a.sec, a.bank, a.slot, v);
+    setSlotEndTrim(a.sec, a.bank, a.slot, v, true);
     if (!silentTrimEdit) retriggerFocusedPadForStartTrim();
     showStatus('P' + (a.slot + 1) + ' End ' + Math.round(slotAt(a.sec, a.bank, a.slot).endTrim), 80);
     s.dirty = true;
@@ -2763,6 +2834,7 @@ function retriggerFocusedPadForStartTrim() {
     const sec = s.focusedSection;
     const bank = focusedBankIndex(sec);
     const slot = focusedSlotIndex();
+    const voice = currentVoiceAt(sec, bank, slot);
 
     let velocity = -1;
     const keys = Object.keys(s.activePadPress);
@@ -2773,11 +2845,57 @@ function retriggerFocusedPadForStartTrim() {
         velocity = clampInt(press.velocity, 1, 127, 100);
         break;
     }
+
+    const sl = slotAt(sec, bank, slot);
+    s.trimPreviewSerial = clampInt(s.trimPreviewSerial + 1, 0, 0x7fffffff, 1);
+    if (voice && clampInt(sl.loop, 0, 2, 0) > 0) {
+        const loopVelocity = velocity >= 1 ? velocity : clampInt(voice.velocity, 1, 127, 127);
+        const sourceTag = 'trim-loop-preview:' + String(s.trimPreviewSerial);
+        refreshActiveLoopVoiceForTrim(sec, bank, slot, loopVelocity, !!voice.routeBank, sourceTag);
+        return;
+    }
+
     if (velocity < 1) return;
 
-    const sourceTag = 'starttrim-preview:' + String(s.transportTicks) + ':' + String(Date.now());
+    const sourceTag = 'starttrim-preview:' + String(s.trimPreviewSerial);
     if (!triggerPadOn(sec, bank, slot, velocity, false, false, sourceTag)) return;
     triggerPadOff(sec, bank, slot, false, false);
+}
+
+function refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, routeBank, sourceTag) {
+    if (isPadMuted(sec, bank, slot)) return false;
+    flashPadPress(sec, bank, slot);
+    s.lastPadTriggerTick = s.transportTicks;
+    clearPendingOff(sec, bank, slot);
+
+    const triggerNote = padNoteFor(sec, slot);
+    const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
+    if (routeBank) {
+        withPlaybackBank(sec, bank, () => {
+            spe('pad_note_on', triggerNote + ':' + vel);
+        });
+    } else {
+        spe('pad_note_on', triggerNote + ':' + vel);
+    }
+    sendMidiOut(slot, vel, sec, bank, true);
+
+    const nowMs = Date.now();
+    const key = addrKey(sec, bank, slot);
+    const src = String(sourceTag || '');
+    const existing = activeVoicesByAddr[key] || { sec, bank, slot };
+    existing.sec = sec;
+    existing.bank = bank;
+    existing.slot = slot;
+    existing.routeBank = !!routeBank;
+    existing.owner = src;
+    existing.sourceTag = src;
+    existing.velocity = vel;
+    existing.startedMs = nowMs;
+    existing.lastOnMs = nowMs;
+    activeVoicesByAddr[key] = existing;
+    setPadPlaybackState(sec, bank, slot, 'playing');
+    markLedsDirty();
+    return true;
 }
 
 function stopFocusedPadAudioForTrimEdit() {
@@ -4658,6 +4776,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         routeBank: effectiveRouteBank,
         owner: src,
         sourceTag: src,
+        velocity: vel,
         startedMs: nowMs,
         lastOnMs: nowMs
     };
@@ -4870,7 +4989,7 @@ function toggleFxPadByNote(note) {
     const slot = slotFromSlice(slice);
     const fxIdx = fxEffectFromPadSlot(slot);
     if (fxIdx < 0) {
-        showStatus('FX pads: bottom 2 rows', 50);
+        showStatus('FX pads: bottom rows + DJFX', 50);
         return true;
     }
     if (sec === 0) {
