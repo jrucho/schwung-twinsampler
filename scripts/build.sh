@@ -18,6 +18,21 @@ fi
 
 cp -R "${SOURCE_DIR}/." "${DIST_DIR}/"
 
+# Build monitor wrapper DSP from source whenever available so packaged module
+# always contains a matching dsp.so for current ui/wrapper changes.
+if [[ -f "${SOURCE_DIR}/dsp_wrapper_monitor.c" ]]; then
+  if command -v gcc >/dev/null 2>&1; then
+    gcc -O2 -shared -fPIC \
+      -o "${DIST_DIR}/dsp.so" \
+      "${SOURCE_DIR}/dsp_wrapper_monitor.c" \
+      -I "${SOURCE_DIR}" \
+      -ldl -lm
+    echo "Built ${DIST_DIR}/dsp.so from ${SOURCE_DIR}/dsp_wrapper_monitor.c"
+  else
+    echo "Warning: gcc not available; keeping existing dsp.so in package." >&2
+  fi
+fi
+
 # Optional native DSP build. If the repository contains dsp/ source, compile it
 # and place the resulting shared object into the packaged module directory.
 if [[ -d "dsp" ]]; then
