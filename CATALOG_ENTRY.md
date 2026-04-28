@@ -8,6 +8,6 @@
   "github_repo": "jrucho/schwung-twinsampler",
   "default_branch": "main",
   "asset_name": "twinsampler-module.tar.gz",
-  "min_host_version": "0.3.1"
+  "min_host_version": "0.3.2"
 }
 ```
