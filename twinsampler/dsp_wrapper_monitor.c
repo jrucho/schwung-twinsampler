@@ -20,6 +20,38 @@
 #endif
 
 #define TS_SLOT_PATH_MAX 4096
+#define TS_SECTION_COUNT 2
+#define TS_BANK_COUNT 8
+#define TS_SLOT_COUNT 16
+#define TS_SOURCE_SLICE_POINTS (TS_SLOT_COUNT + 1)
+#define TS_OVERLAY_VOICE_COUNT 32
+#define TS_PAD_NOTE_MIN 68
+#define TS_PAD_NOTE_MAX 99
+#define TS_PAD_COLS 8
+#define TS_SECTION_COLS 4
+
+typedef struct source_sample {
+    float *frames_lr;
+    uint32_t frame_count;
+    uint32_t sample_rate;
+    char path[TS_SLOT_PATH_MAX];
+} source_sample_t;
+
+typedef struct source_loop_voice {
+    int active;
+    int sec;
+    int bank;
+    int slot;
+    int loop_mode;
+    int dir;
+    double pos;
+    double step;
+    uint32_t start_frame;
+    uint32_t end_frame;
+    float gain;
+    float pan;
+    float velocity_gain;
+} source_loop_voice_t;
 
 typedef struct wrapper_instance {
     void *core_handle;
@@ -51,11 +83,23 @@ typedef struct wrapper_instance {
     int auto_hold_blocks;
     uint32_t dither_state;
     int current_bank[2];
+    int route_bank[2];
+    int section_mode[2];
     int edit_section;
     int edit_bank;
     int edit_slot;
     int slot_reverse[2][8][16];
+    int slot_loop[2][8][16];
+    float slot_pitch[2][8][16];
+    float slot_gain[2][8][16];
+    float slot_pan[2][8][16];
+    float global_pitch;
     char slot_sample_path[2][8][16][TS_SLOT_PATH_MAX];
+    char source_path[2][8][TS_SLOT_PATH_MAX];
+    uint32_t source_slice_starts[2][8][TS_SOURCE_SLICE_POINTS];
+    int source_slice_start_count[2][8];
+    source_sample_t source_sample[2][8];
+    source_loop_voice_t source_loop_voice[TS_OVERLAY_VOICE_COUNT];
     int pfx_active_section;
     int pfx_bank_toggle[2][8][16];
     float pfx_bank_param[2][8][16][8];
@@ -937,6 +981,383 @@ static int rewrite_sample_param_value(wrapper_instance_t *inst,
     return 0;
 }
 
+static void free_source_sample(source_sample_t *sample) {
+    if (!sample) return;
+    free(sample->frames_lr);
+    sample->frames_lr = NULL;
+    sample->frame_count = 0;
+    sample->sample_rate = 0;
+    sample->path[0] = '\0';
+}
+
+static void free_all_source_samples(wrapper_instance_t *inst) {
+    if (!inst) return;
+    for (int sec = 0; sec < 2; sec++) {
+        for (int bank = 0; bank < 8; bank++) {
+            free_source_sample(&inst->source_sample[sec][bank]);
+        }
+    }
+}
+
+static void stop_source_loop_voice(wrapper_instance_t *inst, int sec, int bank, int slot) {
+    if (!inst) return;
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        if (v->sec == sec && v->bank == bank && v->slot == slot) v->active = 0;
+    }
+}
+
+static int bank_has_loop_slots(wrapper_instance_t *inst, int sec, int bank) {
+    if (!inst) return 0;
+    sec = clampi(sec, 0, 1);
+    bank = clampi(bank, 0, 7);
+    for (int slot = 0; slot < 16; slot++) {
+        if (inst->slot_loop[sec][bank][slot] > 0) return 1;
+    }
+    return 0;
+}
+
+static int load_source_sample_for_bank(wrapper_instance_t *inst, int sec, int bank) {
+    if (!inst) return 0;
+    sec = clampi(sec, 0, 1);
+    bank = clampi(bank, 0, 7);
+    char requested_path[TS_SLOT_PATH_MAX];
+    snprintf(requested_path, sizeof(requested_path), "%s", inst->source_path[sec][bank]);
+    const char *path = requested_path;
+    if (!path[0]) {
+        free_source_sample(&inst->source_sample[sec][bank]);
+        return 0;
+    }
+
+    source_sample_t *sample = &inst->source_sample[sec][bank];
+    if (sample->frames_lr && !strcmp(sample->path, path)) return 1;
+
+    char rewritten[PATH_MAX];
+    const char *load_path = path;
+    if (maybe_rewrite_sample_path(inst, path, rewritten, sizeof(rewritten), 0)) {
+        load_path = rewritten;
+    }
+
+    wav_info_t info;
+    if (!inspect_wav_file(load_path, &info) || !info.valid) return 0;
+    if (info.sample_rate != core_playback_sample_rate()) {
+        char converted[PATH_MAX];
+        if (convert_wav_to_core_pcm16(load_path, &info, core_playback_sample_rate(), 0, converted, sizeof(converted)) &&
+            inspect_wav_file(converted, &info) && info.valid) {
+            load_path = converted;
+        }
+    }
+
+    const uint64_t src_frames64 = info.data_size / info.block_align;
+    if (src_frames64 == 0 || src_frames64 > (uint64_t)0x7fffffffu) return 0;
+    const uint32_t frame_count = (uint32_t)src_frames64;
+    float *frames = (float *)malloc((size_t)frame_count * 2u * sizeof(float));
+    if (!frames) return 0;
+
+    FILE *in = fopen(load_path, "rb");
+    if (!in) {
+        free(frames);
+        return 0;
+    }
+    if (fseeko(in, (off_t)info.data_offset, SEEK_SET) != 0) {
+        fclose(in);
+        free(frames);
+        return 0;
+    }
+
+    uint8_t *frame_buf = (uint8_t *)malloc((size_t)info.block_align);
+    if (!frame_buf) {
+        fclose(in);
+        free(frames);
+        return 0;
+    }
+
+    int ok = 1;
+    for (uint32_t i = 0; i < frame_count; i++) {
+        float l = 0.0f;
+        float r = 0.0f;
+        if (!read_decoded_frame(in, &info, frame_buf, 2, &l, &r)) {
+            ok = 0;
+            break;
+        }
+        frames[(size_t)i * 2u] = l;
+        frames[(size_t)i * 2u + 1u] = r;
+    }
+    free(frame_buf);
+    fclose(in);
+    if (!ok) {
+        free(frames);
+        return 0;
+    }
+
+    free_source_sample(sample);
+    sample->frames_lr = frames;
+    sample->frame_count = frame_count;
+    sample->sample_rate = info.sample_rate ? info.sample_rate : core_playback_sample_rate();
+    snprintf(sample->path, sizeof(sample->path), "%s", path);
+    return 1;
+}
+
+static void remember_source_path(wrapper_instance_t *inst, const char *val) {
+    if (!inst || !val) return;
+    int parts[2] = {0};
+    const char *path = NULL;
+    if (!parse_prefixed_int_payload(val, parts, 2, &path)) return;
+    const int sec = clampi(parts[0], 0, 1);
+    const int bank = clampi(parts[1], 0, 7);
+    snprintf(inst->source_path[sec][bank], sizeof(inst->source_path[sec][bank]), "%s", path ? path : "");
+    free_source_sample(&inst->source_sample[sec][bank]);
+    if (inst->source_path[sec][bank][0] && (inst->section_mode[sec] == 0 || bank_has_loop_slots(inst, sec, bank))) {
+        load_source_sample_for_bank(inst, sec, bank);
+    }
+}
+
+static void remember_source_slice_starts(wrapper_instance_t *inst, const char *val) {
+    if (!inst || !val) return;
+    int parts[2] = {0};
+    const char *payload = NULL;
+    if (!parse_prefixed_int_payload(val, parts, 2, &payload)) return;
+    const int sec = clampi(parts[0], 0, 1);
+    const int bank = clampi(parts[1], 0, 7);
+    int count = 0;
+    const char *p = payload;
+    while (*p && count < TS_SOURCE_SLICE_POINTS) {
+        char *end = NULL;
+        unsigned long v = strtoul(p, &end, 10);
+        if (end == p) break;
+        inst->source_slice_starts[sec][bank][count++] = (uint32_t)v;
+        if (*end != ',') break;
+        p = end + 1;
+    }
+    inst->source_slice_start_count[sec][bank] = count;
+}
+
+static void update_source_loop_voice_pitch(wrapper_instance_t *inst, int sec, int bank, int slot) {
+    if (!inst) return;
+    const float semis = inst->slot_pitch[sec][bank][slot] + inst->global_pitch;
+    const double step = pow(2.0, (double)semis / 12.0);
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        if (v->sec == sec && v->bank == bank && v->slot == slot) v->step = step;
+    }
+}
+
+static void update_all_source_loop_voice_pitch(wrapper_instance_t *inst) {
+    if (!inst) return;
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        update_source_loop_voice_pitch(inst, v->sec, v->bank, v->slot);
+    }
+}
+
+static void remember_slot_numeric_param(wrapper_instance_t *inst, const char *key, const char *val) {
+    if (!inst || !key || !val) return;
+    int sec = clampi(inst->edit_section, 0, 1);
+    int bank = clampi(inst->edit_bank, 0, 7);
+    int slot = clampi(inst->edit_slot, 0, 15);
+    const char *payload = val;
+    if (strstr(key, "_at")) {
+        int parts[3] = {0};
+        if (!parse_prefixed_int_payload(val, parts, 3, &payload)) return;
+        sec = clampi(parts[0], 0, 1);
+        bank = clampi(parts[1], 0, 7);
+        slot = clampi(parts[2], 0, 15);
+    }
+
+    if (!strcmp(key, "slot_loop") || !strcmp(key, "slot_loop_at")) {
+        inst->slot_loop[sec][bank][slot] = clampi(parse_int_or_default(payload, inst->slot_loop[sec][bank][slot]), 0, 2);
+        if (inst->slot_loop[sec][bank][slot] > 0 && inst->source_path[sec][bank][0]) {
+            load_source_sample_for_bank(inst, sec, bank);
+        } else if (inst->slot_loop[sec][bank][slot] <= 0) {
+            stop_source_loop_voice(inst, sec, bank, slot);
+        }
+    } else if (!strcmp(key, "slot_pitch") || !strcmp(key, "slot_pitch_at")) {
+        inst->slot_pitch[sec][bank][slot] = parse_float_clamped(payload, -48.0f, 48.0f, inst->slot_pitch[sec][bank][slot]);
+        update_source_loop_voice_pitch(inst, sec, bank, slot);
+    } else if (!strcmp(key, "slot_gain") || !strcmp(key, "slot_gain_at")) {
+        inst->slot_gain[sec][bank][slot] = parse_float_clamped(payload, 0.0f, 4.0f, inst->slot_gain[sec][bank][slot]);
+    } else if (!strcmp(key, "slot_pan") || !strcmp(key, "slot_pan_at")) {
+        inst->slot_pan[sec][bank][slot] = parse_float_clamped(payload, -1.0f, 1.0f, inst->slot_pan[sec][bank][slot]);
+    }
+}
+
+static int pad_addr_from_note(int note, int *sec, int *slot) {
+    if (note < TS_PAD_NOTE_MIN || note > TS_PAD_NOTE_MAX) return 0;
+    const int idx = note - TS_PAD_NOTE_MIN;
+    const int row = idx / TS_PAD_COLS;
+    const int col = idx % TS_PAD_COLS;
+    if (row < 0 || row >= 4) return 0;
+    if (sec) *sec = col < TS_SECTION_COLS ? 0 : 1;
+    if (slot) *slot = row * TS_SECTION_COLS + (col % TS_SECTION_COLS);
+    return 1;
+}
+
+static void source_slice_bounds(wrapper_instance_t *inst,
+                                source_sample_t *sample,
+                                int sec,
+                                int bank,
+                                int slot,
+                                uint32_t *start,
+                                uint32_t *end) {
+    const uint32_t total = sample && sample->frame_count ? sample->frame_count : 0;
+    uint32_t s0 = 0;
+    uint32_t s1 = total;
+    if (inst && inst->source_slice_start_count[sec][bank] >= TS_SOURCE_SLICE_POINTS) {
+        s0 = inst->source_slice_starts[sec][bank][slot];
+        s1 = inst->source_slice_starts[sec][bank][slot + 1];
+    } else if (total > 0) {
+        s0 = (uint32_t)(((uint64_t)total * (uint64_t)slot) / (uint64_t)TS_SLOT_COUNT);
+        s1 = (uint32_t)(((uint64_t)total * (uint64_t)(slot + 1)) / (uint64_t)TS_SLOT_COUNT);
+    }
+    if (s0 >= total) s0 = total > 0 ? total - 1 : 0;
+    if (s1 > total) s1 = total;
+    if (s1 <= s0 + 1) s1 = (s0 + 1 < total) ? s0 + 1 : total;
+    if (start) *start = s0;
+    if (end) *end = s1;
+}
+
+static source_loop_voice_t *voice_for_source_loop(wrapper_instance_t *inst, int sec, int bank, int slot) {
+    if (!inst) return NULL;
+    source_loop_voice_t *free_voice = NULL;
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (v->active && v->sec == sec && v->bank == bank && v->slot == slot) return v;
+        if (!v->active && !free_voice) free_voice = v;
+    }
+    return free_voice ? free_voice : &inst->source_loop_voice[0];
+}
+
+static int handle_source_loop_note_on(wrapper_instance_t *inst, const char *val) {
+    if (!inst || !val) return 0;
+    int parts[2] = {0};
+    if (parse_colon_ints(val, parts, 2) < 2) return 0;
+    int sec = 0;
+    int slot = 0;
+    if (!pad_addr_from_note(parts[0], &sec, &slot)) return 0;
+    const int bank = clampi(inst->route_bank[sec], 0, 7);
+    if (inst->section_mode[sec] != 0) return 0;
+    const int loop_mode = clampi(inst->slot_loop[sec][bank][slot], 0, 2);
+    if (loop_mode <= 0) return 0;
+    if (!load_source_sample_for_bank(inst, sec, bank)) return 0;
+
+    source_sample_t *sample = &inst->source_sample[sec][bank];
+    if (!sample->frames_lr || sample->frame_count < 2) return 0;
+
+    uint32_t start = 0;
+    uint32_t end = sample->frame_count;
+    source_slice_bounds(inst, sample, sec, bank, slot, &start, &end);
+    if (end <= start + 1) return 0;
+
+    source_loop_voice_t *v = voice_for_source_loop(inst, sec, bank, slot);
+    if (!v) return 0;
+    memset(v, 0, sizeof(*v));
+    v->active = 1;
+    v->sec = sec;
+    v->bank = bank;
+    v->slot = slot;
+    v->loop_mode = loop_mode;
+    v->dir = 1;
+    v->start_frame = start;
+    v->end_frame = end;
+    v->pos = (double)start;
+    v->gain = clampf(inst->slot_gain[sec][bank][slot], 0.0f, 4.0f);
+    v->pan = clampf(inst->slot_pan[sec][bank][slot], -1.0f, 1.0f);
+    v->velocity_gain = clampf((float)clampi(parts[1], 1, 127) / 127.0f, 0.0f, 1.0f);
+    const float semis = inst->slot_pitch[sec][bank][slot] + inst->global_pitch;
+    v->step = pow(2.0, (double)semis / 12.0);
+    return 1;
+}
+
+static int handle_source_loop_note_off(wrapper_instance_t *inst, const char *val) {
+    if (!inst || !val) return 0;
+    const int note = parse_int_or_default(val, -1);
+    int sec = 0;
+    int slot = 0;
+    if (!pad_addr_from_note(note, &sec, &slot)) return 0;
+    const int bank = clampi(inst->route_bank[sec], 0, 7);
+    int handled = 0;
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        if (v->sec == sec && v->bank == bank && v->slot == slot) {
+            v->active = 0;
+            handled = 1;
+        }
+    }
+    if (!handled) {
+        for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+            source_loop_voice_t *v = &inst->source_loop_voice[i];
+            if (!v->active) continue;
+            if (v->sec == sec && v->slot == slot) {
+                v->active = 0;
+                handled = 1;
+            }
+        }
+    }
+    return handled;
+}
+
+static void mix_source_loop_overlays(wrapper_instance_t *inst, int16_t *out, int frames) {
+    if (!inst || !out || frames <= 0) return;
+    for (int frame = 0; frame < frames; frame++) {
+        float add_l = 0.0f;
+        float add_r = 0.0f;
+        for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+            source_loop_voice_t *v = &inst->source_loop_voice[i];
+            if (!v->active) continue;
+            source_sample_t *sample = &inst->source_sample[v->sec][v->bank];
+            if (!sample->frames_lr || sample->frame_count < 2 || v->end_frame <= v->start_frame + 1) {
+                v->active = 0;
+                continue;
+            }
+
+            double pos = v->pos;
+            if (pos < (double)v->start_frame) pos = (double)v->start_frame;
+            if (pos >= (double)(v->end_frame - 1)) pos = (double)(v->end_frame - 1);
+            uint32_t idx = (uint32_t)pos;
+            uint32_t idx1 = idx + 1u;
+            if (idx1 >= v->end_frame) idx1 = v->start_frame;
+            const float frac = clampf((float)(pos - (double)idx), 0.0f, 1.0f);
+            const size_t off0 = (size_t)idx * 2u;
+            const size_t off1 = (size_t)idx1 * 2u;
+            float l = sample->frames_lr[off0] + (sample->frames_lr[off1] - sample->frames_lr[off0]) * frac;
+            float r = sample->frames_lr[off0 + 1u] + (sample->frames_lr[off1 + 1u] - sample->frames_lr[off0 + 1u]) * frac;
+            const float amp = v->gain * v->velocity_gain;
+            const float pan = clampf(v->pan, -1.0f, 1.0f);
+            const float lg = pan > 0.0f ? (1.0f - pan) : 1.0f;
+            const float rg = pan < 0.0f ? (1.0f + pan) : 1.0f;
+            add_l += l * amp * lg;
+            add_r += r * amp * rg;
+
+            if (v->loop_mode == 2) {
+                v->pos += v->step * (double)(v->dir >= 0 ? 1 : -1);
+                if (v->pos >= (double)(v->end_frame - 1)) {
+                    v->pos = (double)(v->end_frame - 1);
+                    v->dir = -1;
+                } else if (v->pos <= (double)v->start_frame) {
+                    v->pos = (double)v->start_frame;
+                    v->dir = 1;
+                }
+            } else {
+                v->pos += v->step;
+                while (v->pos >= (double)v->end_frame) {
+                    v->pos -= (double)(v->end_frame - v->start_frame);
+                }
+            }
+        }
+        if (add_l != 0.0f || add_r != 0.0f) {
+            const int idx = frame * 2;
+            const int32_t l = (int32_t)out[idx] + (int32_t)(add_l * 32767.0f);
+            const int32_t r = (int32_t)out[idx + 1] + (int32_t)(add_r * 32767.0f);
+            out[idx] = (int16_t)clip_i32_to_i16(l);
+            out[idx + 1] = (int16_t)clip_i32_to_i16(r);
+        }
+    }
+}
+
 static int validate_core_api(plugin_api_v2_t *api) {
     return api && api->create_instance && api->render_block;
 }
@@ -1109,6 +1530,21 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->dither_state = 0x6d2b79f5u;
     inst->current_bank[0] = 0;
     inst->current_bank[1] = 0;
+    inst->route_bank[0] = 0;
+    inst->route_bank[1] = 0;
+    inst->section_mode[0] = 0;
+    inst->section_mode[1] = 1;
+    inst->global_pitch = 0.0f;
+    for (int sec = 0; sec < 2; sec++) {
+        for (int bank = 0; bank < 8; bank++) {
+            for (int slot = 0; slot < 16; slot++) {
+                inst->slot_loop[sec][bank][slot] = 0;
+                inst->slot_pitch[sec][bank][slot] = 0.0f;
+                inst->slot_gain[sec][bank][slot] = 1.0f;
+                inst->slot_pan[sec][bank][slot] = 0.0f;
+            }
+        }
+    }
     inst->pfx_active_section = 0;
     for (int sec = 0; sec < 2; sec++) {
         for (int bank = 0; bank < 8; bank++) {
@@ -1155,6 +1591,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
         free(inst->last_output);
         free(inst->pfx_djfx_buf);
         free(inst->pfx_delay_buf);
+        free_all_source_samples(inst);
         free(inst);
         log_msg("TwinSampler monitor wrapper: scratch alloc failed");
         return NULL;
@@ -1165,6 +1602,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
         free(inst->last_output);
         free(inst->pfx_djfx_buf);
         free(inst->pfx_delay_buf);
+        free_all_source_samples(inst);
         free(inst);
         return NULL;
     }
@@ -1181,6 +1619,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
         free(inst->last_output);
         free(inst->pfx_djfx_buf);
         free(inst->pfx_delay_buf);
+        free_all_source_samples(inst);
         free(inst);
         log_msg("TwinSampler monitor wrapper: core create_instance failed");
         return NULL;
@@ -1207,6 +1646,7 @@ static void wrapper_destroy_instance(void *instance) {
     free(inst->last_output);
     free(inst->pfx_djfx_buf);
     free(inst->pfx_delay_buf);
+    free_all_source_samples(inst);
     free(inst);
     log_msg("TwinSampler monitor wrapper: instance destroyed");
 }
@@ -1273,12 +1713,37 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         inst->debug_sample_loads = parse_bool(val);
         return;
     }
+    if (!strcmp(key, "pad_note_on")) {
+        if (handle_source_loop_note_on(inst, val ? val : "")) return;
+    } else if (!strcmp(key, "pad_note_off")) {
+        if (handle_source_loop_note_off(inst, val ? val : "")) return;
+    }
     if (!strcmp(key, "edit_section")) {
         inst->edit_section = clampi(parse_int_or_default(val, inst->edit_section), 0, 1);
     } else if (!strcmp(key, "edit_bank")) {
         inst->edit_bank = clampi(parse_int_or_default(val, inst->edit_bank), 0, 7);
     } else if (!strcmp(key, "edit_slot")) {
         inst->edit_slot = clampi(parse_int_or_default(val, inst->edit_slot), 0, 15);
+    } else if (!strcmp(key, "section_mode")) {
+        int parts[2] = {0};
+        if (parse_colon_ints(val ? val : "", parts, 2) >= 2) {
+            inst->section_mode[clampi(parts[0], 0, 1)] = clampi(parts[1], 0, 1);
+        }
+    } else if (!strncmp(key, "section_mode_", 13)) {
+        const int sec = (key[13] == '1') ? 1 : 0;
+        inst->section_mode[sec] = clampi(parse_int_or_default(val, inst->section_mode[sec]), 0, 1);
+    } else if (!strcmp(key, "section_source_path")) {
+        remember_source_path(inst, val ? val : "");
+    } else if (!strcmp(key, "section_slice_starts")) {
+        remember_source_slice_starts(inst, val ? val : "");
+    } else if (!strcmp(key, "global_pitch") || !strcmp(key, "pitch")) {
+        inst->global_pitch = parse_float_clamped(val, -48.0f, 48.0f, inst->global_pitch);
+        update_all_source_loop_voice_pitch(inst);
+    } else if (!strcmp(key, "slot_loop") || !strcmp(key, "slot_loop_at") ||
+               !strcmp(key, "slot_pitch") || !strcmp(key, "slot_pitch_at") ||
+               !strcmp(key, "slot_gain") || !strcmp(key, "slot_gain_at") ||
+               !strcmp(key, "slot_pan") || !strcmp(key, "slot_pan_at")) {
+        remember_slot_numeric_param(inst, key, val ? val : "");
     } else if (!strcmp(key, "slot_sample_path")) {
         remember_slot_sample_path(inst, val ? val : "");
     } else if (!strcmp(key, "clear_slot_sample")) {
@@ -1321,6 +1786,11 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
          * Forward to core as section_bank, but keep wrapper PFX focus untouched
          * so bank FX do not flicker when routing cross-bank note events.
          */
+        int parts[2] = {0};
+        if (parse_colon_ints(val ? val : "", parts, 2) >= 2) {
+            const int sec = clampi(parts[0], 0, 1);
+            inst->route_bank[sec] = clampi(parts[1], 0, 7);
+        }
         if (inst->core_api_v2 && inst->core_api_v2->set_param && inst->core_instance) {
             inst->core_api_v2->set_param(inst->core_instance, "section_bank", val ? val : "");
         }
@@ -1333,6 +1803,7 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
             const int sec = (parts[0] < 0) ? 0 : (parts[0] > 1 ? 1 : parts[0]);
             const int bank = (parts[1] < 0) ? 0 : (parts[1] > 7 ? 7 : parts[1]);
             inst->current_bank[sec] = bank;
+            inst->route_bank[sec] = bank;
             inst->pfx_active_section = sec;
         }
     } else if (!strncmp(key, "section_bank_", 13)) {
@@ -1341,6 +1812,7 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         if (bank < 0) bank = 0;
         if (bank > 7) bank = 7;
         inst->current_bank[sec] = bank;
+        inst->route_bank[sec] = bank;
         inst->pfx_active_section = sec;
     }
 
@@ -2123,6 +2595,8 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
             }
         }
     }
+
+    mix_source_loop_overlays(inst, out_interleaved_lr, frames);
 
     apply_perf_fx_to_output(inst, out_interleaved_lr, frames);
 

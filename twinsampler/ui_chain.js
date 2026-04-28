@@ -269,6 +269,7 @@ const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
 const RECORD_INTENT_WINDOW_TICKS = 48;
+const RECORD_PATH_WAIT_TICKS = 120;
 const MIDI_ECHO_SUPPRESS_WINDOW_MS = 35;
 const MIDI_MIN_NOTE_LENGTH_MS = 8;
 const MIDI_DUPLICATE_NOTE_ON_GUARD_MS = 2;
@@ -601,6 +602,10 @@ const s = {
     recTarget: { sec: 0, bank: 0, slot: 0 },
     recTargetLocked: { sec: 0, bank: 0, slot: 0, slice: 0 },
     lastRecordedPath: '',
+    recordStartLastPath: '',
+    recordPendingPathTicks: 0,
+    recordPendingLoadOnStop: false,
+    recordPendingTarget: null,
     startTrimSoundingEnabled: true,
 
     browserPath: SAMPLES_DIR,
@@ -1351,7 +1356,10 @@ function syncBankSliceState(sec, bank) {
         }
         starts.push(clampInt(n, 0, 0x7fffffff, 0));
     }
-    if (starts.length === count + 1) b.sliceStarts = starts;
+    if (starts.length === count + 1) {
+        b.sliceStarts = starts;
+        sp('section_slice_starts', sec + ':' + bank + ':' + starts.join(','));
+    }
 }
 
 function showStatus(msg, ticks = STATUS_TICKS) {
@@ -2788,7 +2796,8 @@ function adjustPadPitch(delta) {
     const a = focusedAddr();
     const v = slotAt(a.sec, a.bank, a.slot).pitch + delta * 0.5;
     setSlotPitch(a.sec, a.bank, a.slot, v);
-    retriggerHeldFocusedSourcePadForPitch();
+    const refreshed = refreshActiveLoopVoiceForPitch(a.sec, a.bank, a.slot);
+    if (!refreshed) retriggerHeldFocusedSourcePadForPitch();
     showStatus('P' + (a.slot + 1) + ' Pitch ' + slotAt(a.sec, a.bank, a.slot).pitch.toFixed(1), 80);
     s.dirty = true;
 }
@@ -2828,6 +2837,29 @@ function retriggerHeldFocusedSourcePadForPitch() {
         triggerPadOn(sec, bank, slot, velocity, false, false, 'pitch-retrigger:' + String(note));
         return;
     }
+}
+
+function refreshActiveLoopVoiceForPitch(sec, bank, slot) {
+    if (!SOURCE_PITCH_LIVE_RETRIGGER) return false;
+
+    const sl = slotAt(sec, bank, slot);
+    if (clampInt(sl.loop, 0, 2, 0) <= 0) return false;
+
+    const voice = currentVoiceAt(sec, bank, slot);
+    if (!voice) return false;
+    if (s.sections[sec].mode === MODE_SINGLE) return true;
+
+    const velocity = clampInt(voice.velocity, 1, 127, 127);
+    const sourceTag = 'pitch-loop-refresh:' + String(sec) + ':' + String(bank) + ':' + String(slot);
+    return refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, !!voice.routeBank, sourceTag);
+}
+
+function refreshActiveLoopVoicesInBankForPitch(sec, bank) {
+    let refreshed = false;
+    for (let slot = 0; slot < GRID_SIZE; slot++) {
+        if (refreshActiveLoopVoiceForPitch(sec, bank, slot)) refreshed = true;
+    }
+    return refreshed;
 }
 
 function retriggerFocusedPadForStartTrim() {
@@ -3048,11 +3080,14 @@ function adjustAllPan(delta) {
 }
 
 function adjustFocusedBankPitch(delta) {
+    const sec = s.focusedSection;
+    const bank = focusedBankIndex(sec);
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).pitch + delta * 0.5;
         setSlotPitch(sec, bank, slot, v);
     });
-    retriggerHeldFocusedSourcePadForPitch();
+    const refreshed = refreshActiveLoopVoicesInBankForPitch(sec, bank);
+    if (!refreshed) retriggerHeldFocusedSourcePadForPitch();
     showStatus('Bank pitch ' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).pitch.toFixed(1), 80);
 }
 
@@ -3093,6 +3128,72 @@ function shouldPreferInternalCapture() {
 
 function recordTargetLabel(target = s.recTarget) {
     return 'S' + (target.sec + 1) + ' B' + (target.bank + 1) + ' P' + (target.slot + 1);
+}
+
+function copyRecordTarget(target) {
+    if (!target) return null;
+    return {
+        sec: clampInt(target.sec, 0, GRID_COUNT - 1, 0),
+        bank: clampInt(target.bank, 0, BANK_COUNT - 1, 0),
+        slot: clampInt(target.slot, 0, GRID_SIZE - 1, 0)
+    };
+}
+
+function clearPendingRecordedPath() {
+    s.recordPendingPathTicks = 0;
+    s.recordPendingLoadOnStop = false;
+    s.recordPendingTarget = null;
+}
+
+function latestRecordedPathCandidate() {
+    const raw = String(gp('last_recorded_path', '') || '');
+    if (!raw || raw === s.recordStartLastPath) return '';
+    return raw;
+}
+
+function finishRecordedPath(pathRaw, shouldLoad, target) {
+    const path = ensureRecordedFileInDailyFolder(pathRaw);
+    const t = copyRecordTarget(target || s.recTargetLocked || s.recTarget);
+    if (!path) return false;
+
+    s.lastRecordedPath = path;
+    if (t) {
+        assignRecordedPathToTarget(path, t);
+    } else if (shouldLoad) {
+        showStatus('Recorded target missing', 90);
+    } else {
+        showStatus('Recorded: ' + shortText(baseName(path), 14), 90);
+    }
+    saveAutosaveSession(true);
+    s.dirty = true;
+    return true;
+}
+
+function queuePendingRecordedPath(shouldLoad, target) {
+    s.recordPendingLoadOnStop = !!shouldLoad;
+    s.recordPendingTarget = copyRecordTarget(target || s.recTargetLocked || s.recTarget);
+    s.recordPendingPathTicks = RECORD_PATH_WAIT_TICKS;
+}
+
+function pollPendingRecordedPath() {
+    if (s.recordPendingPathTicks <= 0 || s.recording) return false;
+
+    const pathRaw = latestRecordedPathCandidate();
+    if (pathRaw) {
+        const shouldLoad = !!s.recordPendingLoadOnStop;
+        const target = copyRecordTarget(s.recordPendingTarget);
+        clearPendingRecordedPath();
+        return finishRecordedPath(pathRaw, shouldLoad, target);
+    }
+
+    s.recordPendingPathTicks--;
+    if (s.recordPendingPathTicks <= 0) {
+        clearPendingRecordedPath();
+        showStatus('Recording saved', 80);
+        saveAutosaveSession(true);
+        s.dirty = true;
+    }
+    return false;
 }
 
 function captureFocusedRecordTarget() {
@@ -3147,6 +3248,8 @@ function startFocusedRecording() {
     const a = captureFocusedRecordTarget();
     lockRecordingTarget(a);
     s.recordLoadOnStop = false;
+    clearPendingRecordedPath();
+    s.recordStartLastPath = String(gp('last_recorded_path', s.lastRecordedPath) || s.lastRecordedPath || '');
     s.recordArmed = true;
     setRecordState('starting');
     s.recordBlinkOn = true;
@@ -3251,16 +3354,18 @@ function handleRecordButtonPress() {
 
 function pollRecordingState() {
     const rec = clampInt(gp('recording', s.recording), 0, 1, s.recording);
-    if (rec === s.recording) return;
+    if (rec === s.recording) {
+        pollPendingRecordedPath();
+        return;
+    }
 
     const prev = s.recording;
     s.recording = rec;
 
     if (prev === 1 && rec === 0) {
-        const pathRaw = String(gp('last_recorded_path', '') || '');
-        const path = ensureRecordedFileInDailyFolder(pathRaw);
-        s.lastRecordedPath = path;
+        const pathRaw = latestRecordedPathCandidate();
         const shouldLoad = !!s.recordLoadOnStop;
+        const t = copyRecordTarget(s.recTargetLocked || s.recTarget);
         s.recordLoadOnStop = false;
         s.recordArmed = false;
         setRecordState('idle');
@@ -3268,18 +3373,16 @@ function pollRecordingState() {
         s.recordBlinkTicks = 0;
         setRecordMonitorEnabled(false);
 
-        if (path && shouldLoad) {
-            const t = s.recTargetLocked || s.recTarget;
-            assignRecordedPathToTarget(path, t);
-        } else if (path) {
-            showStatus('Recorded: ' + shortText(baseName(path), 14), 90);
+        if (pathRaw) {
+            clearPendingRecordedPath();
+            finishRecordedPath(pathRaw, shouldLoad, t);
         } else {
-            showStatus('Recording stopped', 80);
+            queuePendingRecordedPath(shouldLoad, t);
+            showStatus('Finalizing recording...', 80);
+            saveAutosaveSession(true);
         }
-        /* Defensive persistence: ensure the latest post-record state is on disk
-           even if we exit before delayed autosave ticks elapse. */
-        saveAutosaveSession(true);
     } else if (rec === 1) {
+        clearPendingRecordedPath();
         s.recordArmed = true;
         setRecordState('recording');
         s.recordBlinkOn = true;
@@ -4787,8 +4890,9 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
 
 function triggerPadOff(sec, bank, slot, routeBank, recordToLooper = true) {
     const addr = { sec, bank, slot };
-    if (!currentVoiceAt(sec, bank, slot) && !shouldSendNoteOffForAddr(addr)) return false;
-    return releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, Date.now());
+    const voice = currentVoiceAt(sec, bank, slot);
+    if (!voice && !shouldSendNoteOffForAddr(addr)) return false;
+    return releaseActiveVoice(sec, bank, slot, voice ? !!voice.routeBank : routeBank, recordToLooper, Date.now());
 }
 
 function tickMidiLooperPlayback() {
@@ -4905,6 +5009,7 @@ function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = 
     const key = addrKey(sec, bank, slot);
     const voice = activeVoicesByAddr[key];
     if (!voice) return false;
+    const effectiveRouteBank = !!voice.routeBank;
 
     const elapsed = Math.max(0, nowMs - clampInt(voice.startedMs, 0, 0x7fffffff, nowMs));
     if (!forceImmediate && elapsed < MIDI_MIN_NOTE_LENGTH_MS) {
@@ -4912,7 +5017,7 @@ function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = 
             sec,
             bank,
             slot,
-            routeBank: !!routeBank,
+            routeBank: effectiveRouteBank,
             recordToLooper: !!recordToLooper,
             dueAtMs: nowMs + (MIDI_MIN_NOTE_LENGTH_MS - elapsed)
         };
@@ -4921,7 +5026,7 @@ function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = 
     }
 
     clearPendingOff(sec, bank, slot);
-    emitPadNoteOffNow(sec, bank, slot, routeBank, recordToLooper);
+    emitPadNoteOffNow(sec, bank, slot, effectiveRouteBank, recordToLooper);
     delete activeVoicesByAddr[key];
     setPadPlaybackState(sec, bank, slot, 'idle');
     markLedsDirty();
@@ -5494,6 +5599,8 @@ function initFromDspDefaults() {
 
     s.recording = clampInt(gp('recording', 0), 0, 1, 0);
     s.lastRecordedPath = String(gp('last_recorded_path', '') || '');
+    s.recordStartLastPath = s.lastRecordedPath;
+    clearPendingRecordedPath();
     s.recordArmed = s.recording ? true : false;
     s.recordState = s.recording ? 'recording' : (s.recordArmed ? 'armed' : 'idle');
     s.recordStateTicks = 0;
