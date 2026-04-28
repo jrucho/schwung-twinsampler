@@ -21,15 +21,22 @@ cp -R "${SOURCE_DIR}/." "${DIST_DIR}/"
 # Build monitor wrapper DSP from source whenever available so packaged module
 # always contains a matching dsp.so for current ui/wrapper changes.
 if [[ -f "${SOURCE_DIR}/dsp_wrapper_monitor.c" ]]; then
-  if command -v gcc >/dev/null 2>&1; then
-    gcc -O2 -shared -fPIC \
+  DSP_CC=""
+  if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    DSP_CC="aarch64-linux-gnu-gcc"
+  elif [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "aarch64" ]] && command -v gcc >/dev/null 2>&1; then
+    DSP_CC="gcc"
+  fi
+
+  if [[ -n "${DSP_CC}" ]]; then
+    "${DSP_CC}" -O2 -shared -fPIC \
       -o "${DIST_DIR}/dsp.so" \
       "${SOURCE_DIR}/dsp_wrapper_monitor.c" \
       -I "${SOURCE_DIR}" \
       -ldl -lm
-    echo "Built ${DIST_DIR}/dsp.so from ${SOURCE_DIR}/dsp_wrapper_monitor.c"
+    echo "Built ${DIST_DIR}/dsp.so from ${SOURCE_DIR}/dsp_wrapper_monitor.c using ${DSP_CC}"
   else
-    echo "Warning: gcc not available; keeping existing dsp.so in package." >&2
+    echo "Warning: ARM compiler not available; keeping existing dsp.so in package." >&2
   fi
 fi
 
