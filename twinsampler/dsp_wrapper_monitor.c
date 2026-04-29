@@ -29,6 +29,8 @@
 #define TS_PAD_NOTE_MAX 99
 #define TS_PAD_COLS 8
 #define TS_SECTION_COLS 4
+#define TS_CORE_TRIM_MIN_MS -5000.0f
+#define TS_CORE_TRIM_MAX_MS 5000.0f
 
 typedef struct source_sample {
     float *frames_lr;
@@ -90,6 +92,8 @@ typedef struct wrapper_instance {
     int edit_slot;
     int slot_reverse[2][8][16];
     int slot_loop[2][8][16];
+    float slot_start_trim_ms[2][8][16];
+    float slot_end_trim_ms[2][8][16];
     float slot_pitch[2][8][16];
     float slot_gain[2][8][16];
     float slot_pan[2][8][16];
@@ -227,6 +231,8 @@ static int parse_bool(const char *val) {
 }
 
 static int parse_int_or_default(const char *val, int fallback);
+static void update_source_loop_voice_bounds(wrapper_instance_t *inst, int sec, int bank, int slot, int reset_on_start_change);
+static void update_all_source_loop_voice_bounds(wrapper_instance_t *inst, int reset_on_start_change);
 
 static int parse_capture_mode(const char *val, int fallback) {
     if (!val || !val[0]) return fallback;
@@ -1131,6 +1137,7 @@ static void remember_source_slice_starts(wrapper_instance_t *inst, const char *v
         p = end + 1;
     }
     inst->source_slice_start_count[sec][bank] = count;
+    update_all_source_loop_voice_bounds(inst, 0);
 }
 
 static void update_source_loop_voice_pitch(wrapper_instance_t *inst, int sec, int bank, int slot) {
@@ -1150,6 +1157,26 @@ static void update_all_source_loop_voice_pitch(wrapper_instance_t *inst) {
         source_loop_voice_t *v = &inst->source_loop_voice[i];
         if (!v->active) continue;
         update_source_loop_voice_pitch(inst, v->sec, v->bank, v->slot);
+    }
+}
+
+static void update_source_loop_voice_gain(wrapper_instance_t *inst, int sec, int bank, int slot) {
+    if (!inst) return;
+    const float gain = clampf(inst->slot_gain[sec][bank][slot], 0.0f, 4.0f);
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        if (v->sec == sec && v->bank == bank && v->slot == slot) v->gain = gain;
+    }
+}
+
+static void update_source_loop_voice_pan(wrapper_instance_t *inst, int sec, int bank, int slot) {
+    if (!inst) return;
+    const float pan = clampf(inst->slot_pan[sec][bank][slot], -1.0f, 1.0f);
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        if (v->sec == sec && v->bank == bank && v->slot == slot) v->pan = pan;
     }
 }
 
@@ -1174,13 +1201,26 @@ static void remember_slot_numeric_param(wrapper_instance_t *inst, const char *ke
         } else if (inst->slot_loop[sec][bank][slot] <= 0) {
             stop_source_loop_voice(inst, sec, bank, slot);
         }
+        for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+            source_loop_voice_t *v = &inst->source_loop_voice[i];
+            if (!v->active) continue;
+            if (v->sec == sec && v->bank == bank && v->slot == slot) v->loop_mode = inst->slot_loop[sec][bank][slot];
+        }
     } else if (!strcmp(key, "slot_pitch") || !strcmp(key, "slot_pitch_at")) {
         inst->slot_pitch[sec][bank][slot] = parse_float_clamped(payload, -48.0f, 48.0f, inst->slot_pitch[sec][bank][slot]);
         update_source_loop_voice_pitch(inst, sec, bank, slot);
     } else if (!strcmp(key, "slot_gain") || !strcmp(key, "slot_gain_at")) {
         inst->slot_gain[sec][bank][slot] = parse_float_clamped(payload, 0.0f, 4.0f, inst->slot_gain[sec][bank][slot]);
+        update_source_loop_voice_gain(inst, sec, bank, slot);
     } else if (!strcmp(key, "slot_pan") || !strcmp(key, "slot_pan_at")) {
         inst->slot_pan[sec][bank][slot] = parse_float_clamped(payload, -1.0f, 1.0f, inst->slot_pan[sec][bank][slot]);
+        update_source_loop_voice_pan(inst, sec, bank, slot);
+    } else if (!strcmp(key, "slot_start_trim") || !strcmp(key, "slot_start_trim_at")) {
+        inst->slot_start_trim_ms[sec][bank][slot] = parse_float_clamped(payload, TS_CORE_TRIM_MIN_MS, TS_CORE_TRIM_MAX_MS, inst->slot_start_trim_ms[sec][bank][slot]);
+        update_source_loop_voice_bounds(inst, sec, bank, slot, 1);
+    } else if (!strcmp(key, "slot_end_trim") || !strcmp(key, "slot_end_trim_at")) {
+        inst->slot_end_trim_ms[sec][bank][slot] = parse_float_clamped(payload, TS_CORE_TRIM_MIN_MS, TS_CORE_TRIM_MAX_MS, inst->slot_end_trim_ms[sec][bank][slot]);
+        update_source_loop_voice_bounds(inst, sec, bank, slot, 0);
     }
 }
 
@@ -1193,6 +1233,14 @@ static int pad_addr_from_note(int note, int *sec, int *slot) {
     if (sec) *sec = col < TS_SECTION_COLS ? 0 : 1;
     if (slot) *slot = row * TS_SECTION_COLS + (col % TS_SECTION_COLS);
     return 1;
+}
+
+static int64_t source_trim_ms_to_frames(source_sample_t *sample, float trim_ms) {
+    const uint32_t sample_rate = (sample && sample->sample_rate > 1000) ? sample->sample_rate : core_playback_sample_rate();
+    double frames = ((double)trim_ms * (double)sample_rate) / 1000.0;
+    if (frames > 2147483647.0) frames = 2147483647.0;
+    if (frames < -2147483647.0) frames = -2147483647.0;
+    return (int64_t)(frames >= 0.0 ? (frames + 0.5) : (frames - 0.5));
 }
 
 static void source_slice_bounds(wrapper_instance_t *inst,
@@ -1215,8 +1263,71 @@ static void source_slice_bounds(wrapper_instance_t *inst,
     if (s0 >= total) s0 = total > 0 ? total - 1 : 0;
     if (s1 > total) s1 = total;
     if (s1 <= s0 + 1) s1 = (s0 + 1 < total) ? s0 + 1 : total;
+    if (inst && total > 1) {
+        const int ssec = clampi(sec, 0, 1);
+        const int sbank = clampi(bank, 0, 7);
+        const int sslot = clampi(slot, 0, 15);
+        int64_t trimmed_start = (int64_t)s0 + source_trim_ms_to_frames(sample, inst->slot_start_trim_ms[ssec][sbank][sslot]);
+        int64_t trimmed_end = (int64_t)s1 - source_trim_ms_to_frames(sample, inst->slot_end_trim_ms[ssec][sbank][sslot]);
+
+        if (trimmed_start < 0) trimmed_start = 0;
+        if (trimmed_start >= (int64_t)total) trimmed_start = (int64_t)total - 1;
+        if (trimmed_end < 0) trimmed_end = 0;
+        if (trimmed_end > (int64_t)total) trimmed_end = (int64_t)total;
+        if (trimmed_end <= trimmed_start + 1) {
+            if (trimmed_start + 1 < (int64_t)total) {
+                trimmed_end = trimmed_start + 1;
+            } else {
+                trimmed_start = (int64_t)total - 2;
+                trimmed_end = (int64_t)total;
+            }
+        }
+
+        s0 = (uint32_t)trimmed_start;
+        s1 = (uint32_t)trimmed_end;
+    }
     if (start) *start = s0;
     if (end) *end = s1;
+}
+
+static void update_source_loop_voice_bounds(wrapper_instance_t *inst, int sec, int bank, int slot, int reset_on_start_change) {
+    if (!inst) return;
+    sec = clampi(sec, 0, 1);
+    bank = clampi(bank, 0, 7);
+    slot = clampi(slot, 0, 15);
+    source_sample_t *sample = &inst->source_sample[sec][bank];
+    if (!sample->frames_lr || sample->frame_count < 2) return;
+
+    uint32_t start = 0;
+    uint32_t end = sample->frame_count;
+    source_slice_bounds(inst, sample, sec, bank, slot, &start, &end);
+    if (end <= start + 1) return;
+
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        if (v->sec != sec || v->bank != bank || v->slot != slot) continue;
+
+        const int start_changed = v->start_frame != start;
+        v->start_frame = start;
+        v->end_frame = end;
+        if (reset_on_start_change && start_changed) {
+            v->pos = (double)start;
+            v->dir = 1;
+        } else {
+            if (v->pos < (double)start) v->pos = (double)start;
+            if (v->pos >= (double)(end - 1)) v->pos = (double)(end - 1);
+        }
+    }
+}
+
+static void update_all_source_loop_voice_bounds(wrapper_instance_t *inst, int reset_on_start_change) {
+    if (!inst) return;
+    for (int i = 0; i < TS_OVERLAY_VOICE_COUNT; i++) {
+        source_loop_voice_t *v = &inst->source_loop_voice[i];
+        if (!v->active) continue;
+        update_source_loop_voice_bounds(inst, v->sec, v->bank, v->slot, reset_on_start_change);
+    }
 }
 
 static source_loop_voice_t *voice_for_source_loop(wrapper_instance_t *inst, int sec, int bank, int slot) {
@@ -1742,7 +1853,9 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
     } else if (!strcmp(key, "slot_loop") || !strcmp(key, "slot_loop_at") ||
                !strcmp(key, "slot_pitch") || !strcmp(key, "slot_pitch_at") ||
                !strcmp(key, "slot_gain") || !strcmp(key, "slot_gain_at") ||
-               !strcmp(key, "slot_pan") || !strcmp(key, "slot_pan_at")) {
+               !strcmp(key, "slot_pan") || !strcmp(key, "slot_pan_at") ||
+               !strcmp(key, "slot_start_trim") || !strcmp(key, "slot_start_trim_at") ||
+               !strcmp(key, "slot_end_trim") || !strcmp(key, "slot_end_trim_at")) {
         remember_slot_numeric_param(inst, key, val ? val : "");
     } else if (!strcmp(key, "slot_sample_path")) {
         remember_slot_sample_path(inst, val ? val : "");

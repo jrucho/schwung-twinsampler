@@ -2143,9 +2143,9 @@ function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
     /*
-     * Keep end trim on the addressed `_at` key and send it with the inverse
-     * sign. The core's trim convention uses positive offsets from the start;
-     * a negative value trims back from the sample end.
+     * Keep the UI end control as an endpoint extension. The core applies end
+     * as `base_end - value`, so sending the inverse sign makes clockwise turns
+     * push the end later, matching the on-screen End control.
      */
     sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, !!forceDirect, true);
     markSessionChanged();
@@ -2181,8 +2181,48 @@ function setSlotMode(sec, bank, slot, modeGate, forceDirect = false) {
 
 function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const v = clampInt(loopMode, 0, 2, 0);
-    slotAt(sec, bank, slot).loop = v;
+    const sl = slotAt(sec, bank, slot);
+    const prev = clampInt(sl.loop, 0, 2, 0);
+    sl.loop = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
+    /*
+     * Keep trim points in lockstep across normal <-> loop mode transitions.
+     * Some DSP paths cache loop-region boundaries independently, so resend the
+     * current trim pair whenever loop mode changes.
+     */
+    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', sl.startTrim.toFixed(2), 180, true);
+    sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2), 180, true, true);
+    if (prev > 0 && v > 0 && prev !== v) {
+        const voice = currentVoiceAt(sec, bank, slot);
+        if (voice) {
+            const vel = clampInt(voice.velocity, 1, 127, 127);
+            refreshActiveLoopVoiceForTrim(sec, bank, slot, vel, !!voice.routeBank, 'loop-mode-switch:' + String(v));
+        }
+    }
+    if (prev > 0 && v === 0) {
+        /*
+         * Seamlessly return to normal one-shot/gate behavior when looping is disabled.
+         * If the pad is currently latched as a loop voice, release it immediately so
+         * subsequent presses behave like normal pads again.
+         */
+        releaseActiveVoice(sec, bank, slot, false, false, Date.now(), true);
+        /*
+         * Defensive hard-stop: if the DSP loop voice is still latched despite voice-map
+         * state changes, emit an explicit note-off on both routed and direct paths.
+         */
+        clearPendingOff(sec, bank, slot);
+        emitPadNoteOffNow(sec, bank, slot, true, false);
+        emitPadNoteOffNow(sec, bank, slot, false, false);
+        delete activeVoicesByAddr[addrKey(sec, bank, slot)];
+        const keys = Object.keys(s.activePadPress);
+        for (let i = 0; i < keys.length; i++) {
+            const press = s.activePadPress[keys[i]];
+            if (!press) continue;
+            if (press.sec === sec && press.bank === bank && press.slot === slot) delete s.activePadPress[keys[i]];
+        }
+        setPadPlaybackState(sec, bank, slot, 'idle');
+        markLedsDirty();
+    }
     markSessionChanged();
 }
 
@@ -2728,7 +2768,8 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
-    const silentTrimEdit = !s.startTrimSoundingEnabled;
+    const loopActive = clampInt(slotAt(a.sec, a.bank, a.slot).loop, 0, 2, 0) > 0;
+    const silentTrimEdit = !s.startTrimSoundingEnabled && !loopActive;
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
@@ -2740,7 +2781,8 @@ function adjustPadStartTrim(delta) {
 
 function adjustPadEndTrim(delta) {
     const a = focusedAddr();
-    const silentTrimEdit = !s.startTrimSoundingEnabled;
+    const loopActive = clampInt(slotAt(a.sec, a.bank, a.slot).loop, 0, 2, 0) > 0;
+    const silentTrimEdit = !s.startTrimSoundingEnabled && !loopActive;
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * step;
@@ -2805,7 +2847,8 @@ function adjustPadPitch(delta) {
 function adjustPadGain(delta) {
     const a = focusedAddr();
     const v = slotAt(a.sec, a.bank, a.slot).gain + delta * 0.05;
-    setSlotGain(a.sec, a.bank, a.slot, v);
+    setSlotGain(a.sec, a.bank, a.slot, v, true);
+    refreshActiveLoopVoiceForGain(a.sec, a.bank, a.slot);
     showStatus('P' + (a.slot + 1) + ' Gain x' + slotAt(a.sec, a.bank, a.slot).gain.toFixed(2), 80);
     s.dirty = true;
 }
@@ -2862,6 +2905,36 @@ function refreshActiveLoopVoicesInBankForPitch(sec, bank) {
     return refreshed;
 }
 
+function refreshActiveLoopVoiceForGain(sec, bank, slot) {
+    const sl = slotAt(sec, bank, slot);
+    if (clampInt(sl.loop, 0, 2, 0) <= 0) return false;
+    const voice = currentVoiceAt(sec, bank, slot);
+    if (!voice) return false;
+    const velocity = clampInt(voice.velocity, 1, 127, 127);
+    const sourceTag = 'gain-loop-refresh:' + String(sec) + ':' + String(bank) + ':' + String(slot);
+    return refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, !!voice.routeBank, sourceTag);
+}
+
+function refreshOtherActiveLoopVoices(sec, bank, slot) {
+    const keys = Object.keys(activeVoicesByAddr);
+    for (let i = 0; i < keys.length; i++) {
+        const v = activeVoicesByAddr[keys[i]];
+        if (!v) continue;
+        if (v.sec === sec && v.bank === bank && v.slot === slot) continue;
+        const sl = slotAt(v.sec, v.bank, v.slot);
+        if (clampInt(sl.loop, 0, 2, 0) <= 0) continue;
+        const vel = clampInt(v.velocity, 1, 127, 127);
+        refreshActiveLoopVoiceForTrim(
+            v.sec,
+            v.bank,
+            v.slot,
+            vel,
+            !!v.routeBank,
+            'loop-anti-choke:' + String(sec) + ':' + String(bank) + ':' + String(slot)
+        );
+    }
+}
+
 function retriggerFocusedPadForStartTrim() {
     const sec = s.focusedSection;
     const bank = focusedBankIndex(sec);
@@ -2902,7 +2975,9 @@ function refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, routeBank, sou
 
     const triggerNote = padNoteFor(sec, slot);
     const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
-    if (routeBank) {
+    const loopMode = clampInt(slotAt(sec, bank, slot).loop, 0, 2, 0);
+    const effectiveRouteBank = (loopMode > 0) ? true : !!routeBank;
+    if (effectiveRouteBank) {
         withPlaybackBank(sec, bank, () => {
             spe('pad_note_on', triggerNote + ':' + vel);
         });
@@ -2918,7 +2993,7 @@ function refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, routeBank, sou
     existing.sec = sec;
     existing.bank = bank;
     existing.slot = slot;
-    existing.routeBank = !!routeBank;
+    existing.routeBank = !!effectiveRouteBank;
     existing.owner = src;
     existing.sourceTag = src;
     existing.velocity = vel;
@@ -2944,7 +3019,7 @@ function adjustPadLoop(delta) {
     const a = focusedAddr();
     const cur = slotAt(a.sec, a.bank, a.slot).loop;
     const next = clamp(cur + (delta > 0 ? 1 : -1), 0, 2);
-    setSlotLoop(a.sec, a.bank, a.slot, next);
+    setSlotLoop(a.sec, a.bank, a.slot, next, true);
     showStatus('P' + (a.slot + 1) + ' Loop ' + LOOP_LABELS[slotAt(a.sec, a.bank, a.slot).loop], 80);
     s.dirty = true;
 }
@@ -3067,6 +3142,7 @@ function adjustAllGain(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).gain + delta * 0.05;
         setSlotGain(sec, bank, slot, v, true);
+        refreshActiveLoopVoiceForGain(sec, bank, slot);
     });
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
 }
@@ -3785,6 +3861,22 @@ function applyAllStateToDsp() {
     }
     for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) sendFxStateToDsp('global', 0, 0, fx);
     sendHiddenFxOffToDsp();
+    /* Extra blocking FX sync to prevent stale audible FX state on auto-restored sessions. */
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) {
+        const dspFx = fxDspIndex(fx, 'global');
+        const ge = globalFxEffect(fx);
+        spb('performance_fx_global_toggle', dspFx + ':' + clampInt(ge && ge.enabled, 0, 1, 0), 180);
+        spb('pfx_global_toggle', dspFx + ':' + clampInt(ge && ge.enabled, 0, 1, 0), 180);
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                const be = bankFxEffect(sec, bank, fx);
+                const en = clampInt(be && be.enabled, 0, 1, 0);
+                const payload = sec + ':' + bank + ':' + dspFx + ':' + en;
+                spb('performance_fx_bank_toggle', payload, 180);
+                spb('pfx_bank_toggle', payload, 180);
+            }
+        }
+    }
 
     setSelectedSlice(s.selectedSlice);
     markLedsDirty();
@@ -4847,8 +4939,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     flashPadPress(sec, bank, slot);
     s.lastPadTriggerTick = s.transportTicks;
     const sl = slotAt(sec, bank, slot);
-    const sourceLoopNoChoke = (s.sections[sec].mode === MODE_SINGLE) && clampInt(sl.loop, 0, 2, 0) > 0;
-    const effectiveRouteBank = !!routeBank && !sourceLoopNoChoke;
+    const effectiveRouteBank = !!routeBank;
     const triggerNote = padNoteFor(sec, slot);
     const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
     const nowMs = Date.now();
@@ -4884,6 +4975,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         lastOnMs: nowMs
     };
     setPadPlaybackState(sec, bank, slot, 'playing');
+    /* no-op: avoid implicit loop retriggers from non-loop pads */
     markLedsDirty();
     return true;
 }
@@ -5256,7 +5348,8 @@ function handlePadNote(note, velocity) {
                 setSelectedSlice(slice, false, false);
                 return true;
             }
-            triggerPadOn(sec, bank, slot, velocity, false, true, 'pad-toggle:' + String(note));
+            /* Route loop/ping pads through bank routing to avoid mono choke interactions. */
+            triggerPadOn(sec, bank, slot, velocity, true, true, 'pad-toggle:' + String(note));
             s.activePadPress[String(note)] = {
                 sec,
                 bank,
@@ -5871,6 +5964,21 @@ function init() {
     ];
 
     initFromDspDefaults();
+    /*
+     * Prevent stale DSP effect toggles from previous module instances/sessions.
+     * We force all known bank/global FX lanes off before restoring serialized state.
+     */
+    for (let dspFx = 0; dspFx < DSP_FX_COUNT; dspFx++) {
+        sp('performance_fx_global_toggle', dspFx + ':0');
+        sp('pfx_global_toggle', dspFx + ':0');
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                const payload = sec + ':' + bank + ':' + dspFx + ':0';
+                sp('performance_fx_bank_toggle', payload);
+                sp('pfx_bank_toggle', payload);
+            }
+        }
+    }
     activateStandaloneMidiPort();
     s.copySource = null;
     s.copyHeld = false;
