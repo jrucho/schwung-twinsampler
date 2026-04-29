@@ -2127,7 +2127,7 @@ function setSlotDecay(sec, bank, slot, value, forceDirect = false) {
 function setSlotStartTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).startTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180, true);
+    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180, !!forceDirect);
     markSessionChanged();
 }
 
@@ -2147,7 +2147,7 @@ function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
      * sign. The core's trim convention uses positive offsets from the start;
      * a negative value trims back from the sample end.
      */
-    sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, true, true);
+    sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, !!forceDirect, true);
     markSessionChanged();
 }
 
@@ -2184,7 +2184,7 @@ function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const sl = slotAt(sec, bank, slot);
     const prev = clampInt(sl.loop, 0, 2, 0);
     sl.loop = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, true);
+    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
     if (prev > 0 && v > 0 && prev !== v) {
         const voice = currentVoiceAt(sec, bank, slot);
         if (voice) {
@@ -3010,7 +3010,7 @@ function adjustPadLoop(delta) {
     const a = focusedAddr();
     const cur = slotAt(a.sec, a.bank, a.slot).loop;
     const next = clamp(cur + (delta > 0 ? 1 : -1), 0, 2);
-    setSlotLoop(a.sec, a.bank, a.slot, next);
+    setSlotLoop(a.sec, a.bank, a.slot, next, true);
     showStatus('P' + (a.slot + 1) + ' Loop ' + LOOP_LABELS[slotAt(a.sec, a.bank, a.slot).loop], 80);
     s.dirty = true;
 }
