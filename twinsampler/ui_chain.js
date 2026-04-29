@@ -2185,6 +2185,13 @@ function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const prev = clampInt(sl.loop, 0, 2, 0);
     sl.loop = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
+    /*
+     * Keep trim points in lockstep across normal <-> loop mode transitions.
+     * Some DSP paths cache loop-region boundaries independently, so resend the
+     * current trim pair whenever loop mode changes.
+     */
+    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', sl.startTrim.toFixed(2), 180, true);
+    sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2), 180, true, true);
     if (prev > 0 && v > 0 && prev !== v) {
         const voice = currentVoiceAt(sec, bank, slot);
         if (voice) {
