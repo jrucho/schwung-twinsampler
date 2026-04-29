@@ -2192,6 +2192,14 @@ function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
          * subsequent presses behave like normal pads again.
          */
         releaseActiveVoice(sec, bank, slot, false, false, Date.now(), true);
+        /*
+         * Defensive hard-stop: if the DSP loop voice is still latched despite voice-map
+         * state changes, emit an explicit note-off on both routed and direct paths.
+         */
+        clearPendingOff(sec, bank, slot);
+        emitPadNoteOffNow(sec, bank, slot, true, false);
+        emitPadNoteOffNow(sec, bank, slot, false, false);
+        delete activeVoicesByAddr[addrKey(sec, bank, slot)];
         const keys = Object.keys(s.activePadPress);
         for (let i = 0; i < keys.length; i++) {
             const press = s.activePadPress[keys[i]];
