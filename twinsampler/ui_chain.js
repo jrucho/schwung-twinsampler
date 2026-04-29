@@ -2127,7 +2127,7 @@ function setSlotDecay(sec, bank, slot, value, forceDirect = false) {
 function setSlotStartTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).startTrim = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180, !!forceDirect);
+    sendSlotParamCompat(sec, bank, slot, 'slot_start_trim_at', 'slot_start_trim', v.toFixed(2), 180, true);
     markSessionChanged();
 }
 
@@ -2147,7 +2147,7 @@ function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
      * sign. The core's trim convention uses positive offsets from the start;
      * a negative value trims back from the sample end.
      */
-    sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, !!forceDirect, true);
+    sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, true, true);
     markSessionChanged();
 }
 
@@ -2184,7 +2184,7 @@ function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const sl = slotAt(sec, bank, slot);
     const prev = clampInt(sl.loop, 0, 2, 0);
     sl.loop = v;
-    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
+    sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, true);
     if (prev > 0 && v > 0 && prev !== v) {
         const voice = currentVoiceAt(sec, bank, slot);
         if (voice) {
@@ -4937,19 +4937,6 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     const existing = activeVoicesByAddr[key];
     const src = String(sourceTag || '');
     if (existing) {
-        const isLoopPad = clampInt(sl.loop, 0, 2, 0) > 0;
-        const refreshSource = src.startsWith('pitch-loop-refresh:') ||
-            src.startsWith('trim-loop-preview:') ||
-            src.startsWith('gain-loop-refresh:') ||
-            src.startsWith('loop-anti-choke:') ||
-            src.startsWith('loop-mode-switch:');
-        if (isLoopPad && src && String(existing.sourceTag || '') !== src && !refreshSource) {
-            /*
-             * No-choke behavior for loop/ping pads:
-             * keep currently running loop voice alive when other triggers happen.
-             */
-            return true;
-        }
         const sameSource = src && existing.sourceTag === src;
         const deltaMs = Math.max(0, nowMs - clampInt(existing.lastOnMs, 0, 0x7fffffff, nowMs));
         if (sameSource && deltaMs <= MIDI_DUPLICATE_NOTE_ON_GUARD_MS) return true;
@@ -4978,7 +4965,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         lastOnMs: nowMs
     };
     setPadPlaybackState(sec, bank, slot, 'playing');
-    if (clampInt(sl.loop, 0, 2, 0) <= 0) refreshOtherActiveLoopVoices(sec, bank, slot);
+    /* no-op: avoid implicit loop retriggers from non-loop pads */
     markLedsDirty();
     return true;
 }
