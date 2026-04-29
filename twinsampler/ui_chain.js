@@ -2185,6 +2185,13 @@ function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const prev = clampInt(sl.loop, 0, 2, 0);
     sl.loop = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
+    if (prev > 0 && v > 0 && prev !== v) {
+        const voice = currentVoiceAt(sec, bank, slot);
+        if (voice) {
+            const vel = clampInt(voice.velocity, 1, 127, 127);
+            refreshActiveLoopVoiceForTrim(sec, bank, slot, vel, !!voice.routeBank, 'loop-mode-switch:' + String(v));
+        }
+    }
     if (prev > 0 && v === 0) {
         /*
          * Seamlessly return to normal one-shot/gate behavior when looping is disabled.
@@ -4931,7 +4938,12 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     const src = String(sourceTag || '');
     if (existing) {
         const isLoopPad = clampInt(sl.loop, 0, 2, 0) > 0;
-        if (isLoopPad && src && String(existing.sourceTag || '') !== src) {
+        const refreshSource = src.startsWith('pitch-loop-refresh:') ||
+            src.startsWith('trim-loop-preview:') ||
+            src.startsWith('gain-loop-refresh:') ||
+            src.startsWith('loop-anti-choke:') ||
+            src.startsWith('loop-mode-switch:');
+        if (isLoopPad && src && String(existing.sourceTag || '') !== src && !refreshSource) {
             /*
              * No-choke behavior for loop/ping pads:
              * keep currently running loop voice alive when other triggers happen.
