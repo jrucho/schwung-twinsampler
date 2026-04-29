@@ -2143,9 +2143,9 @@ function setSlotEndTrim(sec, bank, slot, value, forceDirect = false) {
     const v = clampFloat(value, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     slotAt(sec, bank, slot).endTrim = v;
     /*
-     * Keep end trim on the addressed `_at` key and send it with the inverse
-     * sign. The core's trim convention uses positive offsets from the start;
-     * a negative value trims back from the sample end.
+     * Keep the UI end control as an endpoint extension. The core applies end
+     * as `base_end - value`, so sending the inverse sign makes clockwise turns
+     * push the end later, matching the on-screen End control.
      */
     sendSlotEndTrimToDsp(sec, bank, slot, v.toFixed(2), 180, !!forceDirect, true);
     markSessionChanged();
