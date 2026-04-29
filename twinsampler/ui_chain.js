@@ -2891,6 +2891,26 @@ function refreshActiveLoopVoiceForGain(sec, bank, slot) {
     return refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, !!voice.routeBank, sourceTag);
 }
 
+function refreshOtherActiveLoopVoices(sec, bank, slot) {
+    const keys = Object.keys(activeVoicesByAddr);
+    for (let i = 0; i < keys.length; i++) {
+        const v = activeVoicesByAddr[keys[i]];
+        if (!v) continue;
+        if (v.sec === sec && v.bank === bank && v.slot === slot) continue;
+        const sl = slotAt(v.sec, v.bank, v.slot);
+        if (clampInt(sl.loop, 0, 2, 0) <= 0) continue;
+        const vel = clampInt(v.velocity, 1, 127, 127);
+        refreshActiveLoopVoiceForTrim(
+            v.sec,
+            v.bank,
+            v.slot,
+            vel,
+            !!v.routeBank,
+            'loop-anti-choke:' + String(sec) + ':' + String(bank) + ':' + String(slot)
+        );
+    }
+}
+
 function retriggerFocusedPadForStartTrim() {
     const sec = s.focusedSection;
     const bank = focusedBankIndex(sec);
@@ -3815,6 +3835,22 @@ function applyAllStateToDsp() {
     }
     for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) sendFxStateToDsp('global', 0, 0, fx);
     sendHiddenFxOffToDsp();
+    /* Extra blocking FX sync to prevent stale audible FX state on auto-restored sessions. */
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) {
+        const dspFx = fxDspIndex(fx, 'global');
+        const ge = globalFxEffect(fx);
+        spb('performance_fx_global_toggle', dspFx + ':' + clampInt(ge && ge.enabled, 0, 1, 0), 180);
+        spb('pfx_global_toggle', dspFx + ':' + clampInt(ge && ge.enabled, 0, 1, 0), 180);
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                const be = bankFxEffect(sec, bank, fx);
+                const en = clampInt(be && be.enabled, 0, 1, 0);
+                const payload = sec + ':' + bank + ':' + dspFx + ':' + en;
+                spb('performance_fx_bank_toggle', payload, 180);
+                spb('pfx_bank_toggle', payload, 180);
+            }
+        }
+    }
 
     setSelectedSlice(s.selectedSlice);
     markLedsDirty();
@@ -4922,6 +4958,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         lastOnMs: nowMs
     };
     setPadPlaybackState(sec, bank, slot, 'playing');
+    if (clampInt(sl.loop, 0, 2, 0) <= 0) refreshOtherActiveLoopVoices(sec, bank, slot);
     markLedsDirty();
     return true;
 }
