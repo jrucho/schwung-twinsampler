@@ -5331,7 +5331,8 @@ function handlePadNote(note, velocity) {
                 setSelectedSlice(slice, false, false);
                 return true;
             }
-            triggerPadOn(sec, bank, slot, velocity, false, true, 'pad-toggle:' + String(note));
+            /* Route loop/ping pads through bank routing to avoid mono choke interactions. */
+            triggerPadOn(sec, bank, slot, velocity, true, true, 'pad-toggle:' + String(note));
             s.activePadPress[String(note)] = {
                 sec,
                 bank,
