@@ -2761,7 +2761,8 @@ function adjustPadDecay(delta) {
 
 function adjustPadStartTrim(delta) {
     const a = focusedAddr();
-    const silentTrimEdit = !s.startTrimSoundingEnabled;
+    const loopActive = clampInt(slotAt(a.sec, a.bank, a.slot).loop, 0, 2, 0) > 0;
+    const silentTrimEdit = !s.startTrimSoundingEnabled && !loopActive;
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).startTrim + delta * step;
@@ -2773,7 +2774,8 @@ function adjustPadStartTrim(delta) {
 
 function adjustPadEndTrim(delta) {
     const a = focusedAddr();
-    const silentTrimEdit = !s.startTrimSoundingEnabled;
+    const loopActive = clampInt(slotAt(a.sec, a.bank, a.slot).loop, 0, 2, 0) > 0;
+    const silentTrimEdit = !s.startTrimSoundingEnabled && !loopActive;
     if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
     const step = s.shiftHeld ? TRIM_STEP_COARSE : TRIM_STEP_FINE;
     const v = slotAt(a.sec, a.bank, a.slot).endTrim + delta * step;
