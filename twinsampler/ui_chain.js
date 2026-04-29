@@ -2968,7 +2968,9 @@ function refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, routeBank, sou
 
     const triggerNote = padNoteFor(sec, slot);
     const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
-    if (routeBank) {
+    const loopMode = clampInt(slotAt(sec, bank, slot).loop, 0, 2, 0);
+    const effectiveRouteBank = (loopMode > 0) ? true : !!routeBank;
+    if (effectiveRouteBank) {
         withPlaybackBank(sec, bank, () => {
             spe('pad_note_on', triggerNote + ':' + vel);
         });
@@ -2984,7 +2986,7 @@ function refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, routeBank, sou
     existing.sec = sec;
     existing.bank = bank;
     existing.slot = slot;
-    existing.routeBank = !!routeBank;
+    existing.routeBank = !!effectiveRouteBank;
     existing.owner = src;
     existing.sourceTag = src;
     existing.velocity = vel;
@@ -4930,8 +4932,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     flashPadPress(sec, bank, slot);
     s.lastPadTriggerTick = s.transportTicks;
     const sl = slotAt(sec, bank, slot);
-    const sourceLoopNoChoke = (s.sections[sec].mode === MODE_SINGLE) && clampInt(sl.loop, 0, 2, 0) > 0;
-    const effectiveRouteBank = !!routeBank && !sourceLoopNoChoke;
+    const effectiveRouteBank = !!routeBank;
     const triggerNote = padNoteFor(sec, slot);
     const vel = s.velocitySens ? clampInt(velocity, 1, 127, 100) : 127;
     const nowMs = Date.now();
