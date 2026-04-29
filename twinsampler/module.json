@@ -4,7 +4,7 @@
   "abbrev": "TS",
   "description": "TwinSampler overtake module with full dual-grid bank control",
   "author": "j3threejay",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "ui": "ui.js",
   "dsp": "dsp.so",
   "api_version": 2,

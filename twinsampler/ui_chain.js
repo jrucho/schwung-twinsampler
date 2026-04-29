@@ -2181,8 +2181,26 @@ function setSlotMode(sec, bank, slot, modeGate, forceDirect = false) {
 
 function setSlotLoop(sec, bank, slot, loopMode, forceDirect = false) {
     const v = clampInt(loopMode, 0, 2, 0);
-    slotAt(sec, bank, slot).loop = v;
+    const sl = slotAt(sec, bank, slot);
+    const prev = clampInt(sl.loop, 0, 2, 0);
+    sl.loop = v;
     sendSlotParamCompat(sec, bank, slot, 'slot_loop_at', 'slot_loop', v, 180, !!forceDirect);
+    if (prev > 0 && v === 0) {
+        /*
+         * Seamlessly return to normal one-shot/gate behavior when looping is disabled.
+         * If the pad is currently latched as a loop voice, release it immediately so
+         * subsequent presses behave like normal pads again.
+         */
+        releaseActiveVoice(sec, bank, slot, false, false, Date.now(), true);
+        const keys = Object.keys(s.activePadPress);
+        for (let i = 0; i < keys.length; i++) {
+            const press = s.activePadPress[keys[i]];
+            if (!press) continue;
+            if (press.sec === sec && press.bank === bank && press.slot === slot) delete s.activePadPress[keys[i]];
+        }
+        setPadPlaybackState(sec, bank, slot, 'idle');
+        markLedsDirty();
+    }
     markSessionChanged();
 }
 
@@ -2805,7 +2823,8 @@ function adjustPadPitch(delta) {
 function adjustPadGain(delta) {
     const a = focusedAddr();
     const v = slotAt(a.sec, a.bank, a.slot).gain + delta * 0.05;
-    setSlotGain(a.sec, a.bank, a.slot, v);
+    setSlotGain(a.sec, a.bank, a.slot, v, true);
+    refreshActiveLoopVoiceForGain(a.sec, a.bank, a.slot);
     showStatus('P' + (a.slot + 1) + ' Gain x' + slotAt(a.sec, a.bank, a.slot).gain.toFixed(2), 80);
     s.dirty = true;
 }
@@ -2860,6 +2879,16 @@ function refreshActiveLoopVoicesInBankForPitch(sec, bank) {
         if (refreshActiveLoopVoiceForPitch(sec, bank, slot)) refreshed = true;
     }
     return refreshed;
+}
+
+function refreshActiveLoopVoiceForGain(sec, bank, slot) {
+    const sl = slotAt(sec, bank, slot);
+    if (clampInt(sl.loop, 0, 2, 0) <= 0) return false;
+    const voice = currentVoiceAt(sec, bank, slot);
+    if (!voice) return false;
+    const velocity = clampInt(voice.velocity, 1, 127, 127);
+    const sourceTag = 'gain-loop-refresh:' + String(sec) + ':' + String(bank) + ':' + String(slot);
+    return refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, !!voice.routeBank, sourceTag);
 }
 
 function retriggerFocusedPadForStartTrim() {
@@ -3067,6 +3096,7 @@ function adjustAllGain(delta) {
     applyAllSlotsInFocusedBank((sec, bank, slot) => {
         const v = slotAt(sec, bank, slot).gain + delta * 0.05;
         setSlotGain(sec, bank, slot, v, true);
+        refreshActiveLoopVoiceForGain(sec, bank, slot);
     });
     showStatus('All gain x' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).gain.toFixed(2), 80);
 }
@@ -4856,6 +4886,14 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     const existing = activeVoicesByAddr[key];
     const src = String(sourceTag || '');
     if (existing) {
+        const isLoopPad = clampInt(sl.loop, 0, 2, 0) > 0;
+        if (isLoopPad && src && String(existing.sourceTag || '') !== src) {
+            /*
+             * No-choke behavior for loop/ping pads:
+             * keep currently running loop voice alive when other triggers happen.
+             */
+            return true;
+        }
         const sameSource = src && existing.sourceTag === src;
         const deltaMs = Math.max(0, nowMs - clampInt(existing.lastOnMs, 0, 0x7fffffff, nowMs));
         if (sameSource && deltaMs <= MIDI_DUPLICATE_NOTE_ON_GUARD_MS) return true;
@@ -5871,6 +5909,21 @@ function init() {
     ];
 
     initFromDspDefaults();
+    /*
+     * Prevent stale DSP effect toggles from previous module instances/sessions.
+     * We force all known bank/global FX lanes off before restoring serialized state.
+     */
+    for (let dspFx = 0; dspFx < DSP_FX_COUNT; dspFx++) {
+        sp('performance_fx_global_toggle', dspFx + ':0');
+        sp('pfx_global_toggle', dspFx + ':0');
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                const payload = sec + ':' + bank + ':' + dspFx + ':0';
+                sp('performance_fx_bank_toggle', payload);
+                sp('pfx_bank_toggle', payload);
+            }
+        }
+    }
     activateStandaloneMidiPort();
     s.copySource = null;
     s.copyHeld = false;
