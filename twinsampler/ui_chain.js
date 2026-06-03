@@ -295,6 +295,17 @@ const DECAY_MAX_MS = 600000.0;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
+const MENU_ITEMS = ['Samples', 'Load Session', 'Save', 'Save New', 'New / Init', 'FX', 'Help', 'Leave In Background', 'Exit'];
+const EXIT_MENU_ITEMS = ['Leave In Background', 'Exit'];
+const BOOT_PHASE_COUNT = 7;
+const BOOT_MIN_TICKS = 28;
+const BOOT_LED_COLORS = [AzureBlue, Cyan, ElectricViolet, BrightPink, VividYellow, BrightGreen];
+const HELP_PAGES = [
+    ['TwinSampler Help', 'Menu: app menu', 'Back: leave/exit', 'Jog: move/select', 'Shortcuts still work'],
+    ['Samples', 'Jog click: browser', 'Menu in browser:', 'cycle target', 'Jog click: load'],
+    ['Sessions', 'Shift+Menu: load', 'Shift+Copy: save', 'INIT is locked', 'Autosaves on exit'],
+    ['Background', 'Shift+Back leaves', 'Back: leave/exit', 'Exit quits fully', 'Autosave enabled']
+];
 
 function createLooperState() {
     return {
@@ -398,6 +409,63 @@ function shortText(text, max = 21) {
     const s = String(text || '');
     if (s.length <= max) return s;
     return s.slice(0, Math.max(1, max - 1)) + '...';
+}
+
+function callDisplayFn(names, args) {
+    for (let i = 0; i < names.length; i++) {
+        try {
+            const fn = globalThis && globalThis[names[i]];
+            if (typeof fn === 'function') {
+                fn.apply(null, args);
+                return true;
+            }
+        } catch (e) {}
+    }
+    return false;
+}
+
+function drawPixel(x, y, on = true) {
+    const px = clampInt(x, 0, 127, 0);
+    const py = clampInt(y, 0, 63, 0);
+    const v = on ? 1 : 0;
+    if (callDisplayFn(['draw_pixel', 'set_pixel', 'screen_draw_pixel', 'screen_set_pixel'], [px, py, v])) return true;
+    if (callDisplayFn(['fill_rect', 'screen_fill_rect', 'draw_rect'], [px, py, 1, 1, v])) return true;
+    return false;
+}
+
+function fillLogoRect(x, y, w, h, on = true) {
+    const px = clampInt(x, 0, 127, 0);
+    const py = clampInt(y, 0, 63, 0);
+    const ww = clampInt(w, 0, 128 - px, 0);
+    const hh = clampInt(h, 0, 64 - py, 0);
+    if (ww <= 0 || hh <= 0) return false;
+    const v = on ? 1 : 0;
+    if (callDisplayFn(['fill_rect', 'screen_fill_rect'], [px, py, ww, hh, v])) return true;
+    let ok = false;
+    for (let yy = 0; yy < hh; yy++) {
+        for (let xx = 0; xx < ww; xx++) {
+            ok = drawPixel(px + xx, py + yy, on) || ok;
+        }
+    }
+    return ok;
+}
+
+function drawLogoHLine(x, y, w) {
+    fillLogoRect(x, y, w, 1, true);
+}
+
+function drawLogoVLine(x, y, h) {
+    fillLogoRect(x, y, 1, h, true);
+}
+
+function hasPixelDisplay() {
+    const names = ['draw_pixel', 'set_pixel', 'screen_draw_pixel', 'screen_set_pixel', 'fill_rect', 'screen_fill_rect'];
+    for (let i = 0; i < names.length; i++) {
+        try {
+            if (globalThis && typeof globalThis[names[i]] === 'function') return true;
+        } catch (e) {}
+    }
+    return false;
 }
 
 function sectionFromSlice(slice) {
@@ -573,6 +641,19 @@ const s = {
     volumeTouchHeld: false,
     knobPage: 'A',
     editScope: 'P', /* P=pad slot, G=focused section+bank */
+    previousView: 'main',
+    menuCursor: 0,
+    exitMenuCursor: 0,
+    helpPage: 0,
+    bootActive: false,
+    bootPhase: 0,
+    bootTicks: 0,
+    bootRestoredFromSession: false,
+    bootMessage: 'Starting...',
+    confirmTitle: '',
+    confirmBody: '',
+    confirmAction: '',
+    parkedReturnView: 'main',
     fxScreenScope: 'bank', /* bank|global */
     selectedBankFxEffect: 0,
     selectedGlobalFxEffect: 0,
@@ -622,6 +703,8 @@ const s = {
     previewCurrentPath: '',
     sessionName: DEFAULT_SESSION_NAME,
     sessionCharIndex: 0,
+    sessionNameEditing: false,
+    pendingOverwriteName: '',
 
     copySource: null,
     copyHeld: false,
@@ -1368,6 +1451,234 @@ function showStatus(msg, ticks = STATUS_TICKS) {
     s.dirty = true;
 }
 
+function openMenu() {
+    if (s.view !== 'menu') s.previousView = s.view || 'main';
+    if (s.previousView === 'confirm') s.previousView = 'main';
+    previewStop();
+    s.view = 'menu';
+    s.menuCursor = clampInt(s.menuCursor, 0, MENU_ITEMS.length - 1, 0);
+    showStatus('Menu', 50);
+    markLedsDirty();
+}
+
+function closeToPreviousView(fallback = 'main') {
+    const prev = s.previousView && s.previousView !== 'menu' && s.previousView !== 'confirm'
+        ? s.previousView
+        : fallback;
+    s.view = prev;
+    s.previousView = 'main';
+    showStatus(prev === 'main' ? 'Main screen' : 'Returned', 60);
+    markLedsDirty();
+}
+
+function openConfirm(title, body, action) {
+    s.previousView = s.view === 'confirm' ? (s.previousView || 'main') : (s.view || 'main');
+    s.confirmTitle = String(title || 'CONFIRM');
+    s.confirmBody = String(body || 'Jog=YES Back=NO');
+    s.confirmAction = String(action || '');
+    s.view = 'confirm';
+    s.dirty = true;
+    markLedsDirty();
+}
+
+function cancelConfirm() {
+    const prev = s.previousView && s.previousView !== 'confirm' ? s.previousView : 'main';
+    s.view = prev;
+    s.confirmAction = '';
+    showStatus('CANCELLED', 70);
+    markLedsDirty();
+}
+
+function requestHostExit() {
+    try {
+        if (globalThis && typeof globalThis.twinsampler_request_exit === 'function') {
+            globalThis.twinsampler_request_exit();
+            return;
+        }
+    } catch (e) {}
+    showStatus('Exit unavailable', 100);
+}
+
+function requestLeaveBackground() {
+    saveAutosaveSession(true);
+    try {
+        if (globalThis && typeof globalThis.twinsampler_leave_background === 'function') {
+            globalThis.twinsampler_leave_background();
+            return;
+        }
+    } catch (e) {}
+}
+
+function openExitMenu() {
+    s.view = 'exitMenu';
+    s.exitMenuCursor = clampInt(s.exitMenuCursor, 0, EXIT_MENU_ITEMS.length - 1, 0);
+    showStatus('Leave / Exit', 50);
+    markLedsDirty();
+}
+
+function selectExitMenuItem() {
+    const item = EXIT_MENU_ITEMS[clampInt(s.exitMenuCursor, 0, EXIT_MENU_ITEMS.length - 1, 0)] || '';
+    if (item === 'Leave In Background') {
+        requestLeaveBackground();
+        return;
+    }
+    if (item === 'Exit') requestHostExit();
+}
+
+function resetToInitSession() {
+    previewStop();
+    const parsed = makeInitSessionPayload();
+    parsed.sessionName = DEFAULT_SESSION_NAME;
+    if (!applyParsedSession(parsed, false, 'INIT')) {
+        showStatus('NEW FAIL', 120);
+        return;
+    }
+    s.sessionName = DEFAULT_SESSION_NAME;
+    s.sessionCharIndex = 0;
+    s.view = 'main';
+    resetHistory();
+    markSessionChanged();
+    showStatus('NEW SESSION', 100);
+    markLedsDirty();
+}
+
+function confirmYes() {
+    const action = s.confirmAction;
+    s.confirmAction = '';
+    if (action === 'quit') {
+        requestHostExit();
+        return;
+    }
+    if (action === 'new') {
+        resetToInitSession();
+        return;
+    }
+    if (action === 'saveOverwrite') {
+        const name = sanitizeSessionName(s.pendingOverwriteName || s.sessionName);
+        s.pendingOverwriteName = '';
+        s.sessionName = name;
+        s.sessionNameEditing = false;
+        s.view = 'browser';
+        saveSessionToPath(sessionPathFromName(name), name, false, true);
+        if (s.browserMode === 'sessions') selectSessionEntryByName(name);
+        return;
+    }
+    cancelConfirm();
+}
+
+function openHelp() {
+    if (s.view !== 'help') s.previousView = s.view || 'main';
+    s.view = 'help';
+    s.helpPage = clampInt(s.helpPage, 0, HELP_PAGES.length - 1, 0);
+    showStatus('Help', 50);
+    markLedsDirty();
+}
+
+function parkTwinSampler() {
+    previewStop();
+    s.parkedReturnView = (s.view && s.view !== 'menu' && s.view !== 'confirm') ? s.view : 'main';
+    s.view = 'park';
+    clearPadAndStepLeds();
+    showStatus('PARKED', 90);
+    markLedsDirty();
+}
+
+function returnFromPark() {
+    s.view = s.parkedReturnView && s.parkedReturnView !== 'park' ? s.parkedReturnView : 'main';
+    showStatus('RETURNED', 80);
+    forceLedRefreshNow();
+    s.dirty = true;
+}
+
+function selectMenuItem() {
+    const item = MENU_ITEMS[clampInt(s.menuCursor, 0, MENU_ITEMS.length - 1, 0)] || '';
+    if (item === 'Samples') {
+        s.view = 'browser';
+        browserOpen(s.browserMode === 'samples' ? (s.browserPath || SAMPLES_DIR) : SAMPLES_DIR, 'samples');
+        return;
+    }
+    if (item === 'Load Session') {
+        openSessionBrowser('load', false);
+        return;
+    }
+    if (item === 'Save') {
+        saveSessionNamed(false);
+        return;
+    }
+    if (item === 'Save New') {
+        openSessionSaveNew();
+        return;
+    }
+    if (item === 'New / Init') {
+        openConfirm('NEW / INIT?', 'Clear current state', 'new');
+        return;
+    }
+    if (item === 'FX') {
+        s.view = 'fx';
+        s.fxScreenScope = 'bank';
+        showStatus('FX screen', 70);
+        markLedsDirty();
+        return;
+    }
+    if (item === 'Help') {
+        openHelp();
+        return;
+    }
+    if (item === 'Leave In Background') {
+        requestLeaveBackground();
+        return;
+    }
+    if (item === 'Exit') {
+        requestHostExit();
+    }
+}
+
+function handleBackButton() {
+    if (s.view === 'boot') {
+        showStatus('Loading...', 40);
+        return true;
+    }
+    if (s.view === 'browser') {
+        if (s.browserMode === 'sessions' && s.sessionNameEditing) {
+            s.sessionNameEditing = false;
+            showStatus('Name done', 60);
+            s.dirty = true;
+            return true;
+        }
+        previewStop();
+        s.view = 'main';
+        showStatus('Browser closed', 60);
+        s.dirty = true;
+        return true;
+    }
+    if (s.view === 'fx') {
+        s.view = 'main';
+        showStatus('Main screen', 70);
+        markLedsDirty();
+        return true;
+    }
+    if (s.view === 'menu' || s.view === 'help') {
+        closeToPreviousView('main');
+        return true;
+    }
+    if (s.view === 'confirm') {
+        cancelConfirm();
+        return true;
+    }
+    if (s.view === 'exitMenu') {
+        s.view = 'main';
+        showStatus('Main screen', 60);
+        markLedsDirty();
+        return true;
+    }
+    if (s.view === 'park') {
+        openExitMenu();
+        return true;
+    }
+    openExitMenu();
+    return true;
+}
+
 function markLedsDirty() {
     s.ledsDirty = true;
     s.dirty = true;
@@ -1663,14 +1974,16 @@ function selectSessionEntryByName(name) {
     const idx = s.browserEntries.findIndex((e) => !e.dir && sanitizeSessionName(e.name) === target);
     if (idx < 0) return false;
     s.browserCursor = idx;
+    const rows = s.browserMode === 'sessions' ? 3 : 4;
     if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
-    else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
+    else if (s.browserCursor >= s.browserScroll + rows) s.browserScroll = s.browserCursor - (rows - 1);
     return true;
 }
 
 function updateBrowserScrollForCursor() {
+    const rows = s.browserMode === 'sessions' ? 3 : 4;
     if (s.browserCursor < s.browserScroll) s.browserScroll = s.browserCursor;
-    else if (s.browserCursor >= s.browserScroll + 4) s.browserScroll = s.browserCursor - 3;
+    else if (s.browserCursor >= s.browserScroll + rows) s.browserScroll = s.browserCursor - (rows - 1);
     if (s.browserScroll < 0) s.browserScroll = 0;
 }
 
@@ -1709,9 +2022,18 @@ function ensureSessionNameForSave(preferAuto) {
     s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
 }
 
+function openSessionSaveNew() {
+    s.sessionName = nextAutoSessionName();
+    s.sessionCharIndex = clampInt(s.sessionName.length - 1, 0, Math.max(0, SESSION_NAME_MAX - 1), 0);
+    s.sessionNameEditing = true;
+    openSessionBrowser('save', false);
+    showStatus('Save new ' + s.sessionName, 90);
+}
+
 function openSessionBrowser(intent, preferAutoName) {
     s.view = 'browser';
     s.sessionBrowserIntent = intent === 'save' ? 'save' : 'load';
+    if (s.sessionBrowserIntent !== 'save') s.sessionNameEditing = false;
     browserOpen(SESSIONS_DIR, 'sessions');
     if (s.sessionBrowserIntent === 'save') {
         ensureSessionNameForSave(!!preferAutoName);
@@ -1868,9 +2190,30 @@ function setSlotPath(sec, bank, slot, path, sendToDsp) {
 
 function browserSelect() {
     const e = s.browserEntries[s.browserCursor];
-    if (!e) return;
+    if (!e) {
+        if (s.browserMode === 'sessions' && s.sessionBrowserIntent === 'save' && s.sessionNameEditing) {
+            requestSaveSessionNamed(true);
+        }
+        return;
+    }
 
     if (s.browserMode === 'sessions') {
+        if (s.sessionBrowserIntent === 'save') {
+            if (s.sessionNameEditing) {
+                requestSaveSessionNamed(true);
+                return;
+            }
+            if (e && !e.dir) {
+                s.sessionName = sessionNameFromPath(e.path);
+                s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
+                requestSaveSessionNamed(true);
+            } else {
+                s.sessionNameEditing = !s.sessionNameEditing;
+                showStatus(s.sessionNameEditing ? 'Edit name' : 'Name done', 70);
+                s.dirty = true;
+            }
+            return;
+        }
         if (loadSessionFromPath(e.path, false)) {
             s.sessionName = sessionNameFromPath(e.path);
             s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
@@ -2582,6 +2925,15 @@ function effectivePadColor(sec, bankIdx, slotIdx) {
 function rebuildLedQueue() {
     s.ledQueue = [];
 
+    if (s.view === 'boot' || s.view === 'park' || s.view === 'menu' || s.view === 'exitMenu' || s.view === 'confirm' || s.view === 'help') {
+        for (let note = PAD_NOTE_MIN; note <= PAD_NOTE_MAX; note++) s.ledQueue.push([note, Black]);
+        if (USE_STEP_BANKS) {
+            for (let note = STEP_NOTE_MIN; note <= STEP_NOTE_MAX; note++) s.ledQueue.push([note, Black]);
+        }
+        s.ledsDirty = false;
+        return;
+    }
+
     if (s.view === 'fx') {
         const sec = s.focusedSection;
         const bank = focusedBankIndex(sec);
@@ -2694,6 +3046,25 @@ function forceLedRefreshNow() {
     }
     updateRecordButtonLed();
     updateUtilityButtonLeds();
+}
+
+function tickBootLedSweep() {
+    const t = clampInt(s.bootTicks, 0, 0x7fffffff, 0);
+    if ((t % 4) !== 0) return;
+    clearPadAndStepLeds();
+    const phase = Math.floor(t / 8) % 5;
+    const leftOn = phase === 0 || phase === 3 || phase === 4;
+    const rightOn = phase === 1 || phase === 3 || phase === 4;
+    const leftColor = phase === 4 ? VividYellow : Cyan;
+    const rightColor = phase === 4 ? VividYellow : ElectricViolet;
+    for (let slot = 0; slot < GRID_SIZE; slot++) {
+        if (leftOn) setLED(padNoteFor(0, slot), leftColor);
+        if (!LEFT_GRID_ONLY && rightOn) setLED(padNoteFor(1, slot), rightColor);
+    }
+    if (USE_STEP_BANKS) {
+        const stepIdx = t % 16;
+        setLED(STEP_NOTE_MIN + stepIdx, phase === 2 ? BrightPink : VividYellow);
+    }
 }
 
 function refreshRealtimeUiState() {
@@ -3599,8 +3970,9 @@ function drawBrowser() {
         : 'Samples';
     print(0, 0, shortText(modeLabel + ' ' + baseName(s.browserPath), 21), 1);
 
-    const visible = s.browserEntries.slice(s.browserScroll, s.browserScroll + 4);
-    for (let i = 0; i < 4; i++) {
+    const maxVisible = s.browserMode === 'sessions' ? 3 : 4;
+    const visible = s.browserEntries.slice(s.browserScroll, s.browserScroll + maxVisible);
+    for (let i = 0; i < maxVisible; i++) {
         const e = visible[i];
         if (!e) continue;
         const idx = s.browserScroll + i;
@@ -3616,7 +3988,13 @@ function drawBrowser() {
     if (s.browserMode === 'sessions') {
         const idx = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
         const action = s.sessionBrowserIntent === 'save' ? 'Save' : 'Load';
-        print(0, 50, shortText(action + ' N:' + s.sessionName + ' i' + (idx + 1), 21), 1);
+        if (s.sessionBrowserIntent === 'save' && s.sessionNameEditing) {
+            print(0, 40, shortText('Name ' + s.sessionName, 21), 2);
+            print(0, 50, shortText('Jog/K2 char K1 pos', 21), 1);
+        } else {
+            print(0, 40, shortText(action + ' ' + s.sessionName + ' i' + (idx + 1), 21), 1);
+            print(0, 50, s.sessionBrowserIntent === 'save' ? 'Jog=save Copy=name' : 'Jog=load Copy=name', 1);
+        }
     } else {
         const tgt = s.browserAssignMode === 'auto' ? 'AUTO' : (s.browserAssignMode === 'slot' ? 'SLOT' : 'SRC');
         print(0, 50, shortText('Target:' + tgt + ' Menu=cycle', 21), 1);
@@ -3644,8 +4022,198 @@ function drawFxScreen() {
     print(0, 50, shortText(footer, 21), 1);
 }
 
+function drawMenu() {
+    clear_screen();
+    print(0, 0, 'TwinSampler Menu', 1);
+    const start = clampInt(s.menuCursor - 2, 0, Math.max(0, MENU_ITEMS.length - 4), 0);
+    for (let i = 0; i < 4; i++) {
+        const idx = start + i;
+        const item = MENU_ITEMS[idx];
+        if (!item) continue;
+        const prefix = idx === s.menuCursor ? '>' : ' ';
+        print(0, 10 + i * 10, shortText(prefix + item, 21), idx === s.menuCursor ? 2 : 1);
+    }
+    print(0, 50, 'Jog=select Back=close', 1);
+}
+
+function drawExitMenu() {
+    clear_screen();
+    print(0, 0, 'TwinSampler', 1);
+    for (let i = 0; i < EXIT_MENU_ITEMS.length; i++) {
+        const prefix = i === s.exitMenuCursor ? '>' : ' ';
+        print(0, 20 + i * 10, shortText(prefix + EXIT_MENU_ITEMS[i], 21), i === s.exitMenuCursor ? 2 : 1);
+    }
+    print(0, 50, 'Jog=select Back=close', 1);
+}
+
+function drawConfirm() {
+    clear_screen();
+    print(0, 0, shortText(s.confirmTitle || 'CONFIRM', 21), 2);
+    print(0, 20, shortText(s.confirmBody || '', 21), 1);
+    print(0, 40, 'Jog click = YES', 1);
+    print(0, 50, 'Back = NO', 1);
+}
+
+function drawHelp() {
+    clear_screen();
+    const page = clampInt(s.helpPage, 0, HELP_PAGES.length - 1, 0);
+    const lines = HELP_PAGES[page] || HELP_PAGES[0];
+    for (let i = 0; i < 5; i++) {
+        print(0, i * 10, shortText(lines[i] || '', 21), i === 0 ? 2 : 1);
+    }
+    print(0, 50, shortText((page + 1) + '/' + HELP_PAGES.length + ' Jog pages Back', 21), 1);
+}
+
+function drawParked() {
+    clear_screen();
+    print(0, 0, 'TwinSampler PARKED', 2);
+    print(0, 20, 'DSP still running', 1);
+    print(0, 30, 'Autosave active', 1);
+    print(0, 50, 'Menu/Jog/Back return', 1);
+}
+
+const BOOT_FONT = {
+    A: ['01110', '10001', '10001', '11111', '10001', '10001', '10001'],
+    E: ['11111', '10000', '10000', '11110', '10000', '10000', '11111'],
+    I: ['11111', '00100', '00100', '00100', '00100', '00100', '11111'],
+    L: ['10000', '10000', '10000', '10000', '10000', '10000', '11111'],
+    M: ['10001', '11011', '10101', '10101', '10001', '10001', '10001'],
+    N: ['10001', '11001', '10101', '10011', '10001', '10001', '10001'],
+    P: ['11110', '10001', '10001', '11110', '10000', '10000', '10000'],
+    R: ['11110', '10001', '10001', '11110', '10100', '10010', '10001'],
+    S: ['01111', '10000', '10000', '01110', '00001', '00001', '11110'],
+    T: ['11111', '00100', '00100', '00100', '00100', '00100', '00100'],
+    W: ['10001', '10001', '10001', '10101', '10101', '10101', '01010']
+};
+
+function drawBootGlyph(ch, x, y) {
+    const rows = BOOT_FONT[ch];
+    if (!rows) return;
+    for (let yy = 0; yy < rows.length; yy++) {
+        const row = rows[yy];
+        for (let xx = 0; xx < row.length; xx++) {
+            if (row[xx] === '1') drawPixel(x + xx, y + yy, true);
+        }
+    }
+}
+
+function drawBootWordmark(x, y, active) {
+    if (!active) return;
+    const text = 'TWINSAMPLER';
+    let cx = x;
+    for (let i = 0; i < text.length; i++) {
+        drawBootGlyph(text[i], cx, y);
+        cx += 6;
+    }
+}
+
+function drawBootSampler(x, y, active) {
+    drawLogoHLine(x + 3, y, 25);
+    drawLogoHLine(x + 1, y + 1, 29);
+    drawLogoVLine(x, y + 3, 25);
+    drawLogoVLine(x + 31, y + 3, 25);
+    drawLogoHLine(x + 3, y + 30, 25);
+    drawLogoHLine(x + 1, y + 29, 29);
+    drawPixel(x + 1, y + 2, true);
+    drawPixel(x + 30, y + 2, true);
+    drawPixel(x + 1, y + 28, true);
+    drawPixel(x + 30, y + 28, true);
+    fillLogoRect(x + 5, y + 5, 9, 3, true);
+    fillLogoRect(x + 6, y + 6, 7, 1, false);
+    fillLogoRect(x + 18, y + 5, 2, 2, true);
+    fillLogoRect(x + 23, y + 5, 2, 2, true);
+    fillLogoRect(x + 28, y + 5, 2, 2, true);
+    for (let row = 0; row < 4; row++) {
+        for (let col = 0; col < 4; col++) {
+            const px = x + 5 + col * 6;
+            const py = y + 11 + row * 5;
+            fillLogoRect(px, py, 4, 3, true);
+            if (active && (row === 0 || row === 3 || col === 0 || col === 3)) drawPixel(px + 1, py + 1, true);
+        }
+    }
+}
+
+function drawBootWaveform(x, y, active, frame) {
+    const f = clampInt(frame, 0, 0x7fffffff, 0);
+    const wobble = (f % 6) - 2;
+    const scan = f % 18;
+    drawLogoVLine(x + 8, y + 2, 18);
+    drawLogoVLine(x + 15, y + 2, 18);
+    const w = active ? 5 : 3;
+    fillLogoRect(x + 4, y + 7 + Math.max(-1, Math.min(1, wobble)), 2, 8, true);
+    fillLogoRect(x + 1, y + 10 - Math.max(-1, Math.min(1, wobble)), 2, 3, true);
+    fillLogoRect(x + 10, y + 5 - Math.max(-2, Math.min(2, wobble)), w, 12 + (active ? 2 : 0), true);
+    fillLogoRect(x + 17, y + 7 - Math.max(-1, Math.min(1, wobble)), 2, 8, true);
+    fillLogoRect(x + 21, y + 10 + Math.max(-1, Math.min(1, wobble)), 2, 3, true);
+    if (active) fillLogoRect(x + 2 + scan, y + 11, 2, 1, true);
+    drawPixel(x + 8, y, true);
+    drawPixel(x + 15, y, true);
+    drawPixel(x + 8, y + 22, true);
+    drawPixel(x + 15, y + 22, true);
+}
+
+function drawBootDiamond(cx, cy, active, frame = 0) {
+    const pulse = active && ((clampInt(frame, 0, 0x7fffffff, 0) % 12) < 6);
+    drawPixel(cx, cy - 2, true);
+    drawPixel(cx - 1, cy - 1, true);
+    drawPixel(cx + 1, cy - 1, true);
+    fillLogoRect(cx - 2, cy, 5, 1, true);
+    drawPixel(cx - 1, cy + 1, true);
+    drawPixel(cx + 1, cy + 1, true);
+    drawPixel(cx, cy + 2, true);
+    if (active) fillLogoRect(cx - 1, cy, 3, 1, true);
+    if (pulse) {
+        drawPixel(cx, cy - 4, true);
+        drawPixel(cx - 4, cy, true);
+        drawPixel(cx + 4, cy, true);
+        drawPixel(cx, cy + 4, true);
+    }
+}
+
+function drawBootPixelLogo() {
+    const t = clampInt(s.bootTicks, 0, 0x7fffffff, 0);
+    const phase = Math.floor(t / 8) % 5;
+    const leftActive = phase === 0 || phase === 3 || phase === 4;
+    const rightActive = phase === 1 || phase === 3 || phase === 4;
+    const centerActive = phase === 2 || phase === 3 || phase === 4;
+    const wordActive = phase !== 0 || (t % 16) < 8;
+    drawBootSampler(18, 3, leftActive);
+    drawBootSampler(78, 3, rightActive);
+    drawBootWaveform(52, 9, centerActive, t);
+    drawLogoHLine(8, 38, 48);
+    drawLogoHLine(72, 38, 48);
+    drawBootDiamond(64, 38, centerActive, t);
+    drawBootWordmark(31, 47, wordActive);
+    drawLogoHLine(8, 60, 48);
+    drawLogoHLine(72, 60, 48);
+    drawBootDiamond(64, 60, phase === 4, t + 6);
+}
+
+function drawBoot() {
+    clear_screen();
+    if (hasPixelDisplay()) {
+        drawBootPixelLogo();
+    } else {
+        print(0, 10, '  [::::]  [::::]', 2);
+        print(0, 24, '     <  ||  >', 2);
+        print(0, 42, '   TwinSampler', 2);
+    }
+}
+
 function draw() {
-    if (s.view === 'browser') {
+    if (s.view === 'boot') {
+        drawBoot();
+    } else if (s.view === 'menu') {
+        drawMenu();
+    } else if (s.view === 'exitMenu') {
+        drawExitMenu();
+    } else if (s.view === 'confirm') {
+        drawConfirm();
+    } else if (s.view === 'help') {
+        drawHelp();
+    } else if (s.view === 'park') {
+        drawParked();
+    } else if (s.view === 'browser') {
         drawBrowser();
     } else if (s.view === 'fx') {
         drawFxScreen();
@@ -3977,6 +4545,26 @@ function saveSessionToPath(path, label, silent, refreshBrowser) {
     }
     if (!silent) showStatus(ok ? ('Saved ' + label) : 'Session save failed', 120);
     return ok;
+}
+
+function requestSaveSessionNamed(confirmOverwrite) {
+    s.sessionName = sanitizeSessionName(s.sessionName);
+    if (s.sessionName === INIT_SESSION_NAME) {
+        s.sessionName = nextAutoSessionName();
+        showStatus('INIT reserved -> ' + s.sessionName, 110);
+    }
+    s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
+    if (!ensureDirRecursive(SESSIONS_DIR)) {
+        showStatus('Session dir failed', 120);
+        return false;
+    }
+    if (confirmOverwrite && sessionNameExistsInEntries(s.sessionName)) {
+        s.pendingOverwriteName = s.sessionName;
+        openConfirm('OVERWRITE?', s.sessionName, 'saveOverwrite');
+        return false;
+    }
+    s.sessionNameEditing = false;
+    return saveSessionToPath(sessionPathFromName(s.sessionName), s.sessionName, false, true);
 }
 
 function saveSessionNamed(silent) {
@@ -5326,6 +5914,23 @@ function handlePadNote(note, velocity) {
     const addr = { sec, bank, slot };
     const triggerNote = padNoteFor(sec, slot);
 
+    if (s.copyHeld) {
+        s.copyConsumed = true;
+        delete s.activePadPress[String(note)];
+        setSelectedSlice(slice, true);
+        if (!s.copySource) {
+            s.copySource = copyAddr(addr);
+            showStatus('Copy src S' + (sec + 1) + ' B' + (bank + 1) + ' P' + (slot + 1), 100);
+            markLedsDirty();
+        } else if (!sameAddr(s.copySource, addr)) {
+            copySlotBetween(s.copySource, addr);
+            showStatus('Copied to S' + (sec + 1) + ' B' + (bank + 1) + ' P' + (slot + 1), 100);
+        } else {
+            showStatus('Select copy destination', 80);
+        }
+        return true;
+    }
+
     if (s.deleteHeld && !s.shiftHeld) {
         if (eraseLooperNotesForPad(sec, bank, slot)) return true;
         showStatus('No looper notes on that pad', 80);
@@ -5374,17 +5979,6 @@ function handlePadNote(note, velocity) {
         if (s.recording || isRecordTransitionPending()) {
             showStatus('REC focus ' + recordTargetLabel({ sec, bank, slot }), 60);
             return true;
-        }
-    }
-
-    if (s.shiftHeld) {
-        if (!s.copySource) {
-            s.copySource = copyAddr(addr);
-            showStatus('Copy src S' + (sec + 1) + ' B' + (bank + 1) + ' P' + (slot + 1), 100);
-            markLedsDirty();
-        } else if (!sameAddr(s.copySource, addr)) {
-            copySlotBetween(s.copySource, addr);
-            showStatus('Copied to S' + (sec + 1) + ' B' + (bank + 1) + ' P' + (slot + 1), 100);
         }
     }
 
@@ -5482,6 +6076,11 @@ function handleMidiIn(msg) {
 
 function handleMainKnob(delta) {
     if (delta === 0) return;
+
+    if (s.view === 'browser' && s.browserMode === 'sessions' && s.sessionBrowserIntent === 'save' && s.sessionNameEditing) {
+        adjustSessionNameChar(delta);
+        return;
+    }
 
     if (s.view === 'browser') {
         browserScrollBy(delta);
@@ -5712,6 +6311,7 @@ function initFromDspDefaults() {
 
 function onMidiMessageInternal(data) {
     if (!data || typeof data.length !== 'number' || data.length < 3) return;
+    if (s.view === 'boot' || s.bootActive) return;
 
     const status = (clampInt(data[0], 0, 255, 0) & 0xF0);
     const b1 = clampInt(data[1], 0, 127, 0);
@@ -5730,6 +6330,10 @@ function onMidiMessageInternal(data) {
                 if (handlePadNoteRelease(b1)) return;
                 return;
             }
+            if ((s.view === 'menu' || s.view === 'exitMenu' || s.view === 'confirm' || s.view === 'help' || s.view === 'park') &&
+                ((b1 >= PAD_NOTE_MIN && b1 <= PAD_NOTE_MAX) || (b1 >= STEP_NOTE_MIN && b1 <= STEP_NOTE_MAX))) {
+                return;
+            }
             if (handleKnobTouch(b1, b2)) return;
             if (handleStepBankNote(b1, b2)) return;
             if (handlePadNote(b1, b2)) return;
@@ -5737,6 +6341,10 @@ function onMidiMessageInternal(data) {
         }
 
         if (status === 0x80) {
+            if ((s.view === 'menu' || s.view === 'exitMenu' || s.view === 'confirm' || s.view === 'help' || s.view === 'park') &&
+                ((b1 >= PAD_NOTE_MIN && b1 <= PAD_NOTE_MAX) || (b1 >= STEP_NOTE_MIN && b1 <= STEP_NOTE_MAX))) {
+                return;
+            }
             if (handleStepBankRelease(b1)) return;
             if (handlePadNoteRelease(b1)) return;
             return;
@@ -5746,6 +6354,77 @@ function onMidiMessageInternal(data) {
 
         const cc = b1;
         const val = b2;
+
+        if (s.view === 'park') {
+            if ((cc === MoveMenu || cc === MoveMainButton) && val > 0) {
+                returnFromPark();
+                return;
+            }
+            if (cc === MoveMainKnob && decodeDelta(val) !== 0) {
+                returnFromPark();
+                return;
+            }
+        }
+
+        if (s.view === 'menu') {
+            if (cc === MoveMainKnob) {
+                const delta = decodeDelta(val);
+                if (delta !== 0) {
+                    s.menuCursor = clampInt(s.menuCursor + delta, 0, MENU_ITEMS.length - 1, 0);
+                    s.dirty = true;
+                }
+                return;
+            }
+            if ((cc === MoveMainButton || cc === MoveMenu) && val > 0) {
+                selectMenuItem();
+                return;
+            }
+            if (cc !== MoveShift) return;
+        }
+
+        if (s.view === 'exitMenu') {
+            if (cc === MoveMainKnob) {
+                const delta = decodeDelta(val);
+                if (delta !== 0) {
+                    s.exitMenuCursor = clampInt(s.exitMenuCursor + delta, 0, EXIT_MENU_ITEMS.length - 1, 0);
+                    s.dirty = true;
+                }
+                return;
+            }
+            if (cc === MoveMainButton && val > 0) {
+                selectExitMenuItem();
+                return;
+            }
+            if (cc !== MoveShift) return;
+        }
+
+        if (s.view === 'confirm') {
+            if (cc === MoveMainButton && val > 0) {
+                confirmYes();
+                return;
+            }
+            if (cc === MoveMenu && val > 0) {
+                confirmYes();
+                return;
+            }
+            if (cc !== MoveShift) return;
+        }
+
+        if (s.view === 'help') {
+            if (cc === MoveMainKnob) {
+                const delta = decodeDelta(val);
+                if (delta !== 0) {
+                    s.helpPage = clampInt(s.helpPage + delta, 0, HELP_PAGES.length - 1, 0);
+                    s.dirty = true;
+                }
+                return;
+            }
+            if (cc === MoveMenu && val > 0) {
+                openMenu();
+                return;
+            }
+            if (cc !== MoveShift) return;
+        }
 
         if (cc === MoveShift) {
             const wasHeld = s.shiftHeld;
@@ -5842,6 +6521,10 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveMenu && val > 0) {
+            if (!s.shiftHeld && (s.view === 'main' || s.view === 'fx')) {
+                openMenu();
+                return;
+            }
             if (s.shiftHeld && (s.view !== 'browser' || s.browserMode !== 'sessions')) {
                 openSessionBrowser('load', false);
                 return;
@@ -5872,6 +6555,10 @@ function onMidiMessageInternal(data) {
                     !s.volumeTouchHeld;
                 s.copyHeld = false;
                 s.copyPressTick = -1;
+                if (s.copySource) {
+                    s.copySource = null;
+                    markLedsDirty();
+                }
                 s.copyConsumed = false;
                 if (allowVelocityToggle) toggleVelocitySens();
                 return;
@@ -5886,8 +6573,8 @@ function onMidiMessageInternal(data) {
             }
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 if (s.shiftHeld && s.volumeTouchHeld) copySelectedSessionToAutoName();
-                else if (s.shiftHeld) saveSessionNamed(false);
-                else if (s.sessionBrowserIntent === 'save') saveSessionNamed(false);
+                else if (s.shiftHeld) requestSaveSessionNamed(true);
+                else if (s.sessionBrowserIntent === 'save') requestSaveSessionNamed(true);
                 else setSessionNameFromSelected();
             } else if (s.shiftHeld) {
                 openSessionBrowser('save', true);
@@ -5950,8 +6637,7 @@ function onMidiMessageExternal(data) {
     handleMidiIn(data);
 }
 
-function init() {
-    /* Always hard-reset grid LEDs on entry to avoid stale state from previous modules. */
+function beginBoot() {
     clearPadAndStepLeds();
     s.ledQueue = [];
     s.ledsDirty = true;
@@ -5962,12 +6648,17 @@ function init() {
         makeSection(MODE_SINGLE),
         makeSection(MODE_PER_SLOT)
     ];
+    s.bootActive = true;
+    s.bootPhase = 0;
+    s.bootTicks = 0;
+    s.bootRestoredFromSession = false;
+    s.bootMessage = 'Starting';
+    s.view = 'boot';
+    s.previousView = 'main';
+    s.dirty = true;
+}
 
-    initFromDspDefaults();
-    /*
-     * Prevent stale DSP effect toggles from previous module instances/sessions.
-     * We force all known bank/global FX lanes off before restoring serialized state.
-     */
+function clearAllFxLanesForBoot() {
     for (let dspFx = 0; dspFx < DSP_FX_COUNT; dspFx++) {
         sp('performance_fx_global_toggle', dspFx + ':0');
         sp('pfx_global_toggle', dspFx + ':0');
@@ -5979,36 +6670,22 @@ function init() {
             }
         }
     }
-    activateStandaloneMidiPort();
-    s.copySource = null;
-    s.copyHeld = false;
-    s.copyPressTick = -1;
-    s.copyConsumed = false;
-    s.deleteHeld = false;
-    s.stepFxHold = null;
-    s.startTrimSoundingEnabled = true;
-    s.sessionBrowserIntent = 'load';
-    s.sessionName = sanitizeSessionName(s.sessionName);
-    s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
-    ensureInitSessionFile(false);
+}
 
-    const restoredFromSession =
-        loadSessionFromPath(autosavePath(), true, false) ||
-        loadSessionFromPath(sessionPathFromName(s.sessionName), true, false) ||
-        loadLegacySession(true) ||
-        loadSessionFromPath(sessionPathFromName(INIT_SESSION_NAME), true, false);
-
-    if (!restoredFromSession) {
-        applyAllStateToDsp();
-    }
-
-    s.velocitySens = 0;
-    spb('velocity_sens', '0', 120);
-
-    s.view = 'main';
+function finishBootUiState() {
+    s.previousView = 'main';
+    s.menuCursor = 0;
+    s.exitMenuCursor = 0;
+    s.helpPage = 0;
+    s.sessionNameEditing = false;
+    s.pendingOverwriteName = '';
+    s.confirmTitle = '';
+    s.confirmBody = '';
+    s.confirmAction = '';
+    s.parkedReturnView = 'main';
     s.muteHeld = false;
     s.transportTicks = 0;
-    if (!restoredFromSession) {
+    if (!s.bootRestoredFromSession) {
         s.loopPadMode = false;
         s.activeLooper = 0;
         s.loopPadPage = 0;
@@ -6045,13 +6722,88 @@ function init() {
     resetHistory();
     previewStop();
     updateRecordButtonLed();
-    forceLedRefreshNow();
     s.ledResyncPasses = LED_RESYNC_PASSES;
     s.ledResyncTicks = LED_RESYNC_INTERVAL_TICKS;
+}
+
+function runBootPhase() {
+    if (!s.bootActive) return;
+    switch (s.bootPhase) {
+    case 0:
+        s.bootMessage = 'DSP defaults';
+        initFromDspDefaults();
+        break;
+    case 1:
+        s.bootMessage = 'Reset FX';
+        clearAllFxLanesForBoot();
+        break;
+    case 2:
+        s.bootMessage = 'MIDI + INIT';
+        activateStandaloneMidiPort();
+        s.copySource = null;
+        s.copyHeld = false;
+        s.copyPressTick = -1;
+        s.copyConsumed = false;
+        s.deleteHeld = false;
+        s.stepFxHold = null;
+        s.startTrimSoundingEnabled = true;
+        s.sessionBrowserIntent = 'load';
+        s.sessionName = sanitizeSessionName(s.sessionName);
+        s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
+        ensureInitSessionFile(false);
+        break;
+    case 3:
+        s.bootMessage = 'Load session';
+        s.bootRestoredFromSession =
+            loadSessionFromPath(autosavePath(), true, false) ||
+            loadSessionFromPath(sessionPathFromName(s.sessionName), true, false) ||
+            loadLegacySession(true) ||
+            loadSessionFromPath(sessionPathFromName(INIT_SESSION_NAME), true, false);
+        break;
+    case 4:
+        s.bootMessage = 'Sync DSP';
+        if (!s.bootRestoredFromSession) applyAllStateToDsp();
+        s.velocitySens = 0;
+        spb('velocity_sens', '0', 120);
+        break;
+    case 5:
+        s.bootMessage = 'Prepare UI';
+        finishBootUiState();
+        break;
+    default:
+        s.bootMessage = 'Ready';
+        s.bootActive = false;
+        s.bootPhase = BOOT_PHASE_COUNT;
+        s.view = 'main';
+        clearPadAndStepLeds();
+        forceLedRefreshNow();
+        showStatus('READY', 80);
+        s.dirty = true;
+        return;
+    }
+    s.bootPhase++;
     s.dirty = true;
 }
 
+function tickBoot() {
+    s.bootTicks++;
+    tickBootLedSweep();
+    if (s.bootPhase < 6 || s.bootTicks >= BOOT_MIN_TICKS) runBootPhase();
+    if (s.dirty) {
+        s.dirty = false;
+        draw();
+    }
+}
+
+function init() {
+    beginBoot();
+}
+
 function tick() {
+    if (s.bootActive || s.view === 'boot') {
+        tickBoot();
+        return;
+    }
     s.transportTicks++;
     syncFromDsp();
     tickStatusTimer();
@@ -6091,6 +6843,8 @@ function beforeExit() {
 const twinsamplerChainUi = {
     __moduleId: 'twinsampler_overtake',
     beforeExit,
+    onBackButton: handleBackButton,
+    onShiftBackButton: requestLeaveBackground,
     init,
     tick,
     onMidiMessageInternal,
