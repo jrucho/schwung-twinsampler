@@ -259,12 +259,16 @@ const SOURCE_PITCH_LIVE_RETRIGGER = true;
 const RECORD_LED_BLINK_PERIOD_TICKS = 24;
 const LED_RESYNC_INTERVAL_TICKS = 18;
 const LED_RESYNC_PASSES = 3;
+const UTILITY_BUTTON_LED_DIM = 122;
+const UTILITY_BUTTON_LED_FULL = 120;
 const LOOP_DOUBLE_PRESS_TICKS = 90;
 const LOOP_ERASE_HOLD_TICKS = 36;
 const LOOP_TOGGLE_HOLD_THRESHOLD_MS = 1000;
 const STEP_FX_HOLD_THRESHOLD_MS = 1000;
 const STEP_BANK_BLINK_PERIOD_TICKS = 12;
 const PLAY_DOUBLE_PRESS_TICKS = 30;
+const SHIFT_TAP_MAX_TICKS = 24;
+const SHIFT_DOUBLE_TAP_TICKS = 48;
 const PAD_PRESS_FLASH_TICKS = 5;
 const PAD_PRESS_LED_COLOR = 122; /* dim white */
 const RECORD_ACK_TIMEOUT_TICKS = 72;
@@ -295,16 +299,21 @@ const DECAY_MAX_MS = 600000.0;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
-const MENU_ITEMS = ['Samples', 'Load Session', 'Save', 'Save New', 'New / Init', 'FX', 'Help', 'Leave In Background', 'Exit'];
-const EXIT_MENU_ITEMS = ['Leave In Background', 'Exit'];
+const MENU_ITEMS = ['Samples', 'Load Session', 'Save', 'Save New', 'New / Init', 'FX', 'Help', 'Exit'];
+const EXIT_MENU_ITEMS = ['Exit'];
 const BOOT_PHASE_COUNT = 7;
+const BOOT_PROGRESS_PHASES = 6;
 const BOOT_MIN_TICKS = 28;
+const BOOT_JOBS_PER_TICK = 2;
 const BOOT_LED_COLORS = [AzureBlue, Cyan, ElectricViolet, BrightPink, VividYellow, BrightGreen];
+const BOOT_STRIPE_WIDTH = 24;
+const BOOT_STRIPE_X = 8;
+const BOOT_STRIPE_W = 112;
 const HELP_PAGES = [
-    ['TwinSampler Help', 'Menu: app menu', 'Back: leave/exit', 'Jog: move/select', 'Shortcuts still work'],
+    ['TwinSampler Help', 'Menu: app menu', 'Back: exit confirm', 'Jog: move/select', 'Shortcuts still work'],
     ['Samples', 'Jog click: browser', 'Menu in browser:', 'cycle target', 'Jog click: load'],
     ['Sessions', 'Shift+Menu: load', 'Shift+Copy: save', 'INIT is locked', 'Autosaves on exit'],
-    ['Background', 'Shift+Back leaves', 'Back: leave/exit', 'Exit quits fully', 'Autosave enabled']
+    ['Exit', 'Back: exit confirm', 'Menu Exit: confirm', 'YES exits fully', 'Autosave enabled']
 ];
 
 function createLooperState() {
@@ -650,6 +659,13 @@ const s = {
     bootTicks: 0,
     bootRestoredFromSession: false,
     bootMessage: 'Starting...',
+    bootJobs: [],
+    bootDeferDspApply: false,
+    bootStepLed: -1,
+    bootWorkTotal: 1,
+    bootWorkDone: 0,
+    bootPhaseWorkTotal: 0,
+    bootPhaseWorkDone: 0,
     confirmTitle: '',
     confirmBody: '',
     confirmAction: '',
@@ -711,6 +727,9 @@ const s = {
     copyPressTick: -1,
     copyConsumed: false,
     deleteHeld: false,
+    captureHeld: false,
+    shiftPressTick: -1,
+    shiftLastTapTick: -9999,
     stepCopySource: null,
     stepFxHold: null, /* { note, startedAtMs, momentaryActive, prevView, prevFxScope } */
     activePadPress: {},
@@ -1510,19 +1529,12 @@ function requestLeaveBackground() {
 }
 
 function openExitMenu() {
-    s.view = 'exitMenu';
-    s.exitMenuCursor = clampInt(s.exitMenuCursor, 0, EXIT_MENU_ITEMS.length - 1, 0);
-    showStatus('Leave / Exit', 50);
-    markLedsDirty();
+    openConfirm('EXIT?', 'Jog/Main=YES Back=NO', 'exit');
 }
 
 function selectExitMenuItem() {
     const item = EXIT_MENU_ITEMS[clampInt(s.exitMenuCursor, 0, EXIT_MENU_ITEMS.length - 1, 0)] || '';
-    if (item === 'Leave In Background') {
-        requestLeaveBackground();
-        return;
-    }
-    if (item === 'Exit') requestHostExit();
+    if (item === 'Exit') openConfirm('EXIT?', 'Jog/Main=YES Back=NO', 'exit');
 }
 
 function resetToInitSession() {
@@ -1545,7 +1557,7 @@ function resetToInitSession() {
 function confirmYes() {
     const action = s.confirmAction;
     s.confirmAction = '';
-    if (action === 'quit') {
+    if (action === 'quit' || action === 'exit') {
         requestHostExit();
         return;
     }
@@ -1624,12 +1636,8 @@ function selectMenuItem() {
         openHelp();
         return;
     }
-    if (item === 'Leave In Background') {
-        requestLeaveBackground();
-        return;
-    }
     if (item === 'Exit') {
-        requestHostExit();
+        openConfirm('EXIT?', 'Jog/Main=YES Back=NO', 'exit');
     }
 }
 
@@ -2612,6 +2620,7 @@ function applySlotToDsp(sec, bank, slot, srcSlot) {
     dst.startTrim = clampFloat(srcSlot.startTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     dst.endTrim = clampFloat(srcSlot.endTrim, SLOT_TRIM_MIN_MS, SLOT_TRIM_MAX_MS, 0.0);
     dst.gain = clampFloat(srcSlot.gain, 0.0, 4.0, 1.0);
+    dst.pan = clampFloat(srcSlot.pan, -1.0, 1.0, 0.0);
     dst.pitch = clampFloat(srcSlot.pitch, -48.0, 48.0, 0.0);
     dst.modeGate = clampInt(srcSlot.modeGate, 0, 1, 1);
     dst.loop = clampInt(srcSlot.loop, 0, 2, 0);
@@ -2628,6 +2637,43 @@ function copySlotBetween(srcAddr, dstAddr) {
     applySlotToDsp(dstAddr.sec, dstAddr.bank, dstAddr.slot, src);
     markLedsDirty();
     markSessionChanged();
+}
+
+function copyBankBetween(srcAddr, dstAddr) {
+    if (!srcAddr || !dstAddr) return false;
+    const srcSec = clampInt(srcAddr.sec, 0, GRID_COUNT - 1, 0);
+    const srcBank = clampInt(srcAddr.bank, 0, BANK_COUNT - 1, 0);
+    const dstSec = clampInt(dstAddr.sec, 0, GRID_COUNT - 1, 0);
+    const dstBank = clampInt(dstAddr.bank, 0, BANK_COUNT - 1, 0);
+    const selectedSlice = s.selectedSlice;
+    s.sections[dstSec].banks[dstBank] = cloneBank(s.sections[srcSec].banks[srcBank]);
+    applyBankStateToDsp(dstSec, dstBank, true, true);
+    setSelectedSlice(selectedSlice, true);
+    if (s.focusedSection === dstSec && focusedBankIndex(dstSec) === dstBank) {
+        editCursorCache.bank = -1;
+        ensureEditCursor();
+    }
+    markLedsDirty();
+    markSessionChanged();
+    s.dirty = true;
+    return true;
+}
+
+function eraseBankAt(sec, bank) {
+    const dstSec = clampInt(sec, 0, GRID_COUNT - 1, 0);
+    const dstBank = clampInt(bank, 0, BANK_COUNT - 1, 0);
+    const keepColor = s.sections[dstSec].banks[dstBank].bankColor;
+    s.sections[dstSec].banks[dstBank] = makeBank(dstBank);
+    s.sections[dstSec].banks[dstBank].bankColor = keepColor;
+    applyBankStateToDsp(dstSec, dstBank, true);
+    if (s.focusedSection === dstSec && focusedBankIndex(dstSec) === dstBank) {
+        editCursorCache.bank = -1;
+        ensureEditCursor();
+    }
+    markLedsDirty();
+    markSessionChanged();
+    s.dirty = true;
+    return true;
 }
 
 function clearFocusedPadAudio() {
@@ -3049,22 +3095,23 @@ function forceLedRefreshNow() {
 }
 
 function tickBootLedSweep() {
-    const t = clampInt(s.bootTicks, 0, 0x7fffffff, 0);
-    if ((t % 4) !== 0) return;
-    clearPadAndStepLeds();
-    const phase = Math.floor(t / 8) % 5;
-    const leftOn = phase === 0 || phase === 3 || phase === 4;
-    const rightOn = phase === 1 || phase === 3 || phase === 4;
-    const leftColor = phase === 4 ? VividYellow : Cyan;
-    const rightColor = phase === 4 ? VividYellow : ElectricViolet;
-    for (let slot = 0; slot < GRID_SIZE; slot++) {
-        if (leftOn) setLED(padNoteFor(0, slot), leftColor);
-        if (!LEFT_GRID_ONLY && rightOn) setLED(padNoteFor(1, slot), rightColor);
-    }
+    const progress = bootProgress01();
     if (USE_STEP_BANKS) {
-        const stepIdx = t % 16;
-        setLED(STEP_NOTE_MIN + stepIdx, phase === 2 ? BrightPink : VividYellow);
+        const head = clampInt(Math.floor(progress * 15.999), 0, 15, 0);
+        for (let i = 0; i < 16; i++) {
+            setLED(STEP_NOTE_MIN + i, i <= head ? PAD_PRESS_LED_COLOR : Black);
+        }
+        s.bootStepLed = head;
     }
+}
+
+function bootProgress01() {
+    if (!s.bootActive && s.view !== 'boot') return 1.0;
+    const phase = s.bootJobs.length ? Math.max(0, clampInt(s.bootPhase, 0, BOOT_PROGRESS_PHASES, 0) - 1) : clampInt(s.bootPhase, 0, BOOT_PROGRESS_PHASES, 0);
+    const total = clampInt(s.bootPhaseWorkTotal, 0, 1000000, 0);
+    const done = clampInt(s.bootPhaseWorkDone, 0, Math.max(0, total), 0);
+    const inPhase = total > 0 ? clamp(done / total, 0.0, 1.0) : 0.0;
+    return clamp((phase + inPhase) / BOOT_PROGRESS_PHASES, 0.0, 1.0);
 }
 
 function refreshRealtimeUiState() {
@@ -3089,6 +3136,7 @@ function tickLedResync() {
     s.ledResyncTicks = LED_RESYNC_INTERVAL_TICKS;
     markLedsDirty();
     updateRecordButtonLed();
+    updateUtilityButtonLeds();
 }
 
 function adjustFocusedBankColor(delta) {
@@ -3417,6 +3465,20 @@ function toggleVelocitySens() {
     showStatus(s.velocitySens ? 'Pad Velocity ON' : 'Pad Velocity OFF (Full)', 80);
     markSessionChanged();
     s.dirty = true;
+}
+
+function handleShiftReleaseTap() {
+    const heldTicks = s.shiftPressTick < 0 ? 9999 : (s.transportTicks - s.shiftPressTick);
+    s.shiftPressTick = -1;
+    if (heldTicks < 0 || heldTicks > SHIFT_TAP_MAX_TICKS) return;
+
+    const sinceLast = s.transportTicks - clampInt(s.shiftLastTapTick, -9999, 0x7fffffff, -9999);
+    if (sinceLast >= 0 && sinceLast <= SHIFT_DOUBLE_TAP_TICKS) {
+        s.shiftLastTapTick = -9999;
+        toggleVelocitySens();
+        return;
+    }
+    s.shiftLastTapTick = s.transportTicks;
 }
 
 function applyAllSlotsInFocusedBank(op) {
@@ -3864,20 +3926,28 @@ function updateRecordButtonLed() {
 }
 
 function loopLedColor() {
+    if (s.loopPadMode) return UTILITY_BUTTON_LED_FULL;
     const st = currentLooper().state;
     if (st === 'recording') return BrightRed;
     if (st === 'overdub') return LOOP_PAD_COLOR_OVERDUB;
     if (st === 'playing') return LOOP_PAD_COLOR_PLAY;
-    if (st === 'stopped') return LOOP_PAD_COLOR_STOPPED;
-    return Black;
+    return UTILITY_BUTTON_LED_DIM;
+}
+
+function setUtilityButtonLED(cc, color) {
+    setButtonLED(cc, color, true);
 }
 
 function updateUtilityButtonLeds() {
-    setButtonLED(MoveLoop, loopLedColor());
-    setButtonLED(MoveMute, s.muteHeld ? 120 : Black);
+    setUtilityButtonLED(MoveLoop, loopLedColor());
+    setUtilityButtonLED(MoveCapture, s.captureHeld ? UTILITY_BUTTON_LED_FULL : UTILITY_BUTTON_LED_DIM);
+    setUtilityButtonLED(MoveMute, s.muteHeld ? UTILITY_BUTTON_LED_FULL : UTILITY_BUTTON_LED_DIM);
+    setUtilityButtonLED(MoveDelete, s.deleteHeld ? UTILITY_BUTTON_LED_FULL : UTILITY_BUTTON_LED_DIM);
+    setUtilityButtonLED(MoveCopy, s.copyHeld ? UTILITY_BUTTON_LED_FULL : UTILITY_BUTTON_LED_DIM);
+    setUtilityButtonLED(MoveShift, s.shiftHeld ? UTILITY_BUTTON_LED_FULL : UTILITY_BUTTON_LED_DIM);
     const looperState = currentLooper().state;
     const playColor = (looperState === 'playing' || looperState === 'overdub') ? 21 : (looperState === 'stopped' ? 118 : Black);
-    setButtonLED(MovePlay, playColor);
+    setUtilityButtonLED(MovePlay, playColor);
     let fxOn = 0;
     for (let i = 0; i < FX_EFFECT_COUNT; i++) {
         if (globalFxEffect(i).enabled) fxOn++;
@@ -3888,8 +3958,8 @@ function updateUtilityButtonLeds() {
             if (bankFxEffect(sec, bank, i).enabled) fxOn++;
         }
     }
-    setButtonLED(MoveArrowUp, s.view === 'fx' ? 120 : (fxOn > 0 ? 21 : Black));
-    setButtonLED(MoveArrowDown, s.view === 'fx' ? 21 : Black);
+    setUtilityButtonLED(MoveArrowUp, s.view === 'fx' ? 120 : (fxOn > 0 ? 21 : Black));
+    setUtilityButtonLED(MoveArrowDown, s.view === 'fx' ? 21 : Black);
 }
 
 function tickRecordButtonBlink() {
@@ -4170,23 +4240,31 @@ function drawBootDiamond(cx, cy, active, frame = 0) {
     }
 }
 
+function drawBootLoadingStripe(frame) {
+    void frame;
+    const y = 62;
+    const progress = bootProgress01();
+    drawLogoHLine(BOOT_STRIPE_X, y, BOOT_STRIPE_W);
+    const fillW = clampInt(Math.round(progress * BOOT_STRIPE_W), 0, BOOT_STRIPE_W, 0);
+    if (fillW > 0) fillLogoRect(BOOT_STRIPE_X, y - 1, fillW, 1, true);
+    const head = BOOT_STRIPE_X + Math.max(0, fillW - 1);
+    for (let i = 0; i < Math.min(BOOT_STRIPE_WIDTH, fillW); i++) {
+        const x = head - i;
+        if (x < BOOT_STRIPE_X || x >= BOOT_STRIPE_X + BOOT_STRIPE_W) continue;
+        drawPixel(x, y, true);
+    }
+}
+
 function drawBootPixelLogo() {
     const t = clampInt(s.bootTicks, 0, 0x7fffffff, 0);
-    const phase = Math.floor(t / 8) % 5;
-    const leftActive = phase === 0 || phase === 3 || phase === 4;
-    const rightActive = phase === 1 || phase === 3 || phase === 4;
-    const centerActive = phase === 2 || phase === 3 || phase === 4;
-    const wordActive = phase !== 0 || (t % 16) < 8;
-    drawBootSampler(18, 3, leftActive);
-    drawBootSampler(78, 3, rightActive);
-    drawBootWaveform(52, 9, centerActive, t);
+    drawBootSampler(18, 3, true);
+    drawBootSampler(78, 3, true);
+    drawBootWaveform(52, 9, true, t);
     drawLogoHLine(8, 38, 48);
     drawLogoHLine(72, 38, 48);
-    drawBootDiamond(64, 38, centerActive, t);
-    drawBootWordmark(31, 47, wordActive);
-    drawLogoHLine(8, 60, 48);
-    drawLogoHLine(72, 60, 48);
-    drawBootDiamond(64, 60, phase === 4, t + 6);
+    drawBootDiamond(64, 38, true, t);
+    drawBootWordmark(31, 47, true);
+    drawBootLoadingStripe(t);
 }
 
 function drawBoot() {
@@ -4197,6 +4275,7 @@ function drawBoot() {
         print(0, 10, '  [::::]  [::::]', 2);
         print(0, 24, '     <  ||  >', 2);
         print(0, 42, '   TwinSampler', 2);
+        print(0, 54, shortText('Loading ' + s.bootMessage, 21), 1);
     }
 }
 
@@ -4450,6 +4529,137 @@ function applyAllStateToDsp() {
     markLedsDirty();
 }
 
+function queueBootJob(message, fn) {
+    s.bootJobs.push({ message: String(message || ''), fn });
+    s.bootPhaseWorkTotal++;
+}
+
+function enqueueBootHiddenFxOffJobs() {
+    for (let dspFx = 0; dspFx < DSP_FX_COUNT; dspFx++) {
+        if (fxDspIndexIsVisible(dspFx)) continue;
+        queueBootJob('Hidden FX', () => {
+            sp('performance_fx_global_toggle', dspFx + ':0');
+            sp('pfx_global_toggle', dspFx + ':0');
+        });
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                queueBootJob('Hidden FX', () => {
+                    const payload = sec + ':' + bank + ':' + dspFx + ':0';
+                    sp('performance_fx_bank_toggle', payload);
+                    sp('pfx_bank_toggle', payload);
+                });
+            }
+        }
+    }
+}
+
+function enqueueBootBankSyncJobs(sec, bank, forceDirect) {
+    queueBootJob('Sync S' + (sec + 1) + 'B' + (bank + 1), () => {
+        const b = s.sections[sec].banks[bank];
+        b.chopCount = SOURCE_CHOP_COUNT;
+        b.slicePage = 0;
+        spb('section_source_play_mode', sec + ':' + bank + ':' + sourcePlayModeForSection(sec), 300);
+        spb('section_chop_count', sec + ':' + bank + ':' + SOURCE_CHOP_COUNT, 300);
+        spb('section_transient_sensitivity', sec + ':' + bank + ':' + normalizeTransientSensitivity(b.transientSensitivity), 300);
+        spb('section_source_path', sec + ':' + bank + ':' + (b.sourcePath || ''), 500);
+        spb('section_slice_page', sec + ':' + bank + ':0', 300);
+    });
+    queueBootJob('Restore cues', () => restoreSavedBankCuesToDsp(sec, bank, true));
+    for (let slotStart = 0; slotStart < GRID_SIZE; slotStart += 4) {
+        queueBootJob('Sync slots', () => {
+            for (let slot = slotStart; slot < Math.min(GRID_SIZE, slotStart + 4); slot++) {
+                sendSlotStateToDsp(sec, bank, slot, true, !!forceDirect);
+            }
+        });
+    }
+    queueBootJob('Sync bank tone', () => {
+        sendBankToneStateToDsp(sec, bank);
+        if (sec === s.focusedSection && bank === focusedBankIndex(sec)) invalidatePlaybackCompat();
+    });
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) {
+        queueBootJob('Sync bank FX', () => sendFxStateToDsp('bank', sec, bank, fx));
+    }
+}
+
+function restoreSavedBankCuesToDsp(sec, bank, blocking = false) {
+    const b = s.sections[sec].banks[bank];
+    const slicePayload = serializeSliceStarts(b.sliceStarts, b.chopCount);
+    if (!slicePayload || !b.sourcePath) return false;
+    const send = blocking ? spb : sp;
+    send('section_slice_starts', sec + ':' + bank + ':' + slicePayload, blocking ? 500 : 0);
+    return true;
+}
+
+function enqueueBootFinalCueRestoreJobs() {
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        for (let bank = 0; bank < BANK_COUNT; bank++) {
+            queueBootJob('Restore cues', () => restoreSavedBankCuesToDsp(sec, bank, true));
+        }
+    }
+}
+
+function enqueueBootFinalActivationJobs() {
+    enqueueBootFinalCueRestoreJobs();
+    queueBootJob('Final slot replay', () => {
+        replayAllSlotParamsToDsp();
+        scheduleTrimReplayAll();
+    });
+    queueBootJob('Final focus sync', () => {
+        invalidatePlaybackCompat();
+        syncFocusedSlotPlaybackCompat(true);
+        scheduleFocusedSlotRefresh();
+        markLedsDirty();
+    });
+}
+
+function enqueueBootApplyAllStateJobs() {
+    queueBootJob('Sync globals', () => {
+        resetEditCursorCache();
+        sp('global_gain', s.globalGain.toFixed(3));
+        sp('global_pitch', s.globalPitch.toFixed(2));
+        sp('velocity_sens', String(s.velocitySens));
+        sp('record_max_seconds', String(s.recordMaxSeconds));
+    });
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        queueBootJob('Sync section mode', () => spb('section_mode', sec + ':' + s.sections[sec].mode, 200));
+    }
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        for (let bank = 0; bank < BANK_COUNT; bank++) enqueueBootBankSyncJobs(sec, bank, true);
+    }
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        queueBootJob('Sync current bank', () => spb('section_bank', sec + ':' + s.sections[sec].currentBank, 200));
+    }
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) {
+        queueBootJob('Sync global FX', () => sendFxStateToDsp('global', 0, 0, fx));
+    }
+    enqueueBootHiddenFxOffJobs();
+    for (let fx = 0; fx < FX_EFFECT_COUNT; fx++) {
+        queueBootJob('Sync FX toggles', () => {
+            const dspFx = fxDspIndex(fx, 'global');
+            const ge = globalFxEffect(fx);
+            spb('performance_fx_global_toggle', dspFx + ':' + clampInt(ge && ge.enabled, 0, 1, 0), 180);
+            spb('pfx_global_toggle', dspFx + ':' + clampInt(ge && ge.enabled, 0, 1, 0), 180);
+        });
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                queueBootJob('Sync FX toggles', () => {
+                    const dspFx = fxDspIndex(fx, 'global');
+                    const be = bankFxEffect(sec, bank, fx);
+                    const en = clampInt(be && be.enabled, 0, 1, 0);
+                    const payload = sec + ':' + bank + ':' + dspFx + ':' + en;
+                    spb('performance_fx_bank_toggle', payload, 180);
+                    spb('pfx_bank_toggle', payload, 180);
+                });
+            }
+        }
+    }
+    queueBootJob('Sync selection', () => {
+        setSelectedSlice(s.selectedSlice);
+        markLedsDirty();
+    });
+    enqueueBootFinalCueRestoreJobs();
+}
+
 function applyParsedSession(parsed, silent, label) {
     if (!parsed || typeof parsed !== 'object') {
         if (!silent) showStatus('Session invalid', 120);
@@ -4496,11 +4706,16 @@ function applyParsedSession(parsed, silent, label) {
     ];
 
     invalidatePlaybackCompat();
-    applyAllStateToDsp();
+    if (!s.bootDeferDspApply) applyAllStateToDsp();
     scheduleFocusedSlotRefresh();
     scheduleTrimReplayAll();
-    for (let sec = 0; sec < GRID_COUNT; sec++) {
-        for (let bank = 0; bank < BANK_COUNT; bank++) syncBankSliceState(sec, bank);
+    if (!s.bootDeferDspApply) {
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                const b = s.sections[sec].banks[bank];
+                if (!serializeSliceStarts(b.sliceStarts, b.chopCount)) syncBankSliceState(sec, bank);
+            }
+        }
     }
     updateUtilityButtonLeds();
     markLedsDirty();
@@ -4967,25 +5182,9 @@ function handleStepBankNote(note, velocity) {
         if (!s.stepFxHold) return true;
     }
 
-    if (s.shiftHeld && s.volumeTouchHeld) {
+    if (s.copyHeld) {
         clearStepFxHold(true);
-        const keepColor = s.sections[t.sec].banks[t.bank].bankColor;
-        s.sections[t.sec].banks[t.bank] = makeBank(t.bank);
-        s.sections[t.sec].banks[t.bank].bankColor = keepColor;
-        applyBankStateToDsp(t.sec, t.bank, true);
-        if (s.focusedSection === t.sec && focusedBankIndex(t.sec) === t.bank) {
-            editCursorCache.bank = -1;
-            ensureEditCursor();
-        }
-        showStatus('S' + (t.sec + 1) + ' bank ' + (t.bank + 1) + ' cleared', 100);
-        markLedsDirty();
-        markSessionChanged();
-        s.dirty = true;
-        return true;
-    }
-
-    if (s.shiftHeld) {
-        clearStepFxHold(true);
+        s.copyConsumed = true;
         if (!s.stepCopySource) {
             s.stepCopySource = { sec: t.sec, bank: t.bank };
             showStatus('Bank copy src S' + (t.sec + 1) + 'B' + (t.bank + 1), 100);
@@ -4998,21 +5197,19 @@ function handleStepBankNote(note, velocity) {
             return true;
         }
 
-        const src = cloneBank(s.sections[s.stepCopySource.sec].banks[s.stepCopySource.bank]);
-        s.sections[t.sec].banks[t.bank] = src;
-        applyBankStateToDsp(t.sec, t.bank, true);
-        if (s.focusedSection === t.sec && focusedBankIndex(t.sec) === t.bank) {
-            editCursorCache.bank = -1;
-            ensureEditCursor();
-        }
+        copyBankBetween(s.stepCopySource, t);
         showStatus(
             'Copied S' + (s.stepCopySource.sec + 1) + 'B' + (s.stepCopySource.bank + 1) +
             ' -> S' + (t.sec + 1) + 'B' + (t.bank + 1),
             110
         );
-        markLedsDirty();
-        markSessionChanged();
-        s.dirty = true;
+        return true;
+    }
+
+    if (s.deleteHeld) {
+        clearStepFxHold(true);
+        eraseBankAt(t.sec, t.bank);
+        showStatus('S' + (t.sec + 1) + ' bank ' + (t.bank + 1) + ' erased', 100);
         return true;
     }
 
@@ -5898,7 +6095,7 @@ function handlePadNote(note, velocity) {
         return true;
     }
 
-    if (s.loopPadMode) {
+    if (s.loopPadMode && !s.deleteHeld) {
         const lp = loopPadIndexFromPadNote(note);
         if (lp >= 0) {
             fireLooperPad(lp);
@@ -5932,8 +6129,14 @@ function handlePadNote(note, velocity) {
     }
 
     if (s.deleteHeld && !s.shiftHeld) {
-        if (eraseLooperNotesForPad(sec, bank, slot)) return true;
-        showStatus('No looper notes on that pad', 80);
+        if (s.loopPadMode) {
+            if (eraseLooperNotesForPad(sec, bank, slot)) return true;
+            showStatus('No looper notes on that pad', 80);
+            return true;
+        }
+        delete s.activePadPress[String(note)];
+        setSelectedSlice(slice, true);
+        clearFocusedPadAudio();
         return true;
     }
 
@@ -6429,19 +6632,20 @@ function onMidiMessageInternal(data) {
         if (cc === MoveShift) {
             const wasHeld = s.shiftHeld;
             s.shiftHeld = val > 0;
-            if (s.shiftHeld) clearStepFxHold(true);
+            if (s.shiftHeld) {
+                if (!wasHeld) s.shiftPressTick = s.transportTicks;
+                clearStepFxHold(true);
+            }
             if (wasHeld && !s.shiftHeld) {
+                handleShiftReleaseTap();
                 let changed = false;
                 if (s.copySource) {
                     s.copySource = null;
                     changed = true;
                 }
-                if (s.stepCopySource) {
-                    s.stepCopySource = null;
-                    changed = true;
-                }
                 if (changed) markLedsDirty();
             }
+            updateUtilityButtonLeds();
             return;
         }
 
@@ -6500,6 +6704,7 @@ function onMidiMessageInternal(data) {
 
         if (cc === MoveDelete) {
             s.deleteHeld = val > 0;
+            updateUtilityButtonLeds();
             if (val <= 0) return;
             if (s.view === 'browser' && s.browserMode === 'sessions') {
                 deleteSelectedSession();
@@ -6510,12 +6715,7 @@ function onMidiMessageInternal(data) {
                 return;
             }
             if (s.view === 'main') {
-                if (s.loopPadMode) {
-                    showStatus('Looper mode: Delete disabled for samples', 90);
-                    return;
-                }
-                if (s.shiftHeld) clearFocusedBankAudio();
-                else clearFocusedPadAudio();
+                showStatus(s.loopPadMode ? 'Erase hold: tap note pad' : 'Erase hold: tap pad/step', 90);
             }
             return;
         }
@@ -6545,6 +6745,7 @@ function onMidiMessageInternal(data) {
                 s.copyHeld = true;
                 s.copyPressTick = s.transportTicks;
                 s.copyConsumed = false;
+                updateUtilityButtonLeds();
             } else {
                 const heldTicks = s.copyPressTick < 0 ? 9999 : (s.transportTicks - s.copyPressTick);
                 const quickTap = heldTicks >= 0 && heldTicks <= COPY_TAP_MAX_TICKS;
@@ -6559,7 +6760,12 @@ function onMidiMessageInternal(data) {
                     s.copySource = null;
                     markLedsDirty();
                 }
+                if (s.stepCopySource) {
+                    s.stepCopySource = null;
+                    markLedsDirty();
+                }
                 s.copyConsumed = false;
+                updateUtilityButtonLeds();
                 if (allowVelocityToggle) toggleVelocitySens();
                 return;
             }
@@ -6582,8 +6788,10 @@ function onMidiMessageInternal(data) {
             return;
         }
 
-        if (cc === MoveCapture && val > 0) {
-            if (s.view === 'main') randomizeFocusedTransientSlices();
+        if (cc === MoveCapture) {
+            s.captureHeld = val > 0;
+            updateUtilityButtonLeds();
+            if (val > 0 && s.view === 'main') randomizeFocusedTransientSlices();
             return;
         }
 
@@ -6644,6 +6852,14 @@ function beginBoot() {
     s.activePadPress = {};
     s.binaryKnobState = {};
     s.padPressFlash = {};
+    s.shiftHeld = false;
+    s.shiftPressTick = -1;
+    s.shiftLastTapTick = -9999;
+    s.muteHeld = false;
+    s.deleteHeld = false;
+    s.copyHeld = false;
+    s.captureHeld = false;
+    s.copyPressTick = -1;
     s.sections = [
         makeSection(MODE_SINGLE),
         makeSection(MODE_PER_SLOT)
@@ -6653,8 +6869,16 @@ function beginBoot() {
     s.bootTicks = 0;
     s.bootRestoredFromSession = false;
     s.bootMessage = 'Starting';
+    s.bootJobs = [];
+    s.bootDeferDspApply = false;
+    s.bootStepLed = -1;
+    s.bootWorkTotal = 1;
+    s.bootWorkDone = 0;
+    s.bootPhaseWorkTotal = 0;
+    s.bootPhaseWorkDone = 0;
     s.view = 'boot';
     s.previousView = 'main';
+    updateUtilityButtonLeds();
     s.dirty = true;
 }
 
@@ -6672,6 +6896,24 @@ function clearAllFxLanesForBoot() {
     }
 }
 
+function enqueueClearAllFxLanesForBootJobs() {
+    for (let dspFx = 0; dspFx < DSP_FX_COUNT; dspFx++) {
+        queueBootJob('Reset FX', () => {
+            sp('performance_fx_global_toggle', dspFx + ':0');
+            sp('pfx_global_toggle', dspFx + ':0');
+        });
+        for (let sec = 0; sec < GRID_COUNT; sec++) {
+            for (let bank = 0; bank < BANK_COUNT; bank++) {
+                queueBootJob('Reset FX', () => {
+                    const payload = sec + ':' + bank + ':' + dspFx + ':0';
+                    sp('performance_fx_bank_toggle', payload);
+                    sp('pfx_bank_toggle', payload);
+                });
+            }
+        }
+    }
+}
+
 function finishBootUiState() {
     s.previousView = 'main';
     s.menuCursor = 0;
@@ -6683,7 +6925,15 @@ function finishBootUiState() {
     s.confirmBody = '';
     s.confirmAction = '';
     s.parkedReturnView = 'main';
+    s.shiftHeld = false;
+    s.shiftPressTick = -1;
+    s.shiftLastTapTick = -9999;
     s.muteHeld = false;
+    s.deleteHeld = false;
+    s.copyHeld = false;
+    s.copyPressTick = -1;
+    s.copyConsumed = false;
+    s.captureHeld = false;
     s.transportTicks = 0;
     if (!s.bootRestoredFromSession) {
         s.loopPadMode = false;
@@ -6728,16 +6978,23 @@ function finishBootUiState() {
 
 function runBootPhase() {
     if (!s.bootActive) return;
+    if (s.bootJobs.length) return;
     switch (s.bootPhase) {
     case 0:
+        s.bootPhaseWorkTotal = 0;
+        s.bootPhaseWorkDone = 0;
         s.bootMessage = 'DSP defaults';
         initFromDspDefaults();
         break;
     case 1:
+        s.bootPhaseWorkTotal = 0;
+        s.bootPhaseWorkDone = 0;
         s.bootMessage = 'Reset FX';
-        clearAllFxLanesForBoot();
+        enqueueClearAllFxLanesForBootJobs();
         break;
     case 2:
+        s.bootPhaseWorkTotal = 0;
+        s.bootPhaseWorkDone = 0;
         s.bootMessage = 'MIDI + INIT';
         activateStandaloneMidiPort();
         s.copySource = null;
@@ -6745,6 +7002,9 @@ function runBootPhase() {
         s.copyPressTick = -1;
         s.copyConsumed = false;
         s.deleteHeld = false;
+        s.captureHeld = false;
+        s.shiftPressTick = -1;
+        s.shiftLastTapTick = -9999;
         s.stepFxHold = null;
         s.startTrimSoundingEnabled = true;
         s.sessionBrowserIntent = 'load';
@@ -6753,26 +7013,43 @@ function runBootPhase() {
         ensureInitSessionFile(false);
         break;
     case 3:
+        s.bootPhaseWorkTotal = 0;
+        s.bootPhaseWorkDone = 0;
         s.bootMessage = 'Load session';
-        s.bootRestoredFromSession =
-            loadSessionFromPath(autosavePath(), true, false) ||
-            loadSessionFromPath(sessionPathFromName(s.sessionName), true, false) ||
-            loadLegacySession(true) ||
-            loadSessionFromPath(sessionPathFromName(INIT_SESSION_NAME), true, false);
+        s.bootDeferDspApply = true;
+        try {
+            s.bootRestoredFromSession =
+                loadSessionFromPath(autosavePath(), true, false) ||
+                loadSessionFromPath(sessionPathFromName(s.sessionName), true, false) ||
+                loadLegacySession(true) ||
+                loadSessionFromPath(sessionPathFromName(INIT_SESSION_NAME), true, false);
+        } finally {
+            s.bootDeferDspApply = false;
+        }
         break;
     case 4:
+        s.bootPhaseWorkTotal = 0;
+        s.bootPhaseWorkDone = 0;
         s.bootMessage = 'Sync DSP';
-        if (!s.bootRestoredFromSession) applyAllStateToDsp();
-        s.velocitySens = 0;
-        spb('velocity_sens', '0', 120);
+        enqueueBootApplyAllStateJobs();
+        queueBootJob('Velocity reset', () => {
+            s.velocitySens = 0;
+            spb('velocity_sens', '0', 120);
+        });
         break;
     case 5:
+        s.bootPhaseWorkTotal = 0;
+        s.bootPhaseWorkDone = 0;
         s.bootMessage = 'Prepare UI';
         finishBootUiState();
+        enqueueBootFinalActivationJobs();
         break;
     default:
         s.bootMessage = 'Ready';
         s.bootActive = false;
+        s.bootJobs = [];
+        s.bootWorkDone = s.bootWorkTotal;
+        s.bootPhaseWorkDone = s.bootPhaseWorkTotal;
         s.bootPhase = BOOT_PHASE_COUNT;
         s.view = 'main';
         clearPadAndStepLeds();
@@ -6785,10 +7062,27 @@ function runBootPhase() {
     s.dirty = true;
 }
 
+function processBootJobs() {
+    if (!s.bootJobs.length) return;
+    const count = Math.min(BOOT_JOBS_PER_TICK, s.bootJobs.length);
+    for (let i = 0; i < count; i++) {
+        const job = s.bootJobs.shift();
+        if (!job || typeof job.fn !== 'function') continue;
+        if (job.message) s.bootMessage = job.message;
+        job.fn();
+        s.bootPhaseWorkDone = Math.min(clampInt(s.bootPhaseWorkDone, 0, 1000000, 0) + 1, Math.max(0, clampInt(s.bootPhaseWorkTotal, 0, 1000000, 0)));
+        s.bootWorkDone++;
+    }
+    s.dirty = true;
+}
+
 function tickBoot() {
     s.bootTicks++;
     tickBootLedSweep();
-    if (s.bootPhase < 6 || s.bootTicks >= BOOT_MIN_TICKS) runBootPhase();
+    updateUtilityButtonLeds();
+    s.dirty = true;
+    processBootJobs();
+    if (!s.bootJobs.length && (s.bootPhase < 6 || s.bootTicks >= BOOT_MIN_TICKS)) runBootPhase();
     if (s.dirty) {
         s.dirty = false;
         draw();
