@@ -142,6 +142,8 @@ typedef struct wrapper_instance {
     int pfx_delay_pos;
 } wrapper_instance_t;
 
+static void free_source_sample(source_sample_t *sample);
+
 static const host_api_v1_t *g_host = NULL;
 /* Optional symbol for monolithic builds that link core directly into dsp.so. */
 extern plugin_api_v2_t *twinsampler_core_move_plugin_init_v2(const host_api_v1_t *host) __attribute__((weak));

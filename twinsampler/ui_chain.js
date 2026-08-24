@@ -736,6 +736,7 @@ const s = {
     binaryKnobState: {},
     muteHeld: false,
     lastPadTriggerTick: -9999,
+    pendingKeyboardSection: -1,
     midiEchoSuppression: true,
     recentOutboundMidi: {},
 
@@ -932,6 +933,10 @@ function spb(key, val, timeoutMs) {
 }
 
 function spe(key, val) {
+    sp(key, val);
+}
+
+function speb(key, val) {
     spb(key, val, 60);
 }
 
@@ -1754,9 +1759,31 @@ function setSelectedSlice(sliceIdx, blocking = false, skipPlaybackCompat = false
     send('selected_slice', String(dspSlice), 100);
     send('selected_slot', String(slotFromSlice(slice)), 100);
     send('keyboard_section', String(s.focusedSection), 100);
+    s.pendingKeyboardSection = -1;
 
     ensureEditCursor(!!blocking);
     if (!skipPlaybackCompat) syncFocusedSlotPlaybackCompat();
+    s.dirty = true;
+}
+
+function setSelectedSliceRealtime(sliceIdx) {
+    const rawSlice = clampInt(sliceIdx, 0, TOTAL_PADS - 1, 0);
+    const slice = LEFT_GRID_ONLY ? slotFromSlice(rawSlice) : rawSlice;
+    const previousSection = s.focusedSection;
+    s.selectedSlice = slice;
+    s.focusedSection = sectionFromSlice(slice);
+
+    /* `_at` parameters are canonical for this core. Mark compatibility focus
+       current so syncFromDsp() does not replay the full slot block next tick. */
+    playbackCompatCache.sec = s.focusedSection;
+    playbackCompatCache.bank = focusedBankIndex(s.focusedSection);
+    playbackCompatCache.slot = slotFromSlice(slice);
+
+    /* Pad playback is slot-addressed. Keep live focus local so the note is
+       never queued behind cursor/compatibility updates. */
+    if (s.focusedSection !== previousSection) {
+        s.pendingKeyboardSection = s.focusedSection;
+    }
     s.dirty = true;
 }
 
@@ -3398,7 +3425,7 @@ function refreshActiveLoopVoiceForTrim(sec, bank, slot, velocity, routeBank, sou
     const effectiveRouteBank = (loopMode > 0) ? true : !!routeBank;
     if (effectiveRouteBank) {
         withPlaybackBank(sec, bank, () => {
-            spe('pad_note_on', triggerNote + ':' + vel);
+            speb('pad_note_on', triggerNote + ':' + vel);
         });
     } else {
         spe('pad_note_on', triggerNote + ':' + vel);
@@ -5713,16 +5740,25 @@ function eraseLooperNotesForPad(sec, bank, slot) {
     return true;
 }
 
-function flashPadPress(sec, bank, slot) {
+function flashPadPress(sec, bank, slot, immediate = false) {
     const key = sec + ':' + bank + ':' + slot;
+    const note = padNoteFor(sec, slot);
     s.padPressFlash[key] = s.transportTicks + PAD_PRESS_FLASH_TICKS;
-    markLedsDirty();
+    if (!immediate) {
+        markLedsDirty();
+        return;
+    }
+    /* The note is already queued before this runs. Update just the pressed LED
+       immediately and remove stale queued writes that could overwrite it. */
+    for (let i = s.ledQueue.length - 1; i >= 0; i--) {
+        if (s.ledQueue[i][0] === note) s.ledQueue.splice(i, 1);
+    }
+    setLED(note, PAD_PRESS_LED_COLOR);
+    s.dirty = true;
 }
 
 function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = true, sourceTag = '') {
     if (isPadMuted(sec, bank, slot)) return false;
-    flashPadPress(sec, bank, slot);
-    s.lastPadTriggerTick = s.transportTicks;
     const sl = slotAt(sec, bank, slot);
     const effectiveRouteBank = !!routeBank;
     const triggerNote = padNoteFor(sec, slot);
@@ -5741,11 +5777,13 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     clearPendingOff(sec, bank, slot);
     if (effectiveRouteBank) {
         withPlaybackBank(sec, bank, () => {
-            spe('pad_note_on', triggerNote + ':' + vel);
+            speb('pad_note_on', triggerNote + ':' + vel);
         });
     } else {
         spe('pad_note_on', triggerNote + ':' + vel);
     }
+    flashPadPress(sec, bank, slot, !!recordToLooper);
+    s.lastPadTriggerTick = s.transportTicks;
     sendMidiOut(slot, vel, sec, bank, true);
     if (recordToLooper) looperRecordEvent('on', sec, bank, slot, vel);
     activeVoicesByAddr[key] = {
@@ -5761,7 +5799,8 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
     };
     setPadPlaybackState(sec, bank, slot, 'playing');
     /* no-op: avoid implicit loop retriggers from non-loop pads */
-    markLedsDirty();
+    if (sl.loop > 0) markLedsDirty();
+    else s.dirty = true;
     return true;
 }
 
@@ -5871,12 +5910,17 @@ function clearPendingOff(sec, bank, slot) {
 
 function emitPadNoteOffNow(sec, bank, slot, routeBank, recordToLooper) {
     const triggerNote = padNoteFor(sec, slot);
-    if (routeBank) {
-        withPlaybackBank(sec, bank, () => {
+    const sl = slotAt(sec, bank, slot);
+    /* Trig one-shots ignore note-off in the DSP core. Avoid filling the control
+       queue with messages that cannot change their playback. */
+    if (sl.loop > 0 || sl.modeGate) {
+        if (routeBank) {
+            withPlaybackBank(sec, bank, () => {
+                speb('pad_note_off', String(triggerNote));
+            });
+        } else {
             spe('pad_note_off', String(triggerNote));
-        });
-    } else {
-        spe('pad_note_off', String(triggerNote));
+        }
     }
     sendMidiOut(slot, 0, sec, bank, false);
     if (recordToLooper) looperRecordEvent('off', sec, bank, slot, 0);
@@ -5906,7 +5950,8 @@ function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = 
     emitPadNoteOffNow(sec, bank, slot, effectiveRouteBank, recordToLooper);
     delete activeVoicesByAddr[key];
     setPadPlaybackState(sec, bank, slot, 'idle');
-    markLedsDirty();
+    if (slotAt(sec, bank, slot).loop > 0) markLedsDirty();
+    else s.dirty = true;
     return true;
 }
 
@@ -5936,7 +5981,8 @@ function flushPendingNoteOffs() {
         delete activeVoicesByAddr[key];
         delete pendingNoteOffsByAddr[key];
         setPadPlaybackState(p.sec, p.bank, p.slot, 'idle');
-        markLedsDirty();
+        if (slotAt(p.sec, p.bank, p.slot).loop > 0) markLedsDirty();
+        else s.dirty = true;
     }
 }
 
@@ -6153,7 +6199,7 @@ function handlePadNote(note, velocity) {
                 releaseActiveVoice(sec, bank, slot, false, true, Date.now(), true);
                 delete s.activePadPress[String(note)];
                 s.editScope = 'P';
-                setSelectedSlice(slice, false, false);
+                setSelectedSliceRealtime(slice);
                 return true;
             }
             /* Route loop/ping pads through bank routing to avoid mono choke interactions. */
@@ -6169,13 +6215,13 @@ function handlePadNote(note, velocity) {
                 pressedAtMs: Date.now()
             };
             s.editScope = 'P';
-            setSelectedSlice(slice, false, false);
+            setSelectedSliceRealtime(slice);
             return true;
         }
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         s.editScope = 'P';
-        setSelectedSlice(slice, false, false);
+        setSelectedSliceRealtime(slice);
     } else {
         delete s.activePadPress[String(note)];
         setSelectedSlice(slice, true);
@@ -6433,6 +6479,13 @@ function tickStatusTimer() {
     if (s.statusTicks <= 0) return;
     s.statusTicks--;
     if (s.statusTicks === 0) s.dirty = true;
+}
+
+function flushRealtimeKeyboardSection() {
+    const sec = clampInt(s.pendingKeyboardSection, -1, GRID_COUNT - 1, -1);
+    if (sec < 0) return;
+    s.pendingKeyboardSection = -1;
+    sp('keyboard_section', String(sec));
 }
 
 function tickAutosave() {
@@ -7100,6 +7153,7 @@ function tick() {
     }
     s.transportTicks++;
     syncFromDsp();
+    flushRealtimeKeyboardSection();
     tickStatusTimer();
     tickAutosave();
     previewTick();
