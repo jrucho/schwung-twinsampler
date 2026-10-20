@@ -98,6 +98,7 @@ typedef struct wrapper_instance {
     float slot_gain[2][8][16];
     float slot_pan[2][8][16];
     float global_pitch;
+    float global_gain;
     char slot_sample_path[2][8][16][TS_SLOT_PATH_MAX];
     char source_path[2][8][TS_SLOT_PATH_MAX];
     uint32_t source_slice_starts[2][8][TS_SOURCE_SLICE_POINTS];
@@ -128,6 +129,7 @@ typedef struct wrapper_instance {
     float pfx_phase_vinyl;
     int pfx_sr_hold_count_comp;
     int pfx_sr_hold_count_crush;
+    int pfx_sr_hold_count_crush_r;
     float pfx_sr_hold_l_comp;
     float pfx_sr_hold_r_comp;
     float pfx_sr_hold_l_crush;
@@ -309,7 +311,10 @@ static float parse_colon_float_tail(const char *val, float fallback) {
 #define PATH_MAX 4096
 #endif
 
-#define TS_SAMPLE_CACHE_DIR "/tmp/twinsampler_sample_cache"
+/* Move's /tmp lives on its small system partition, not the sample/data disk.
+ * Converted/reversed WAVs can fill that partition and block OS updates. */
+#define TS_SAMPLE_CACHE_ROOT "/data/UserData/schwung/cache"
+#define TS_SAMPLE_CACHE_DIR TS_SAMPLE_CACHE_ROOT "/twinsampler_sample_cache"
 #define TS_SAMPLE_PARAM_BUF (PATH_MAX + 128)
 #define WAV_FORMAT_PCM 1
 #define WAV_FORMAT_IEEE_FLOAT 3
@@ -572,8 +577,11 @@ static uint64_t sample_cache_hash(const char *path, const wav_info_t *info, uint
 }
 
 static int ensure_sample_cache_dir(void) {
+    struct stat st;
+    if (mkdir(TS_SAMPLE_CACHE_ROOT, 0755) != 0 && errno != EEXIST) return 0;
+    if (stat(TS_SAMPLE_CACHE_ROOT, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
     if (mkdir(TS_SAMPLE_CACHE_DIR, 0755) == 0) return 1;
-    if (errno == EEXIST) return 1;
+    if (errno == EEXIST && stat(TS_SAMPLE_CACHE_DIR, &st) == 0 && S_ISDIR(st.st_mode)) return 1;
     return 0;
 }
 
@@ -1438,7 +1446,9 @@ static void mix_source_loop_overlays(wrapper_instance_t *inst, int16_t *out, int
             const size_t off1 = (size_t)idx1 * 2u;
             float l = sample->frames_lr[off0] + (sample->frames_lr[off1] - sample->frames_lr[off0]) * frac;
             float r = sample->frames_lr[off0 + 1u] + (sample->frames_lr[off1 + 1u] - sample->frames_lr[off0 + 1u]) * frac;
-            const float amp = v->gain * v->velocity_gain;
+            /* The core applies global_gain to one-shots. Overlay loops bypass
+             * the core renderer, so they must apply the same gain here. */
+            const float amp = v->gain * v->velocity_gain * inst->global_gain;
             const float pan = clampf(v->pan, -1.0f, 1.0f);
             const float lg = pan > 0.0f ? (1.0f - pan) : 1.0f;
             const float rg = pan < 0.0f ? (1.0f + pan) : 1.0f;
@@ -1648,6 +1658,7 @@ static void* wrapper_create_instance(const char *module_dir, const char *json_de
     inst->section_mode[0] = 0;
     inst->section_mode[1] = 1;
     inst->global_pitch = 0.0f;
+    inst->global_gain = 1.0f;
     for (int sec = 0; sec < 2; sec++) {
         for (int bank = 0; bank < 8; bank++) {
             for (int slot = 0; slot < 16; slot++) {
@@ -1849,6 +1860,8 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
         remember_source_path(inst, val ? val : "");
     } else if (!strcmp(key, "section_slice_starts")) {
         remember_source_slice_starts(inst, val ? val : "");
+    } else if (!strcmp(key, "global_gain")) {
+        inst->global_gain = parse_float_clamped(val, 0.0f, 4.0f, inst->global_gain);
     } else if (!strcmp(key, "global_pitch") || !strcmp(key, "pitch")) {
         inst->global_pitch = parse_float_clamped(val, -48.0f, 48.0f, inst->global_pitch);
         update_all_source_loop_voice_pitch(inst);
@@ -2143,7 +2156,17 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
     if (!on[8]) inst->pfx_djfx_active = 0;
 
     /* True bypass: do not touch samples when all FX are off. */
-    if (!any_on) return;
+    if (!any_on) {
+        /* Maintain recent dry history without altering output. Otherwise an
+         * instant DJFX capture after bypass captures an empty delay buffer. */
+        for (int frame = 0; frame < frames; frame++) {
+            const int p = inst->pfx_delay_pos * 2;
+            inst->pfx_delay_buf[p] = out_interleaved_lr[frame * 2] / 32768.0f;
+            inst->pfx_delay_buf[p + 1] = out_interleaved_lr[frame * 2 + 1] / 32768.0f;
+            if (++inst->pfx_delay_pos >= inst->pfx_delay_len) inst->pfx_delay_pos = 0;
+        }
+        return;
+    }
 
     for (int i = 0; i < frames; i++) {
         int dpos = inst->pfx_delay_pos;
@@ -2272,13 +2295,14 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
                 if (hold < 1) hold = 1;
                 if (hold > 192) hold = 192;
                 float pre_x = pfx_softclip(x * (1.0f + noise * 0.8f));
-                if (inst->pfx_sr_hold_count_crush <= 0) {
+                int *hold_count = ch == 0 ? &inst->pfx_sr_hold_count_crush : &inst->pfx_sr_hold_count_crush_r;
+                if (*hold_count <= 0) {
                     if (ch == 0) inst->pfx_sr_hold_l_crush = pre_x;
                     else inst->pfx_sr_hold_r_crush = pre_x;
-                    inst->pfx_sr_hold_count_crush = hold;
+                    *hold_count = hold;
                 }
                 float crushed = (ch == 0) ? inst->pfx_sr_hold_l_crush : inst->pfx_sr_hold_r_crush;
-                if (ch == 1) inst->pfx_sr_hold_count_crush--;
+                (*hold_count)--;
                 const float levels = powf(2.0f, bits);
                 crushed = floorf(crushed * levels + 0.5f) / levels;
                 crushed += pfx_noise_from_u32(&inst->dither_state, noise * 0.025f);

@@ -120,12 +120,21 @@ function requestExitModule() {
 }
 
 function leaveBackgroundModule() {
+    // Official Schwung overtake suspend keeps the DSP and UI tick alive.
+    // host_hide_module is only for tool overtakes and is a no-op here.
+    if (typeof host_suspend_overtake === 'function') {
+        try {
+            host_suspend_overtake();
+            return;
+        } catch (e) {
+            console.log('TwinSampler suspend error: ' + String(e));
+        }
+    }
     let detached = false;
     const candidates = [
         'host_leave_module_background',
         'host_background_module',
         'host_minimize_module',
-        'host_hide_module',
         'host_detach_ui',
         'host_return_to_previous',
         'host_show_launcher'

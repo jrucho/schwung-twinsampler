@@ -17,9 +17,81 @@ Place the `twinsampler` folder in the following directory on your Ableton Move:
 
 ### Required Files:
 * `dsp.so` & `dsp_core.so` (DSP Engine)
-* `ui.js` & `ui_chain.js` (Interface & Logic)
+* `ui.js`, `ui_chain.js`, `param_transport.mjs`, `waveform.mjs` & `fx_presets.mjs` (Interface & Logic)
 * `module.json`, `help.json`, and `plugin_api_v1.h`
 * `dsp_wrapper_monitor.c`
+
+---
+
+## v0.3.9 development: editors, loading and Schwung compatibility
+
+The current development version uses Schwung's optional bulk parameter API
+(verified in upstream **v1.7.3**) to reduce startup communication overhead.
+Older hosts automatically retain individual parameter writes. File loads,
+sample reversal, looping changes and slicing are kept separate from numeric
+batches. All 16 banks, 256 pad assignments, effects, cues and final compatibility
+replays are still restored before `READY`; no banks or samples are lazy-loaded.
+
+Startup waits while the host reports that the DSP is loading. It also preserves
+the saved velocity setting and avoids overwriting autosave if loading is cancelled.
+Shift + Back uses the official overtake suspend API when available.
+The final startup replays finish before `READY`; no second whole-session replay
+is scheduled after the pads become playable. Converted samples are cached on
+the data partition, not the small system partition.
+
+### Essential editor pages
+
+| Control | Action |
+|---|---|
+| Down from main | Open sample waveform/trim |
+| Down again, or Shift + Down from main | Open source-bank chop editor (SRC mode) |
+| Menu → Sample Editor / Chop Editor | Open an editor directly |
+| Tap a pad / turn Jog | Select the pad to edit |
+| K3 / K4 | Adjust the selected start / end edge |
+| Shift + K3 / K4 | Coarse 10 ms edge adjustment |
+| Shift + Jog | Zoom 1x–128x around the selected start |
+| Left / Right | Scroll the zoomed waveform window |
+| Press / release Jog | Audition using normal pad trigger/gate behavior |
+| Back / Up | Return to main |
+
+The other six knobs retain their per-pad controls in the editors. Chop editing
+changes shared boundaries between source slices; use the Trim page to adjust
+an individual pad's offsets, including the first/last slice's outer edge.
+Per-pad sample mode opens Trim rather than modifying an unrelated source bank.
+Source chop positions are converted into the core's 44.1 kHz frame domain even
+when the WAV on disk is 48 kHz. Waveform overviews are approximate on long files.
+
+### FX presets and loading screens
+
+On the FX page (Up from main), K1 selects one of five named sounds for the
+selected effect; K2–K8 edit its parameters. An asterisk after a preset name
+means the settings were edited or came from an older session. Saved FX settings
+are preserved until you choose another preset. The Lo-fi stereo channel and
+instant DJFX history issues are fixed in 0.3.9.
+
+Project restores show a progress screen through the entire restore. Sample
+loads, explicit saves, new/init, undo and redo also show a busy screen before
+blocking work starts. Some individual conversions and undo/redo operations can
+still hold a frame; loading feedback does not imply the DSP file I/O is threaded.
+
+Run the regression checks with Node.js 22 or newer and a native C compiler:
+
+```sh
+bash scripts/test.sh
+```
+
+Build an installable archive with:
+
+```sh
+bash scripts/build.sh
+```
+
+The archive is `dist/twinsampler-module.tar.gz`. An ARM64 Linux compiler
+(`aarch64-linux-gnu-gcc`) rebuilds the DSP wrapper when available. Release CI
+installs that compiler explicitly. See [DEVELOPMENT_REVIEW.md](DEVELOPMENT_REVIEW.md)
+for measurements, compatibility findings and remaining work.
+Changes are recorded in [CHANGELOG.md](CHANGELOG.md). This version is developed
+locally until publication is explicitly requested.
 
 ---
 
@@ -72,7 +144,7 @@ When a pad is focused, the eight knobs control:
     * **Delete + Pad:** Clears audio from a specific pad.
     * **Shift + Delete:** Clears all audio in the focused bank.
 * **Capture:** In Source mode, press **Capture** to randomize or rebuild the transient chop map.
-* **Undo/Redo:** Press **Undo** for latest edit; **Shift + Undo** for Redo. (This action takes a few seconds. There is no loading screen, so wait a moment while the undo or redo completes.)
+* **Undo/Redo:** Press **Undo** for latest edit; **Shift + Undo** for Redo. A loading screen is shown while the operation completes.
 
 ---
 
@@ -180,9 +252,6 @@ https://notebooklm.google.com/notebook/31678b7d-3a8e-4d41-8a5f-d2675b3e7298?arti
 <img width="1788" height="998" alt="9" src="https://github.com/user-attachments/assets/c91c4bb2-285d-4981-8deb-509b9fa69db1" />
 
 <img width="1787" height="997" alt="10" src="https://github.com/user-attachments/assets/19e6d9da-0ff9-4314-883f-f5f3932d6ed0" />
-
-
-
 
 
 

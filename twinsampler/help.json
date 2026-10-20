@@ -2,6 +2,33 @@
   "title": "TwinSampler",
   "children": [
     {
+      "title": "Sample / Chop Editor",
+      "lines": [
+        "Down: waveform trim",
+        "Down again: SRC chops",
+        "K3/K4: start/end",
+        "Shift: coarse edges",
+        "Shift+Jog: zoom",
+        "Arrows: scroll",
+        "Jog: select pad",
+        "Jog press: audition",
+        "Back/Up: main"
+      ]
+    },
+    {
+      "title": "FX Presets / Loading",
+      "lines": [
+        "Up: FX page",
+        "K1: named preset",
+        "K2-K8: parameters",
+        "* = edited/legacy",
+        "Project loads show",
+        "restore progress.",
+        "Samples/save/undo",
+        "show a busy screen."
+      ]
+    },
+    {
       "title": "Core Layout",
       "lines": [
         "Two independent 4x4",

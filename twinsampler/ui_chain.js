@@ -12,6 +12,9 @@
 import * as os from 'os';
 import * as moveConstants from '/data/UserData/schwung/shared/constants.mjs';
 import * as moveInputFilter from '/data/UserData/schwung/shared/input_filter.mjs';
+import { createParamTransport } from './param_transport.mjs';
+import { makeWaveIo, createWaveform, sourceSliceFrames, moveSliceBoundary } from './waveform.mjs';
+import { fxPresetRow, fxPresetName, fxPresetDisplayName } from './fx_presets.mjs';
 
 function pickConst(name, fallback) {
     const v = moveConstants[name];
@@ -161,7 +164,6 @@ const FX_PARAM_LABELS = [
 ];
 const FX_PRESET_COUNT = 5;
 const FX_PRESET_VALUES = [0.00, 0.25, 0.50, 0.75, 1.00];
-const FX_PRESET_STRENGTH = [0.40, 0.65, 0.85, 1.00, 1.18];
 const FX_DEFAULT_PARAMS = [
     [0.50, 0.52, 0.26, 0.18, 0.16, 0.32, 0.54, 0.86], /* 404 VinylSim */
     [0.50, 0.58, 0.58, 0.56, 0.50, 0.30, 0.20, 0.86], /* Isolator */
@@ -212,18 +214,7 @@ function fxEffectFromPadSlot(slotIdx) {
     return clampInt(FX_PAD_SLOT_MAP[slot], -1, FX_EFFECT_COUNT - 1, -1);
 }
 function fxPresetParams(effectIdx, presetIdx, scope = 'bank') {
-    const fx = clampInt(effectIdx, 0, FX_EFFECT_COUNT - 1, 0);
-    const pIdx = clampInt(presetIdx, 0, FX_PRESET_COUNT - 1, 2);
-    const row = fxDefaultParamRow(scope, fx);
-    const strength = clampFloat(FX_PRESET_STRENGTH[pIdx], 0.1, 2.0, 1.0);
-    const params = Array.from({ length: FX_PARAM_COUNT }, (_p, paramIdx) => {
-        if (paramIdx === 0) return fxPresetValueFromIndex(pIdx);
-        const base = clampFloat(row ? row[paramIdx] : 0.5, 0.0, 1.0, 0.5);
-        const shaped = 0.5 + (base - 0.5) * strength;
-        return clampFloat(shaped, 0.0, 1.0, base);
-    });
-    params[0] = fxPresetValueFromIndex(pIdx);
-    return params;
+    return fxPresetRow(effectIdx, presetIdx);
 }
 function applyPresetToFxState(effectIdx, eff, presetIdx, scope = 'bank') {
     if (!eff || typeof eff !== 'object') return;
@@ -299,12 +290,14 @@ const DECAY_MAX_MS = 600000.0;
 const LOOPER_COUNT = 16;
 const LOOPER_PAGE_SIZE = 4;
 const TOP_ROW_SLOT_START = GRID_SIZE - SECTION_COLS;
-const MENU_ITEMS = ['Samples', 'Load Session', 'Save', 'Save New', 'New / Init', 'FX', 'Help', 'Exit'];
+const MENU_ITEMS = ['Samples', 'Sample Editor', 'Chop Editor', 'Load Session', 'Save', 'Save New', 'New / Init', 'FX', 'Help', 'Exit'];
 const EXIT_MENU_ITEMS = ['Exit'];
 const BOOT_PHASE_COUNT = 7;
 const BOOT_PROGRESS_PHASES = 6;
 const BOOT_MIN_TICKS = 28;
 const BOOT_JOBS_PER_TICK = 2;
+const BOOT_BULK_JOBS_PER_TICK = 8;
+const BOOT_WORK_BUDGET_MS = 8;
 const BOOT_LED_COLORS = [AzureBlue, Cyan, ElectricViolet, BrightPink, VividYellow, BrightGreen];
 const BOOT_STRIPE_WIDTH = 24;
 const BOOT_STRIPE_X = 8;
@@ -313,6 +306,9 @@ const HELP_PAGES = [
     ['TwinSampler Help', 'Menu: app menu', 'Back: exit confirm', 'Jog: move/select', 'Shortcuts still work'],
     ['Samples', 'Jog click: browser', 'Menu in browser:', 'cycle target', 'Jog click: load'],
     ['Sessions', 'Shift+Menu: load', 'Shift+Copy: save', 'INIT is locked', 'Autosaves on exit'],
+    ['Sample / Chop Editor', 'Down: trim waveform', 'Down again: SRC chops', 'K3/K4: start/end', 'Back: main screen'],
+    ['Waveform navigation', 'Shift+Jog: zoom', 'Arrows: scroll window', 'Jog turn: select pad', 'Jog press: audition'],
+    ['FX presets', 'Up: FX page', 'K1: named preset', 'K2-K8: edit sound', '* = custom settings'],
     ['Exit', 'Back: exit confirm', 'Menu Exit: confirm', 'YES exits fully', 'Autosave enabled']
 ];
 
@@ -763,6 +759,7 @@ const s = {
     focusedParamRefreshTicks: 0,
     trimReplayTicks: 0,
     trimReplayPendingAll: false,
+    trimReplayCursor: -1,
     trimPreviewSerial: 0,
 
     undoHistory: [],
@@ -906,8 +903,89 @@ function activateStandaloneMidiPort() {
     } catch (e) {}
 }
 
+const paramTransport = createParamTransport({
+    hasBulk: () => typeof host_module_set_params === 'function',
+    setMany: blob => host_module_set_params(blob),
+    set: (key, value, timeout) => {
+        if (timeout && typeof host_module_set_param_blocking === 'function') {
+            return host_module_set_param_blocking(key, value, timeout);
+        }
+        return host_module_set_param(key, value);
+    }
+});
+const sampleWave = createWaveform(makeWaveIo(os));
+
+function beginLoading(title, fn, returnView = 'main') {
+    if (s.bootActive || s.operationActive) return false;
+    sampleWave.close();
+    s.operationActive = true;
+    s.operationTitle = title;
+    s.operationReturnView = returnView;
+    s.operationWarmup = 2;
+    s.operationError = '';
+    s.bootJobs = [];
+    s.bootPhaseWorkTotal = 0;
+    s.bootPhaseWorkDone = 0;
+    s.bootWorkTotal = 0;
+    s.bootWorkDone = 0;
+    s.bootMessage = 'Preparing...';
+    queueBootJob(title, () => { if (fn() === false) throw new Error(title + ' failed'); });
+    s.view = 'loading';
+    s.dirty = true;
+    return true;
+}
+
+function startSessionLoad(path) {
+    return beginLoading('Loading project', () => {
+        stopAllActiveSamplePlaybackNow();
+        previewStop();
+        s.bootDeferDspApply = true;
+        let loaded;
+        try { loaded = loadSessionFromPath(path, true, false); }
+        finally { s.bootDeferDspApply = false; }
+        if (!loaded) throw new Error('Project missing or invalid');
+        s.sessionName = sessionNameFromPath(path);
+        s.bootRestoredFromSession = true;
+        enqueueBootApplyAllStateJobs();
+        queueBootJob('Prepare project', () => finishBootUiState());
+        enqueueBootFinalActivationJobs();
+        queueBootJob('Project history', () => { resetHistory(); sampleWave.invalidate(); });
+    });
+}
+
+function drawLoading() {
+    clear_screen();
+    const progress = clamp(s.bootPhaseWorkDone / Math.max(1, s.bootPhaseWorkTotal), 0, 1);
+    print(0, 10, shortText(s.operationTitle || 'Loading', 21), 1);
+    print(0, 25, shortText(s.bootMessage || 'Preparing...', 21), 1);
+    drawLogoHLine(8, 43, 112);
+    fillLogoRect(8, 41, Math.round(112 * progress), 4, true);
+    print(0, 54, Math.round(progress * 100) + '%  Please wait', 1);
+}
+
+function tickLoading() {
+    if (s.operationWarmup > 0) s.operationWarmup--;
+    else {
+        try { processBootJobs(); }
+        catch (e) {
+            s.operationError = e && e.message ? e.message : String(e);
+            console.log('TwinSampler operation error: ' + s.operationError);
+            s.bootJobs = [];
+        }
+        if (!s.bootJobs.length) {
+            s.operationActive = false;
+            s.view = s.operationReturnView || 'main';
+            forceLedRefreshNow();
+            showStatus(s.operationError || 'Ready', 120);
+        }
+    }
+    draw();
+    s.dirty = false;
+}
+
 function gp(key, fallback) {
     try {
+        paramTransport.flush(); // A read must see all earlier queued edits.
         const v = host_module_get_param(key);
         return v != null ? v : fallback;
     } catch (e) {
@@ -916,19 +994,18 @@ function gp(key, fallback) {
 }
 
 function sp(key, val) {
+    // This wrapper handles these aliases identically and returns before the
+    // core. Sending both names doubles FX restore traffic with no state gain.
+    if (/^pfx_(?:global|bank)_(?:toggle|param)$/.test(key)) return;
     try {
-        host_module_set_param(key, String(val));
+        paramTransport.set(key, val);
     } catch (e) {}
 }
 
 function spb(key, val, timeoutMs) {
-    const value = String(val);
+    if (/^pfx_(?:global|bank)_(?:toggle|param)$/.test(key)) return;
     try {
-        if (typeof host_module_set_param_blocking === 'function') {
-            host_module_set_param_blocking(key, value, timeoutMs || 250);
-        } else {
-            host_module_set_param(key, value);
-        }
+        paramTransport.set(key, val, timeoutMs || 250);
     } catch (e) {}
 }
 
@@ -1389,20 +1466,24 @@ function scheduleTrimReplayAll(ticks = SLOT_TRIM_REPLAY_TICKS_AFTER_LOAD) {
     );
 }
 
+function replaySlotParamsToDsp(sec, bank, slot) {
+    const sl = slotAt(sec, bank, slot);
+    sp('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)));
+    sp('slot_decay_at', fmtAt(sec, bank, slot, sl.decay.toFixed(2)));
+    sp('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)));
+    sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2));
+    sp('slot_gain_at', fmtAt(sec, bank, slot, sl.gain.toFixed(3)));
+    sp('slot_pan_at', fmtAt(sec, bank, slot, sl.pan.toFixed(3)));
+    sp('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)));
+    sp('slot_mode_at', fmtAt(sec, bank, slot, sl.modeGate));
+    sp('slot_loop_at', fmtAt(sec, bank, slot, sl.loop));
+}
+
 function replayAllSlotParamsToDsp() {
     for (let sec = 0; sec < GRID_COUNT; sec++) {
         for (let bank = 0; bank < BANK_COUNT; bank++) {
             for (let slot = 0; slot < GRID_SIZE; slot++) {
-                const sl = slotAt(sec, bank, slot);
-                sp('slot_attack_at', fmtAt(sec, bank, slot, sl.attack.toFixed(2)));
-                sp('slot_decay_at', fmtAt(sec, bank, slot, sl.decay.toFixed(2)));
-                sp('slot_start_trim_at', fmtAt(sec, bank, slot, sl.startTrim.toFixed(2)));
-                sendSlotEndTrimToDsp(sec, bank, slot, sl.endTrim.toFixed(2));
-                sp('slot_gain_at', fmtAt(sec, bank, slot, sl.gain.toFixed(3)));
-                sp('slot_pan_at', fmtAt(sec, bank, slot, sl.pan.toFixed(3)));
-                sp('slot_pitch_at', fmtAt(sec, bank, slot, sl.pitch.toFixed(2)));
-                sp('slot_mode_at', fmtAt(sec, bank, slot, sl.modeGate));
-                sp('slot_loop_at', fmtAt(sec, bank, slot, sl.loop));
+                replaySlotParamsToDsp(sec, bank, slot);
             }
         }
     }
@@ -1524,7 +1605,8 @@ function requestHostExit() {
 }
 
 function requestLeaveBackground() {
-    saveAutosaveSession(true);
+    if (s.operationActive) return;
+    if (!s.bootActive && s.view !== 'boot') saveAutosaveSession(true);
     try {
         if (globalThis && typeof globalThis.twinsampler_leave_background === 'function') {
             globalThis.twinsampler_leave_background();
@@ -1567,7 +1649,7 @@ function confirmYes() {
         return;
     }
     if (action === 'new') {
-        resetToInitSession();
+        beginLoading('New project', () => resetToInitSession());
         return;
     }
     if (action === 'saveOverwrite') {
@@ -1618,6 +1700,10 @@ function selectMenuItem() {
         openSessionBrowser('load', false);
         return;
     }
+    if (item === 'Sample Editor' || item === 'Chop Editor') {
+        openSampleEditor(item === 'Chop Editor' ? 'chop' : 'trim');
+        return;
+    }
     if (item === 'Save') {
         saveSessionNamed(false);
         return;
@@ -1647,6 +1733,7 @@ function selectMenuItem() {
 }
 
 function handleBackButton() {
+    if (s.operationActive) return true;
     if (s.view === 'boot') {
         showStatus('Loading...', 40);
         return true;
@@ -1668,6 +1755,13 @@ function handleBackButton() {
         s.view = 'main';
         showStatus('Main screen', 70);
         markLedsDirty();
+        return true;
+    }
+    if (s.view === 'trim' || s.view === 'chop') {
+        sampleWave.close();
+        s.view = 'main';
+        forceLedRefreshNow();
+        showStatus('Main screen', 60);
         return true;
     }
     if (s.view === 'menu' || s.view === 'help') {
@@ -2249,13 +2343,7 @@ function browserSelect() {
             }
             return;
         }
-        if (loadSessionFromPath(e.path, false)) {
-            s.sessionName = sessionNameFromPath(e.path);
-            s.sessionCharIndex = clampInt(s.sessionCharIndex, 0, Math.max(0, s.sessionName.length - 1), 0);
-            s.view = 'main';
-            showStatus('Loaded ' + s.sessionName, 100);
-            s.dirty = true;
-        }
+        startSessionLoad(e.path);
         return;
     }
 
@@ -2270,20 +2358,16 @@ function browserSelect() {
     const slot = focusedSlotIndex();
     const target = resolveAssignTarget(sec);
 
-    if (target === 'source') {
-        setSourcePath(sec, bank, e.path, true);
-        showStatus('S' + (sec + 1) + 'B' + (bank + 1) + ' source loaded', 110);
-    } else {
-        setSlotPath(sec, bank, slot, e.path, true);
-        showStatus('S' + (sec + 1) + 'B' + (bank + 1) + 'P' + (slot + 1) + ' loaded', 110);
-    }
-
+    const path = e.path;
     s.browserLastSamplePath = e.path;
     rememberSampleBrowserFocus();
     previewStop();
-    s.view = 'main';
-    ensureEditCursor();
-    s.dirty = true;
+    beginLoading('Loading sample', () => {
+        if (target === 'source') setSourcePath(sec, bank, path, true);
+        else setSlotPath(sec, bank, slot, path, true);
+        sampleWave.invalidate();
+        ensureEditCursor();
+    });
 }
 
 function setSectionMode(sec, mode) {
@@ -4098,18 +4182,117 @@ function drawBrowser() {
     }
 }
 
+function editorTarget() {
+    const sec = s.focusedSection, bank = focusedBankIndex(sec), slot = focusedSlotIndex();
+    const b = s.sections[sec].banks[bank];
+    const source = s.sections[sec].mode === MODE_SINGLE;
+    const sl = slotAt(sec, bank, slot);
+    return { sec, bank, slot, b, sl, source, path: source ? b.sourcePath : sl.path };
+}
+
+function editorActive() { return s.view === 'trim' || s.view === 'chop'; }
+
+function openSampleEditor(view = 'trim') {
+    if (view === 'chop' && s.sections[s.focusedSection].mode !== MODE_SINGLE) {
+        showStatus('Chops need SRC mode', 110);
+        view = 'trim';
+    }
+    previewStop();
+    s.view = view;
+    const t = editorTarget();
+    sampleWave.target(t.path || '', !t.source && !!t.sl.reverse);
+    showStatus(view === 'chop' ? 'K3 start K4 end cuts' : 'K3 start K4 end trim', 100);
+    forceLedRefreshNow();
+    s.dirty = true;
+}
+
+function editorBounds(t, info) {
+    const duration = info.durationMs;
+    const cuts = t.source ? sourceSliceFrames(t.b.sliceStarts, duration) : null;
+    const baseStart = cuts ? cuts[t.slot] / 44.1 : 0;
+    const baseEnd = cuts ? cuts[t.slot + 1] / 44.1 : duration;
+    const start = clampFloat(baseStart + clampFloat(t.sl.startTrim, -5000, 5000, 0), 0, Math.max(0, duration - 1 / 44.1), baseStart);
+    const end = clampFloat(baseEnd + clampFloat(t.sl.endTrim, -5000, 5000, 0), start + 1 / 44.1, duration, baseEnd);
+    return { cuts, baseStart, baseEnd, start, end };
+}
+
+function tickSampleEditor() {
+    if (!editorActive()) { sampleWave.close(); return; }
+    const t = editorTarget();
+    if (s.view === 'chop' && !t.source) s.view = 'trim';
+    sampleWave.target(t.path || '', !t.source && !!t.sl.reverse);
+    if (sampleWave.tick()) s.dirty = true;
+}
+
+function adjustEditorEdge(edge, delta) {
+    const t = editorTarget(), model = sampleWave.model();
+    if (!model.info || model.path !== t.path) { showStatus('Waiting for waveform', 70); return; }
+    const bounds = editorBounds(t, model.info);
+    const step = delta * (s.shiftHeld ? 10 : 1);
+    if (s.view === 'chop' && t.source) {
+        const cuts = moveSliceBoundary(bounds.cuts, t.slot, edge, step * 44.1);
+        if (cuts.every((value, i) => value === bounds.cuts[i])) {
+            showStatus('Edge limit: use Trim', 80); return;
+        }
+        t.b.sliceStarts = cuts;
+        spb('section_slice_starts', t.sec + ':' + t.bank + ':' + cuts.join(','), 500);
+        markSessionChanged();
+    } else {
+        // Source loop overlay and core trims share a +/-5000 ms limit. Keep
+        // the UI truthful and never permit the audible region to invert.
+        if (edge === 'start') {
+            const ms = clampFloat(bounds.start + step, 0, bounds.end - 1 / 44.1, bounds.start);
+            setSlotStartTrim(t.sec, t.bank, t.slot, clampFloat(ms - bounds.baseStart, -5000, 5000, 0), true);
+        } else {
+            const ms = clampFloat(bounds.end + step, bounds.start + 1 / 44.1, model.info.durationMs, bounds.end);
+            setSlotEndTrim(t.sec, t.bank, t.slot, clampFloat(ms - bounds.baseEnd, -5000, 5000, 0), true);
+        }
+    }
+    s.dirty = true;
+}
+
+function drawSampleEditor() {
+    clear_screen();
+    const t = editorTarget(), w = sampleWave.model();
+    const title = (s.view === 'chop' ? 'CHOP ' : 'TRIM ') + 'S' + (t.sec + 1) + 'B' + (t.bank + 1) + ' P' + (t.slot + 1);
+    print(0, 0, shortText(title + ' ' + w.zoom + 'x', 21), 1);
+    print(0, 9, shortText(baseName(t.path || '') || 'No sample', 21), 1);
+    if (!w.info || w.path !== t.path) {
+        print(0, 28, t.path ? (w.status || 'Reading waveform...') : 'Load a sample first', 1);
+    } else {
+        const bounds = editorBounds(t, w.info);
+        const toX = norm => Math.round((norm - w.from) / (w.to - w.from) * 127);
+        if (w.scan) for (let x = 0; x < w.scan.col; x++) {
+            const top = 32 - Math.round(w.scan.max[x] * 11), bottom = 32 - Math.round(w.scan.min[x] * 11);
+            for (let y = top; y <= bottom; y++) drawPixel(x, y, true);
+        }
+        const markers = bounds.cuts || [0, Math.round(w.info.durationMs * 44.1)];
+        for (const frame of markers) {
+            const x = toX(frame / (w.info.durationMs * 44.1));
+            if (x >= 0 && x < 128) for (let y = 20; y <= 43; y += 3) drawPixel(x, y, true);
+        }
+        const start = s.view === 'chop' ? bounds.baseStart : bounds.start;
+        const end = s.view === 'chop' ? bounds.baseEnd : bounds.end;
+        const a = toX(start / w.info.durationMs), b = toX(end / w.info.durationMs);
+        for (const x of [a, b]) if (x >= 0 && x < 128) for (let y = 19; y <= 44; y++) drawPixel(x, y, true);
+        for (let x = Math.max(0, a); x <= Math.min(127, b); x++) drawPixel(x, 44, true);
+        print(0, 46, shortText((start / 1000).toFixed(3) + '-' + (end / 1000).toFixed(3) + 's', 21), 1);
+    }
+    print(0, 56, shortText(s.statusTicks > 0 ? s.statusText : 'K3/4 edges Sh+Jog zoom', 21), 1);
+}
+
 function drawFxScreen() {
     clear_screen();
     print(0, 0, shortText('FX Screen  L=Bank R=Global', 21), 1);
     const sec = s.focusedSection;
     const bank = focusedBankIndex(sec);
     print(0, 10, shortText('Bank S' + (sec + 1) + 'B' + (bank + 1) + ' FX :' + (s.selectedBankFxEffect + 1), 21), 1);
-    print(0, 20, shortText('Global FX :' + (s.selectedGlobalFxEffect + 1), 21), 1);
     const scope = s.fxScreenScope === 'global' ? 'GLOBAL' : 'BANK';
     const scopeKey = s.fxScreenScope === 'global' ? 'global' : 'bank';
     const effectIdx = s.fxScreenScope === 'global' ? s.selectedGlobalFxEffect : s.selectedBankFxEffect;
     const eff = s.fxScreenScope === 'global' ? globalFxEffect(effectIdx) : bankFxEffect(sec, bank, effectIdx);
     const name = fxSlotName(scopeKey, effectIdx);
+    print(0, 20, shortText('K1 ' + fxPresetDisplayName(effectIdx, eff.params), 21), 1);
     print(0, 30, shortText(name + ' ' + scope + ' ' + (eff.enabled ? 'ON' : 'OFF'), 21), 1);
     const p = Array.isArray(eff.params) ? eff.params : [];
     const rowA = [0, 1, 2, 3].map((i) => fxParamCompactToken(scopeKey, effectIdx, i, p[i])).join(' ');
@@ -4307,7 +4490,9 @@ function drawBoot() {
 }
 
 function draw() {
-    if (s.view === 'boot') {
+    if (s.view === 'loading') {
+        drawLoading();
+    } else if (s.view === 'boot') {
         drawBoot();
     } else if (s.view === 'menu') {
         drawMenu();
@@ -4323,6 +4508,8 @@ function draw() {
         drawBrowser();
     } else if (s.view === 'fx') {
         drawFxScreen();
+    } else if (editorActive()) {
+        drawSampleEditor();
     } else {
         drawMain();
     }
@@ -4559,6 +4746,7 @@ function applyAllStateToDsp() {
 function queueBootJob(message, fn) {
     s.bootJobs.push({ message: String(message || ''), fn });
     s.bootPhaseWorkTotal++;
+    s.bootWorkTotal++;
 }
 
 function enqueueBootHiddenFxOffJobs() {
@@ -4627,14 +4815,27 @@ function enqueueBootFinalCueRestoreJobs() {
 
 function enqueueBootFinalActivationJobs() {
     enqueueBootFinalCueRestoreJobs();
-    queueBootJob('Final slot replay', () => {
-        replayAllSlotParamsToDsp();
-        scheduleTrimReplayAll();
-    });
+    // Keep the final compatibility replay before READY, but let the display
+    // repaint between small groups instead of freezing for all 256 pads.
+    for (let sec = 0; sec < GRID_COUNT; sec++) {
+        for (let bank = 0; bank < BANK_COUNT; bank++) {
+            for (let start = 0; start < GRID_SIZE; start += 4) {
+                queueBootJob('Final slot replay', () => {
+                    for (let slot = start; slot < Math.min(GRID_SIZE, start + 4); slot++) {
+                        replaySlotParamsToDsp(sec, bank, slot);
+                    }
+                });
+            }
+        }
+    }
     queueBootJob('Final focus sync', () => {
         invalidatePlaybackCompat();
         syncFocusedSlotPlaybackCompat(true);
-        scheduleFocusedSlotRefresh();
+        // The complete replay just finished behind the loading screen. Do not
+        // enqueue another full-session replay or 24 focus replays after READY.
+        s.trimReplayTicks = 0;
+        s.trimReplayPendingAll = false;
+        s.focusedParamRefreshTicks = 0;
         markLedsDirty();
     });
 }
@@ -4779,6 +4980,9 @@ function loadSessionFromPath(path, silent, trackHistory = true) {
 }
 
 function saveSessionToPath(path, label, silent, refreshBrowser) {
+    if (!silent && !s.operationActive && !s.bootActive) {
+        return beginLoading('Saving project', () => saveSessionToPath(path, label, silent, refreshBrowser), s.view === 'browser' ? 'browser' : 'main');
+    }
     const ok = writeTextFile(path, JSON.stringify(serializeSession(), null, 2) + '\n');
     if (ok) {
         s.autosavePending = false;
@@ -5012,6 +5216,12 @@ function cycleAssignMode() {
 }
 
 function handleMainButtonPress() {
+    if (editorActive()) {
+        // Audition uses the normal pad route, envelopes and note-off rules.
+        const t = editorTarget();
+        triggerPadOn(t.sec, t.bank, t.slot, 100, true, false, 'editor');
+        return;
+    }
     if (s.shiftHeld && s.volumeTouchHeld) {
         openSessionBrowser('load', false);
         return;
@@ -5042,6 +5252,9 @@ function handleMainButtonPress() {
 
 function knobTouchActionLabel(note) {
     const idx = clampInt(note, 0, 7, 0);
+    if (editorActive()) {
+        return ['Pad attack', 'Pad decay', 'Start edge', 'End edge', 'Trigger / Gate', 'Pad pitch', 'Pad gain', 'Pad loop'][idx];
+    }
 
     if (s.view === 'browser') {
         if (s.browserMode === 'sessions') {
@@ -6092,7 +6305,7 @@ function adjustSelectedFxParam(knobIdx, delta) {
         } else {
             sendFxParamToDsp('global', 0, 0, effectIdx, paramIdx);
         }
-        if (paramIdx === 0) showStatus('Global ' + fxSlotName('global', effectIdx) + ' Preset ' + (fxPresetIndexFromValue(eff.params[0]) + 1), 70);
+        if (paramIdx === 0) showStatus(fxPresetName(effectIdx, fxPresetIndexFromValue(eff.params[0])), 70);
         else showStatus('Global ' + fxSlotName('global', effectIdx) + ' ' + fxParamName('global', effectIdx, paramIdx) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
     } else {
         const sec = s.focusedSection;
@@ -6113,7 +6326,7 @@ function adjustSelectedFxParam(knobIdx, delta) {
         } else {
             sendFxParamToDsp('bank', sec, bank, effectIdx, paramIdx);
         }
-        if (paramIdx === 0) showStatus('Bank ' + fxSlotName('bank', effectIdx) + ' Preset ' + (fxPresetIndexFromValue(eff.params[0]) + 1), 70);
+        if (paramIdx === 0) showStatus(fxPresetName(effectIdx, fxPresetIndexFromValue(eff.params[0])), 70);
         else showStatus('Bank ' + fxSlotName('bank', effectIdx) + ' ' + fxParamName('bank', effectIdx, paramIdx) + ' ' + Math.round(eff.params[paramIdx] * 100), 70);
     }
     markSessionChanged();
@@ -6289,6 +6502,7 @@ function sendMidiOut(pad, velocity, side, bank, isNoteOn, polyPressure) {
 }
 
 function handleMidiIn(msg) {
+    if (s.bootActive || s.operationActive || s.view === 'boot') return;
     const packet = unpackMidiMessage(msg);
     if (!packet) return;
     const statusRaw = packet[0];
@@ -6325,6 +6539,18 @@ function handleMidiIn(msg) {
 
 function handleMainKnob(delta) {
     if (delta === 0) return;
+    if (editorActive()) {
+        if (s.shiftHeld) {
+            const t = editorTarget(), w = sampleWave.model();
+            const anchor = w.info ? editorBounds(t, w.info).start / w.info.durationMs : 0.5;
+            sampleWave.changeZoom(delta, anchor);
+        } else {
+            const sec = s.focusedSection;
+            setSelectedSlice(sec * GRID_SIZE + clampInt(focusedSlotIndex() + delta, 0, 15, 0));
+        }
+        s.dirty = true;
+        return;
+    }
 
     if (s.view === 'browser' && s.browserMode === 'sessions' && s.sessionBrowserIntent === 'save' && s.sessionNameEditing) {
         adjustSessionNameChar(delta);
@@ -6357,6 +6583,23 @@ function ensureFocusedEditTargetForKnobs() {
 
 function handleParamKnob(cc, delta) {
     if (delta === 0) return;
+    if (editorActive()) {
+        if (cc === MoveKnob3 || cc === MoveKnob4) {
+            beginHistoryTransaction();
+            try { adjustEditorEdge(cc === MoveKnob3 ? 'start' : 'end', delta); }
+            finally { endHistoryTransaction(); }
+            return;
+        }
+        // The other six knobs retain the familiar per-pad controls here.
+        if (cc === MoveKnob1) adjustPadAttack(delta);
+        else if (cc === MoveKnob2) adjustPadDecay(delta);
+        else if (cc === MoveKnob5 && consumeBinaryKnobTurn('editor-mode', delta)) togglePadMode();
+        else if (cc === MoveKnob6) adjustPadPitch(delta);
+        else if (cc === MoveKnob7) adjustPadGain(delta);
+        else if (cc === MoveKnob8) adjustPadLoop(delta);
+        s.dirty = true;
+        return;
+    }
 
     if (s.view === 'browser' && s.browserMode === 'sessions') {
         if (cc === MoveKnob1) adjustSessionNameIndex(delta);
@@ -6511,9 +6754,21 @@ function syncFromDsp() {
         s.trimReplayTicks--;
         if (s.trimReplayTicks === 0 && s.trimReplayPendingAll) {
             s.trimReplayPendingAll = false;
-            replayAllSlotParamsToDsp();
+            s.trimReplayCursor = 0;
+        }
+    }
+    if (s.trimReplayCursor >= 0) {
+        const started = Date.now();
+        paramTransport.batch(() => {
+            for (let count = 0; count < 4 && s.trimReplayCursor < GRID_COUNT * BANK_COUNT * GRID_SIZE; count++) {
+                const addr = s.trimReplayCursor++;
+                replaySlotParamsToDsp(Math.floor(addr / (BANK_COUNT * GRID_SIZE)), Math.floor(addr / GRID_SIZE) % BANK_COUNT, addr % GRID_SIZE);
+                if (Date.now() - started >= 4) break;
+            }
+        });
+        if (s.trimReplayCursor >= GRID_COUNT * BANK_COUNT * GRID_SIZE) {
+            s.trimReplayCursor = -1;
             invalidatePlaybackCompat();
-            syncFocusedSlotPlaybackCompat(true);
         }
     }
 }
@@ -6567,7 +6822,7 @@ function initFromDspDefaults() {
 
 function onMidiMessageInternal(data) {
     if (!data || typeof data.length !== 'number' || data.length < 3) return;
-    if (s.view === 'boot' || s.bootActive) return;
+    if (s.view === 'boot' || s.bootActive || s.operationActive) return;
 
     const status = (clampInt(data[0], 0, 255, 0) & 0xF0);
     const b1 = clampInt(data[1], 0, 127, 0);
@@ -6740,9 +6995,9 @@ function onMidiMessageInternal(data) {
 
         if (cc === MoveUndo && val > 0) {
             if (s.shiftHeld) {
-                redoSessionState();
+                beginLoading('Redo project', () => redoSessionState());
             } else if (!looperUndoLastLayer()) {
-                undoSessionState();
+                beginLoading('Undo project', () => undoSessionState());
             }
             return;
         }
@@ -6849,6 +7104,11 @@ function onMidiMessageInternal(data) {
         }
 
         if ((cc === MoveArrowRight || cc === MoveArrowLeft) && val > 0) {
+            if (editorActive()) {
+                sampleWave.scroll(cc === MoveArrowRight ? 1 : -1);
+                s.dirty = true;
+                return;
+            }
             if (s.view === 'main' && s.loopPadMode) {
                 shiftLooperPadWindow(cc === MoveArrowRight ? 1 : -1);
                 return;
@@ -6856,6 +7116,7 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveArrowUp && val > 0) {
+            if (editorActive()) { handleBackButton(); return; }
             if (s.view === 'main') {
                 s.view = 'fx';
                 s.fxScreenScope = 'bank';
@@ -6868,6 +7129,9 @@ function onMidiMessageInternal(data) {
         }
 
         if (cc === MoveArrowDown && val > 0) {
+            if (s.view === 'main') { openSampleEditor(s.shiftHeld ? 'chop' : 'trim'); return; }
+            if (s.view === 'trim') { openSampleEditor('chop'); return; }
+            if (s.view === 'chop') { openSampleEditor('trim'); return; }
             if (s.view === 'fx') {
                 s.view = 'main';
                 showStatus('Main screen', 70);
@@ -6883,6 +7147,11 @@ function onMidiMessageInternal(data) {
             return;
         }
 
+        if (cc === MoveMainButton && val === 0 && editorActive()) {
+            const t = editorTarget();
+            triggerPadOff(t.sec, t.bank, t.slot, true, false);
+            return;
+        }
         if (cc === MoveMainButton && val > 0) {
             handleMainButtonPress();
             return;
@@ -6899,6 +7168,8 @@ function onMidiMessageExternal(data) {
 }
 
 function beginBoot() {
+    s.operationActive = false;
+    sampleWave.invalidate();
     clearPadAndStepLeds();
     s.ledQueue = [];
     s.ledsDirty = true;
@@ -6920,12 +7191,13 @@ function beginBoot() {
     s.bootActive = true;
     s.bootPhase = 0;
     s.bootTicks = 0;
+    s.bootStartedMs = Date.now();
     s.bootRestoredFromSession = false;
     s.bootMessage = 'Starting';
     s.bootJobs = [];
     s.bootDeferDspApply = false;
     s.bootStepLed = -1;
-    s.bootWorkTotal = 1;
+    s.bootWorkTotal = 0;
     s.bootWorkDone = 0;
     s.bootPhaseWorkTotal = 0;
     s.bootPhaseWorkDone = 0;
@@ -7022,6 +7294,7 @@ function finishBootUiState() {
     s.focusedParamRefreshTicks = 0;
     s.trimReplayTicks = 0;
     s.trimReplayPendingAll = false;
+    s.trimReplayCursor = -1;
     resetHistory();
     previewStop();
     updateRecordButtonLed();
@@ -7085,10 +7358,6 @@ function runBootPhase() {
         s.bootPhaseWorkDone = 0;
         s.bootMessage = 'Sync DSP';
         enqueueBootApplyAllStateJobs();
-        queueBootJob('Velocity reset', () => {
-            s.velocitySens = 0;
-            spb('velocity_sens', '0', 120);
-        });
         break;
     case 5:
         s.bootPhaseWorkTotal = 0;
@@ -7105,6 +7374,9 @@ function runBootPhase() {
         s.bootPhaseWorkDone = s.bootPhaseWorkTotal;
         s.bootPhase = BOOT_PHASE_COUNT;
         s.view = 'main';
+        console.log('TwinSampler startup: ' + (Date.now() - s.bootStartedMs) +
+            ' ms, ' + s.bootWorkDone + ' jobs; parameter transport ' +
+            JSON.stringify(paramTransport.stats));
         clearPadAndStepLeds();
         forceLedRefreshNow();
         showStatus('READY', 80);
@@ -7117,15 +7389,19 @@ function runBootPhase() {
 
 function processBootJobs() {
     if (!s.bootJobs.length) return;
-    const count = Math.min(BOOT_JOBS_PER_TICK, s.bootJobs.length);
-    for (let i = 0; i < count; i++) {
-        const job = s.bootJobs.shift();
-        if (!job || typeof job.fn !== 'function') continue;
-        if (job.message) s.bootMessage = job.message;
-        job.fn();
-        s.bootPhaseWorkDone = Math.min(clampInt(s.bootPhaseWorkDone, 0, 1000000, 0) + 1, Math.max(0, clampInt(s.bootPhaseWorkTotal, 0, 1000000, 0)));
-        s.bootWorkDone++;
-    }
+    const started = Date.now();
+    const count = Math.min(paramTransport.canBatch() ? BOOT_BULK_JOBS_PER_TICK : BOOT_JOBS_PER_TICK, s.bootJobs.length);
+    paramTransport.batch(() => {
+        for (let i = 0; i < count; i++) {
+            const job = s.bootJobs.shift();
+            if (!job || typeof job.fn !== 'function') continue;
+            if (job.message) s.bootMessage = job.message;
+            job.fn();
+            s.bootPhaseWorkDone = Math.min(clampInt(s.bootPhaseWorkDone, 0, 1000000, 0) + 1, Math.max(0, clampInt(s.bootPhaseWorkTotal, 0, 1000000, 0)));
+            s.bootWorkDone++;
+            if (Date.now() - started >= BOOT_WORK_BUDGET_MS) break;
+        }
+    });
     s.dirty = true;
 }
 
@@ -7134,8 +7410,14 @@ function tickBoot() {
     tickBootLedSweep();
     updateUtilityButtonLeds();
     s.dirty = true;
-    processBootJobs();
-    if (!s.bootJobs.length && (s.bootPhase < 6 || s.bootTicks >= BOOT_MIN_TICKS)) runBootPhase();
+    // Recent hosts load DSP asynchronously. Do not send restore writes while
+    // __ready is "0"; older hosts that don't expose it keep the legacy path.
+    const dspLoading = s.bootPhase === 0 && String(gp('__ready', '')) === '0';
+    if (dspLoading) s.bootMessage = 'Waiting for DSP';
+    else {
+        processBootJobs();
+        if (!s.bootJobs.length && (s.bootPhase < 6 || s.bootTicks >= BOOT_MIN_TICKS)) runBootPhase();
+    }
     if (s.dirty) {
         s.dirty = false;
         draw();
@@ -7147,6 +7429,7 @@ function init() {
 }
 
 function tick() {
+    if (s.operationActive) { tickLoading(); return; }
     if (s.bootActive || s.view === 'boot') {
         tickBoot();
         return;
@@ -7166,6 +7449,7 @@ function tick() {
     flushPendingNoteOffs();
     tickLedResync();
     drainLedQueue();
+    tickSampleEditor();
 
     if (!s.dirty) return;
     s.dirty = false;
@@ -7173,6 +7457,7 @@ function tick() {
 }
 
 function beforeExit() {
+    sampleWave.close();
     const keys = Object.keys(activeVoicesByAddr);
     for (let i = 0; i < keys.length; i++) {
         const v = activeVoicesByAddr[keys[i]];
@@ -7185,7 +7470,9 @@ function beforeExit() {
     s.ledResyncTicks = 0;
     setButtonLED(MoveRec, Black, true);
     setButtonLED(MoveRecord, Black, true);
-    saveAutosaveSession(true);
+    // Back is available during boot. Never replace the user's autosave with
+    // the empty/partially restored UI state when startup is cancelled.
+    if (!s.bootActive && !s.operationActive && s.view !== 'boot') saveAutosaveSession(true);
 }
 
 const twinsamplerChainUi = {
