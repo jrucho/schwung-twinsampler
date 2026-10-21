@@ -306,8 +306,9 @@ const HELP_PAGES = [
     ['TwinSampler Help', 'Menu: app menu', 'Back: exit confirm', 'Jog: move/select', 'Shortcuts still work'],
     ['Samples', 'Jog click: browser', 'Menu in browser:', 'cycle target', 'Jog click: load'],
     ['Sessions', 'Shift+Menu: load', 'Shift+Copy: save', 'INIT is locked', 'Autosaves on exit'],
-    ['Sample / Chop Editor', 'Down: trim waveform', 'Down again: SRC chops', 'K3/K4: start/end', 'Back: main screen'],
-    ['Waveform navigation', 'Shift+Jog: zoom', 'Arrows: scroll window', 'Jog turn: select pad', 'Jog press: audition'],
+    ['Sample / Chop Editor', 'Down: Trim / CHOP', 'K3/K4: edge cuts', 'CHOP starts with no cues', 'P1 lit, cues light'],
+    ['Live Chop (CHOP)', 'Play P1 first', 'Empty pad: new cue', 'Shift+pad: re-mark', 'Erase+pad: empty cue'],
+    ['Waveform navigation', 'Shift+Jog: zoom', 'L/R: loopers or scroll', 'Jog turn: select pad', 'Jog press: samples'],
     ['FX presets', 'Up: FX page', 'K1: named preset', 'K2-K8: edit sound', '* = custom settings'],
     ['Exit', 'Back: exit confirm', 'Menu Exit: confirm', 'YES exits fully', 'Autosave enabled']
 ];
@@ -586,6 +587,8 @@ function makeBank(bankIdx = 0) {
         slicePage: 0,
         transientSensitivity: 50,
         sliceStarts: [],
+        manualSliceStarts: [],
+        manualChopTouched: 0,
         filterType: 0,
         filterValue: 0.5,
         emulationPreset: 0,
@@ -602,6 +605,8 @@ function cloneBank(b) {
         slicePage: clampInt(b.slicePage, 0, 7, 0),
         transientSensitivity: normalizeTransientSensitivity(b.transientSensitivity),
         sliceStarts: Array.isArray(b.sliceStarts) ? b.sliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
+        manualSliceStarts: Array.isArray(b.manualSliceStarts) ? b.manualSliceStarts.map((v) => clampInt(v, 0, 0x7fffffff, 0)) : [],
+        manualChopTouched: clampInt(b.manualChopTouched, 0, 1, 0),
         filterType: clampInt(b.filterType, 0, FILTER_TYPES.length - 1, 0),
         filterValue: clampFloat(b.filterValue, 0.0, 1.0, 0.5),
         emulationPreset: clampInt(b.emulationPreset, 0, EMULATION_PRESETS.length - 1, 0),
@@ -634,6 +639,12 @@ function makeSection(defaultMode) {
     };
 }
 
+function makeBankEditorView() {
+    return Array.from({ length: GRID_COUNT }, () =>
+        Array.from({ length: BANK_COUNT }, () => 'main')
+    );
+}
+
 function defaultPadModeGateForSectionMode(mode) {
     return clampInt(mode, MODE_SINGLE, MODE_PER_SLOT, MODE_PER_SLOT) === MODE_SINGLE ? 1 : 0;
 }
@@ -643,6 +654,7 @@ const s = {
     dirty: true,
 
     shiftHeld: false,
+    editorArrowHeld: {},
     volumeTouchHeld: false,
     knobPage: 'A',
     editScope: 'P', /* P=pad slot, G=focused section+bank */
@@ -673,6 +685,9 @@ const s = {
 
     selectedSlice: 0,
     focusedSection: 0,
+    bankEditorView: makeBankEditorView(),
+    residentChopMaps: Array.from({ length: GRID_COUNT }, () => Array(BANK_COUNT).fill(false)),
+    editorPadAtMs: -Infinity,
 
     sections: [
         makeSection(MODE_SINGLE),
@@ -761,6 +776,16 @@ const s = {
     trimReplayPendingAll: false,
     trimReplayCursor: -1,
     trimPreviewSerial: 0,
+
+    chopMapSec: -1,
+    chopMapBank: -1,
+    lazyChopActive: false,
+    chopPlayback: null,
+    lazyChopPending: false,
+    lazyChopStartedMs: 0,
+    lazyChopDurationMs: 0,
+    lazyChopPath: '',
+    lazyChopMarks: 0,
 
     undoHistory: [],
     redoHistory: [],
@@ -1069,6 +1094,7 @@ function makeInitSessionPayload() {
         sessionName: INIT_SESSION_NAME,
         selectedSlice: 0,
         focusedSection: 0,
+        bankEditorView: makeBankEditorView(),
         knobPage: 'A',
         editScope: 'P',
         browserAssignMode: 'auto',
@@ -1546,8 +1572,66 @@ function syncBankSliceState(sec, bank) {
     }
     if (starts.length === count + 1) {
         b.sliceStarts = starts;
-        sp('section_slice_starts', sec + ':' + bank + ':' + starts.join(','));
+        if (!s.residentChopMaps[sec][bank]) {
+            sp('section_slice_starts', sec + ':' + bank + ':' + starts.join(','));
+        }
     }
+}
+
+function validSliceMap(starts) {
+    return Array.isArray(starts) && starts.length === SOURCE_CHOP_COUNT + 1 &&
+        starts.every((v, i) => Number.isFinite(v) && v >= 0 && (!i || v >= starts[i - 1]));
+}
+
+function emptyManualChopMap(durationMs) {
+    const total = Math.max(1, Math.round(durationMs * 44.1));
+    const out = Array(SOURCE_CHOP_COUNT + 1).fill(total);
+    out[0] = 0;
+    return out;
+}
+
+function ensureManualSliceMap(sec, bank, durationMs = 0) {
+    const b = s.sections[sec].banks[bank];
+    if (validSliceMap(b.manualSliceStarts)) return b.manualSliceStarts;
+    b.manualSliceStarts = durationMs > 0 ? emptyManualChopMap(durationMs) : [];
+    return b.manualSliceStarts;
+}
+
+function sendBankSliceMapToDsp(sec, bank, starts, blocking = true) {
+    const payload = serializeSliceStarts(starts, SOURCE_CHOP_COUNT);
+    if (!payload) return false;
+    const send = blocking ? spb : sp;
+    send('section_slice_starts', sec + ':' + bank + ':' + payload, blocking ? 500 : 0);
+    s.residentChopMaps[sec][bank] = starts === s.sections[sec].banks[bank].manualSliceStarts;
+    return true;
+}
+
+function activateChopEditorMap(sec, bank, durationMs = 0) {
+    const starts = ensureManualSliceMap(sec, bank, durationMs);
+    if (!validSliceMap(starts)) return false;
+    if (!s.residentChopMaps[sec][bank]) sendBankSliceMapToDsp(sec, bank, starts);
+    s.chopMapSec = sec;
+    s.chopMapBank = bank;
+    return true;
+}
+
+function deactivateChopEditorMap(sec = s.focusedSection, bank = focusedBankIndex(sec)) {
+    if (!s.residentChopMaps[sec][bank]) return;
+    const b = s.sections[sec].banks[bank];
+    if (validSliceMap(b.sliceStarts)) sendBankSliceMapToDsp(sec, bank, b.sliceStarts);
+    s.residentChopMaps[sec][bank] = false;
+    if (s.chopMapSec === sec && s.chopMapBank === bank) {
+        s.chopMapSec = -1;
+        s.chopMapBank = -1;
+    }
+}
+
+function activeCueStartsForBank(sec, bank) {
+    const b = s.sections[sec].banks[bank];
+    if (s.residentChopMaps[sec][bank]) {
+        return ensureManualSliceMap(sec, bank);
+    }
+    return b.sliceStarts;
 }
 
 function showStatus(msg, ticks = STATUS_TICKS) {
@@ -1758,6 +1842,10 @@ function handleBackButton() {
         return true;
     }
     if (s.view === 'trim' || s.view === 'chop') {
+        if (s.view === 'chop') {
+            stopLazyChopAudition();
+            deactivateChopEditorMap();
+        }
         sampleWave.close();
         s.view = 'main';
         forceLedRefreshNow();
@@ -2270,6 +2358,11 @@ function setSourcePath(sec, bank, path, sendToDsp) {
     sb.sourcePath = nextPath;
     sb.chopCount = SOURCE_CHOP_COUNT;
     sb.slicePage = 0;
+    if (loadingNewSource) {
+        sb.manualSliceStarts = [];
+        sb.manualChopTouched = 0;
+        s.residentChopMaps[sec][bank] = false;
+    }
     if (sendToDsp) {
         spb('section_source_play_mode', sec + ':' + bank + ':' + sourcePlayModeForSection(sec), 300);
         spb('section_chop_count', sec + ':' + bank + ':' + SOURCE_CHOP_COUNT, 300);
@@ -2406,6 +2499,13 @@ function setSectionBank(sec, bank) {
 
     if (sec === s.focusedSection) {
         refreshRealtimeUiState();
+        if (editorActive()) {
+            const remembered = s.bankEditorView[sec][b];
+            const view = s.sections[sec].mode === MODE_SINGLE && remembered === 'chop'
+                ? 'chop'
+                : 'trim';
+            openSampleEditor(view);
+        }
     }
 
     showStatus('S' + (sec + 1) + ' bank ' + (b + 1), 70);
@@ -2420,6 +2520,14 @@ function focusSectionForEditing(sec, blocking = false) {
     const slot = focusedSlotIndex();
     const nextSlice = dspSliceFromSecSlot(targetSec, slot);
     setSelectedSlice(nextSlice, !!blocking);
+    if (editorActive()) {
+        const targetBank = clampInt(s.sections[targetSec].currentBank, 0, BANK_COUNT - 1, 0);
+        const remembered = s.bankEditorView[targetSec][targetBank];
+        const view = s.sections[targetSec].mode === MODE_SINGLE && remembered === 'chop'
+            ? 'chop'
+            : 'trim';
+        openSampleEditor(view);
+    }
     return true;
 }
 
@@ -2497,6 +2605,15 @@ function randomizeFocusedTransientSlices() {
     spb('section_slice_page', sec + ':' + bank + ':0', 300);
     spb('section_randomize_transients', sec + ':' + bank + ':1', 300);
     syncBankSliceState(sec, bank);
+    if (s.view === 'chop' && s.focusedSection === sec && focusedBankIndex(sec) === bank && validSliceMap(sb.sliceStarts)) {
+        sb.manualSliceStarts = sb.sliceStarts.slice();
+        sb.manualChopTouched = 1;
+        sendBankSliceMapToDsp(sec, bank, sb.manualSliceStarts);
+        s.chopMapSec = sec;
+        s.chopMapBank = bank;
+        s.lazyChopMarks = 0;
+        markLedsDirty();
+    }
     showStatus('S' + (sec + 1) + 'B' + (bank + 1) + ' transients randomized', 110);
     markSessionChanged();
     s.dirty = true;
@@ -2776,6 +2893,8 @@ function eraseBankAt(sec, bank) {
     const keepColor = s.sections[dstSec].banks[dstBank].bankColor;
     s.sections[dstSec].banks[dstBank] = makeBank(dstBank);
     s.sections[dstSec].banks[dstBank].bankColor = keepColor;
+    s.bankEditorView[dstSec][dstBank] = 'main';
+    s.residentChopMaps[dstSec][dstBank] = false;
     applyBankStateToDsp(dstSec, dstBank, true);
     if (s.focusedSection === dstSec && focusedBankIndex(dstSec) === dstBank) {
         editCursorCache.bank = -1;
@@ -2999,7 +3118,7 @@ function applyBankStateToDsp(sec, bank, blockingSlots, forceDirect) {
     spb('section_transient_sensitivity', sec + ':' + bank + ':' + normalizeTransientSensitivity(b.transientSensitivity), 300);
     spb('section_source_path', sec + ':' + bank + ':' + (b.sourcePath || ''), 500);
 
-    const slicePayload = serializeSliceStarts(b.sliceStarts, b.chopCount);
+    const slicePayload = serializeSliceStarts(activeCueStartsForBank(sec, bank), b.chopCount);
     if (slicePayload && b.sourcePath) {
         spb('section_slice_starts', sec + ':' + bank + ':' + slicePayload, 500);
     }
@@ -3063,6 +3182,38 @@ function stepTargetFromNote(note) {
 function stepNoteFor(sec, bank) {
     if (sec === 0) return STEP_NOTE_MIN + clampInt(bank, 0, BANK_COUNT - 1, 0);
     return 24 + clampInt(bank, 0, BANK_COUNT - 1, 0);
+}
+
+function chopCuePadLit(bank, slotIdx) {
+    if (slotIdx === 0) return true;
+    const map = bank.manualSliceStarts;
+    if (!validSliceMap(map)) return false;
+    return map[slotIdx + 1] > map[slotIdx];
+}
+
+function manualCuesFromMap(map, total) {
+    const cues = Array(SOURCE_CHOP_COUNT).fill(-1);
+    cues[0] = clampInt(map[0], 0, total - 1, 0);
+    for (let i = 1; i < SOURCE_CHOP_COUNT; i++) {
+        if (map[i] < map[i + 1]) cues[i] = map[i];
+    }
+    return cues;
+}
+
+function manualCueCount(cues) {
+    return cues.reduce((n, cue, i) => n + (i > 0 && cue >= 0 ? 1 : 0), 0);
+}
+
+function manualMapFromCues(cues, total) {
+    const out = Array(SOURCE_CHOP_COUNT + 1).fill(total);
+    for (let i = SOURCE_CHOP_COUNT - 1; i >= 1; i--) {
+        out[i] = cues[i] >= 0 ? cues[i] : out[i + 1];
+    }
+    out[0] = clampInt(cues[0], 0, total - 1, 0);
+    for (let i = 1; i <= SOURCE_CHOP_COUNT; i++) {
+        if (out[i] < out[i - 1]) return null;
+    }
+    return out[1] > out[0] ? out : null;
 }
 
 function effectivePadColor(sec, bankIdx, slotIdx) {
@@ -3171,8 +3322,16 @@ function rebuildLedQueue() {
                     loopPad = true;
                 }
             }
-            if (!loopPad && s.copySource && s.copySource.sec === sec && s.copySource.bank === bankIdx && s.copySource.slot === slot) {
-                color = 120;
+            const copySource = !loopPad && s.copySource &&
+                s.copySource.sec === sec && s.copySource.bank === bankIdx && s.copySource.slot === slot;
+            if (copySource) color = 120;
+            const flashing = clampInt(s.padPressFlash[sec + ':' + bankIdx + ':' + slot], 0, 0x7fffffff, 0) > s.transportTicks;
+            if (!loopPad && !copySource && !flashing && editorActive() &&
+                s.residentChopMaps[sec][bankIdx] && s.bankEditorView[sec][bankIdx] === 'chop') {
+                const bank = s.sections[sec].banks[bankIdx];
+                color = chopCuePadLit(bank, slot)
+                    ? normalizeColor(bank.bankColor, defaultBankColor(bankIdx))
+                    : 0;
             }
             s.ledQueue.push([note, color]);
         }
@@ -4192,23 +4351,52 @@ function editorTarget() {
 
 function editorActive() { return s.view === 'trim' || s.view === 'chop'; }
 
+function playedPadEditorMode(sec, bank) {
+    const remembered = s.bankEditorView[sec][bank];
+    if (!editorActive() && !(s.view === 'main' && (remembered === 'trim' || remembered === 'chop'))) return null;
+    return s.sections[sec].mode === MODE_SINGLE && remembered === 'chop' ? 'chop' : 'trim';
+}
+
+// s.view/selectedSlice are the displayed control target; bankEditorView and
+// residentChopMaps own playback modes independently. Follow a hit only AFTER
+// triggering it, without entering an editor, changing bank modes, or doing I/O.
+function focusPlayedPadEditor(slice, sec, bank) {
+    const nextView = playedPadEditorMode(sec, bank);
+    const changed = s.focusedSection !== sec || s.view !== nextView;
+    setSelectedSliceRealtime(slice);
+    if (!nextView) return;
+    s.view = nextView;
+    s.editorPadAtMs = Date.now();
+    if (changed) {
+        s.statusTicks = 0;
+        markLedsDirty();
+    }
+}
+
 function openSampleEditor(view = 'trim') {
+    stopLazyChopAudition();
     if (view === 'chop' && s.sections[s.focusedSection].mode !== MODE_SINGLE) {
         showStatus('Chops need SRC mode', 110);
         view = 'trim';
     }
+    if (view !== 'chop') deactivateChopEditorMap();
     previewStop();
     s.view = view;
+    s.bankEditorView[s.focusedSection][focusedBankIndex(s.focusedSection)] = view;
     const t = editorTarget();
     sampleWave.target(t.path || '', !t.source && !!t.sl.reverse);
-    showStatus(view === 'chop' ? 'K3 start K4 end cuts' : 'K3 start K4 end trim', 100);
+    if (view === 'chop') activateChopEditorMap(t.sec, t.bank);
+    showStatus(view === 'chop' ? 'P1 play; empty=cue' : 'K3 start K4 end trim', 120);
     forceLedRefreshNow();
     s.dirty = true;
 }
 
 function editorBounds(t, info) {
     const duration = info.durationMs;
-    const cuts = t.source ? sourceSliceFrames(t.b.sliceStarts, duration) : null;
+    const sourceMap = s.view === 'chop'
+        ? ensureManualSliceMap(t.sec, t.bank, duration)
+        : t.b.sliceStarts;
+    const cuts = t.source ? sourceSliceFrames(sourceMap, duration) : null;
     const baseStart = cuts ? cuts[t.slot] / 44.1 : 0;
     const baseEnd = cuts ? cuts[t.slot + 1] / 44.1 : duration;
     const start = clampFloat(baseStart + clampFloat(t.sl.startTrim, -5000, 5000, 0), 0, Math.max(0, duration - 1 / 44.1), baseStart);
@@ -4216,12 +4404,199 @@ function editorBounds(t, info) {
     return { cuts, baseStart, baseEnd, start, end };
 }
 
+function lazyChopPlayheadMs() {
+    if (!s.lazyChopActive) return 0;
+    const elapsed = Math.max(0, Date.now() - s.lazyChopStartedMs);
+    const p = s.chopPlayback;
+    if (p) {
+        const length = Math.max(1 / 44.1, p.end - p.start);
+        let travel = elapsed * p.rate;
+        if (p.loop === 2) {
+            travel %= length * 2;
+            if (travel > length) travel = length * 2 - travel;
+        } else if (p.loop) travel %= length;
+        else travel = Math.min(travel, length);
+        return p.reverse ? p.end - travel : p.start + travel;
+    }
+    return clampFloat(elapsed, 0, Math.max(0, s.lazyChopDurationMs), 0);
+}
+
+function trackChopPlayback(sec, bank, slot) {
+    if (!s.residentChopMaps[sec][bank] || s.bankEditorView[sec][bank] !== 'chop') return false;
+    const b = s.sections[sec].banks[bank];
+    const t = { sec, bank, source: s.sections[sec].mode === MODE_SINGLE, path: b.sourcePath };
+    if (!t.source || !t.path) { showStatus('Load a source sample', 90); return false; }
+    const info = sampleWave.infoFor(t.path);
+    if (!info) {
+        showStatus('Reading waveform: play pad again', 80);
+        return false;
+    }
+    const sl = slotAt(t.sec, t.bank, slot);
+    const cuts = ensureManualSliceMap(t.sec, t.bank, info.durationMs);
+    const start = clampFloat(cuts[slot] / 44.1 + sl.startTrim, 0, info.durationMs, 0);
+    const end = clampFloat(cuts[slot + 1] / 44.1 + sl.endTrim, start, info.durationMs, info.durationMs);
+    s.chopPlayback = { sec: t.sec, bank: t.bank, slot, start, end, reverse: !!sl.reverse, loop: sl.loop,
+        rate: Math.pow(2, (s.globalPitch + sl.pitch) / 12) };
+    s.lazyChopPending = false;
+    s.lazyChopActive = true;
+    s.lazyChopStartedMs = Date.now();
+    s.lazyChopDurationMs = info.durationMs;
+    s.lazyChopPath = t.path;
+    s.lazyChopMarks = 0;
+    showStatus('Playing chop: Shift+pad marks', 120);
+    s.dirty = true;
+    return true;
+}
+
+function stopLazyChopAudition() {
+    if (!s.lazyChopActive && !s.lazyChopPending) return;
+    s.lazyChopActive = false;
+    s.lazyChopPending = false;
+    s.lazyChopStartedMs = 0;
+    s.lazyChopDurationMs = 0;
+    s.lazyChopPath = '';
+    s.chopPlayback = null;
+    s.dirty = true;
+}
+
+function tickLazyChop() {
+    if (!s.lazyChopActive) return;
+    const p = s.chopPlayback;
+    if (p && s.sections[p.sec].banks[p.bank].sourcePath !== s.lazyChopPath) {
+        stopLazyChopAudition(); return;
+    }
+    if (p && !p.loop && (Date.now() - s.lazyChopStartedMs) * p.rate >= p.end - p.start) {
+        stopLazyChopAudition();
+        if (s.view === 'chop' && s.focusedSection === p.sec && focusedBankIndex(p.sec) === p.bank) {
+            showStatus('Play a pad, then mark a cue', 120);
+        }
+        return;
+    }
+    s.dirty = true;
+}
+
+function markLazyChopAtPlayhead(padSlot) {
+    tickLazyChop();
+    if (!s.lazyChopActive || s.lazyChopDurationMs <= 0) {
+        showStatus('Play P1 first, then Shift+pad', 90);
+        return;
+    }
+    const t = editorTarget();
+    if (!t.source || !t.path || t.path !== s.lazyChopPath) return;
+    if (s.chopPlayback && (s.chopPlayback.sec !== t.sec || s.chopPlayback.bank !== t.bank)) {
+        showStatus('Play this bank first, then mark', 90);
+        return;
+    }
+    const total = Math.max(1, Math.round(s.lazyChopDurationMs * 44.1));
+    if (!validSliceMap(t.b.manualSliceStarts)) {
+        t.b.manualSliceStarts = emptyManualChopMap(s.lazyChopDurationMs);
+    }
+    const pad = clampInt(padSlot, 0, SOURCE_CHOP_COUNT - 1, 0);
+    const cues = manualCuesFromMap(t.b.manualSliceStarts, total);
+    if (pad === 0) {
+        const next = cues.find((cue, i) => i > 0 && cue >= 0);
+        const frame = clampInt(Math.round(lazyChopPlayheadMs() * 44.1), 0,
+            next === undefined ? total - 1 : next - 1, 0);
+        if (next !== undefined && frame >= next) {
+            showStatus('P1 must be before P' + (cues.indexOf(next) + 1), 110);
+            return;
+        }
+        cues[0] = frame;
+    } else {
+        const first = clampInt(cues[0], 0, total - 1, 0);
+        if (first >= total - 1) {
+            showStatus('Move P1 before marking', 90);
+            return;
+        }
+        const frame = clampInt(Math.round(lazyChopPlayheadMs() * 44.1), first + 1, total - 1, first + 1);
+        for (let i = 1; i < SOURCE_CHOP_COUNT; i++) {
+            const cue = cues[i];
+            if (i === pad || cue < 0) continue;
+            const valid = i < pad ? cue < frame : cue > frame;
+            if (!valid) {
+                showStatus('P' + (pad + 1) + ' must be ' +
+                    (i < pad ? 'after P' + (i + 1) : 'before P' + (i + 1)), 110);
+                return;
+            }
+        }
+        cues[pad] = frame;
+    }
+    const cuts = manualMapFromCues(cues, total);
+    if (!cuts) {
+        showStatus('Cue order is full', 100);
+        return;
+    }
+    t.b.manualSliceStarts = cuts;
+    t.b.manualChopTouched = 1;
+    s.lazyChopMarks = manualCueCount(cues);
+    sendBankSliceMapToDsp(t.sec, t.bank, cuts);
+    s.chopMapSec = t.sec;
+    s.chopMapBank = t.bank;
+    const frame = pad === 0 ? cues[0] : cues[pad];
+    showStatus('P' + (pad + 1) + ' cue @ ' + (frame / 44.1 / 1000).toFixed(3) + 's', 100);
+    flashPadPress(t.sec, t.bank, pad, true);
+    markLedsDirty();
+    markSessionChanged();
+    s.dirty = true;
+}
+
+function emptyChopCueAtPad(sec, bank, slot) {
+    const b = s.sections[sec].banks[bank];
+    const model = sampleWave.model();
+    const map = ensureManualSliceMap(sec, bank, model.info ? model.info.durationMs : 0);
+    if (!validSliceMap(map)) {
+        showStatus('No chop cues', 90);
+        return false;
+    }
+    const pad = clampInt(slot, 0, SOURCE_CHOP_COUNT - 1, 0);
+    if (pad === 0) {
+        showStatus('P1 is the start anchor: use K3', 100);
+        return false;
+    }
+    const total = Math.max(1, map[SOURCE_CHOP_COUNT]);
+    const cues = manualCuesFromMap(map, total);
+    if (cues[pad] < 0) {
+        showStatus('P' + (pad + 1) + ' already empty', 90);
+        return false;
+    }
+    cues[pad] = -1;
+    const cuts = manualMapFromCues(cues, total);
+    if (!cuts) {
+        showStatus('Could not empty cue', 90);
+        return false;
+    }
+    b.manualSliceStarts = cuts;
+    b.manualChopTouched = 1;
+    s.lazyChopMarks = manualCueCount(cues);
+    sendBankSliceMapToDsp(sec, bank, cuts);
+    s.chopMapSec = sec;
+    s.chopMapBank = bank;
+    showStatus('P' + (pad + 1) + ' cue emptied', 90);
+    markLedsDirty();
+    markSessionChanged();
+    s.dirty = true;
+    return true;
+}
+
 function tickSampleEditor() {
     if (!editorActive()) { sampleWave.close(); return; }
+    // Let queued hits drain before doing file I/O/overview scans. The screen
+    // title/focus updates immediately; waveform detail catches up in the gap.
+    if (Date.now() - s.editorPadAtMs < 40) { tickLazyChop(); return; }
     const t = editorTarget();
-    if (s.view === 'chop' && !t.source) s.view = 'trim';
+    if (s.view === 'chop' && !t.source) {
+        stopLazyChopAudition();
+        deactivateChopEditorMap();
+        s.view = 'trim';
+        s.bankEditorView[s.focusedSection][focusedBankIndex(s.focusedSection)] = 'trim';
+    }
     sampleWave.target(t.path || '', !t.source && !!t.sl.reverse);
     if (sampleWave.tick()) s.dirty = true;
+    if (s.view === 'chop' && t.source && !s.residentChopMaps[t.sec][t.bank] && sampleWave.model().info) {
+        activateChopEditorMap(t.sec, t.bank, sampleWave.model().info.durationMs);
+        markLedsDirty();
+    }
+    tickLazyChop();
 }
 
 function adjustEditorEdge(edge, delta) {
@@ -4230,12 +4605,17 @@ function adjustEditorEdge(edge, delta) {
     const bounds = editorBounds(t, model.info);
     const step = delta * (s.shiftHeld ? 10 : 1);
     if (s.view === 'chop' && t.source) {
-        const cuts = moveSliceBoundary(bounds.cuts, t.slot, edge, step * 44.1);
+        const totalFrames = Math.max(1, Math.round(model.info.durationMs * 44.1));
+        const cuts = moveSliceBoundary(bounds.cuts, t.slot, edge, step * 44.1, true, totalFrames);
         if (cuts.every((value, i) => value === bounds.cuts[i])) {
             showStatus('Edge limit: use Trim', 80); return;
         }
-        t.b.sliceStarts = cuts;
-        spb('section_slice_starts', t.sec + ':' + t.bank + ':' + cuts.join(','), 500);
+        t.b.manualSliceStarts = cuts;
+        t.b.manualChopTouched = 1;
+        sendBankSliceMapToDsp(t.sec, t.bank, cuts);
+        s.chopMapSec = t.sec;
+        s.chopMapBank = t.bank;
+        markLedsDirty();
         markSessionChanged();
     } else {
         // Source loop overlay and core trims share a +/-5000 ms limit. Keep
@@ -4276,9 +4656,19 @@ function drawSampleEditor() {
         const a = toX(start / w.info.durationMs), b = toX(end / w.info.durationMs);
         for (const x of [a, b]) if (x >= 0 && x < 128) for (let y = 19; y <= 44; y++) drawPixel(x, y, true);
         for (let x = Math.max(0, a); x <= Math.min(127, b); x++) drawPixel(x, 44, true);
+        if (s.view === 'chop' && s.lazyChopActive && s.chopPlayback &&
+            s.chopPlayback.sec === t.sec && s.chopPlayback.bank === t.bank) {
+            const px = toX(lazyChopPlayheadMs() / w.info.durationMs);
+            if (px >= 0 && px < 128) for (let y = 18; y <= 43; y += 2) drawPixel(px, y, true);
+        }
         print(0, 46, shortText((start / 1000).toFixed(3) + '-' + (end / 1000).toFixed(3) + 's', 21), 1);
     }
-    print(0, 56, shortText(s.statusTicks > 0 ? s.statusText : 'K3/4 edges Sh+Jog zoom', 21), 1);
+    const footer = s.statusTicks > 0
+        ? s.statusText
+        : (s.view === 'chop'
+            ? (s.lazyChopActive ? 'PLAY ' + (lazyChopPlayheadMs() / 1000).toFixed(3) + 's' : 'P1 play; empty=cue')
+            : 'K3/4 edges Sh+Jog zoom');
+    print(0, 56, shortText(footer, 21), 1);
 }
 
 function drawFxScreen() {
@@ -4521,6 +4911,9 @@ function serializeSession() {
         sessionName: s.sessionName,
         selectedSlice: s.selectedSlice,
         focusedSection: s.focusedSection,
+        bankEditorView: s.bankEditorView.map((row) => row.map((view) =>
+            view === 'chop' || view === 'trim' ? view : 'main'
+        )),
         knobPage: s.knobPage,
         editScope: s.editScope,
         browserAssignMode: s.browserAssignMode,
@@ -4603,6 +4996,15 @@ function sanitizeBank(raw, bankIdx) {
 
     const chopCount = normalizeChopCount(raw.chopCount);
     const maxPages = Math.max(1, Math.floor(chopCount / GRID_SIZE));
+    const sliceStarts = parseSliceStartsString(Array.isArray(raw.sliceStarts) ? raw.sliceStarts.join(',') : raw.sliceStarts, chopCount);
+    const parsedManual = parseSliceStartsString(Array.isArray(raw.manualSliceStarts) ? raw.manualSliceStarts.join(',') : raw.manualSliceStarts, chopCount);
+    const hasTouched = Object.prototype.hasOwnProperty.call(raw, 'manualChopTouched');
+    let manualTouched = clampInt(raw.manualChopTouched, 0, 1, 0);
+    if (!hasTouched) {
+        manualTouched = validSliceMap(parsedManual) &&
+            (!validSliceMap(sliceStarts) || parsedManual.some((v, i) => v !== sliceStarts[i])) ? 1 : 0;
+    }
+    const manualSliceStarts = manualTouched ? parsedManual : [];
 
     const out = {
         sourcePath: typeof raw.sourcePath === 'string' ? raw.sourcePath : '',
@@ -4610,7 +5012,9 @@ function sanitizeBank(raw, bankIdx) {
         chopCount,
         slicePage: clampInt(raw.slicePage, 0, maxPages - 1, 0),
         transientSensitivity: normalizeTransientSensitivity(raw.transientSensitivity),
-        sliceStarts: parseSliceStartsString(Array.isArray(raw.sliceStarts) ? raw.sliceStarts.join(',') : raw.sliceStarts, chopCount),
+        sliceStarts,
+        manualSliceStarts,
+        manualChopTouched: manualTouched,
         filterType: clampInt(raw.filterType, 0, FILTER_TYPES.length - 1, base.filterType),
         filterValue: clampFloat(raw.filterValue, 0.0, 1.0, base.filterValue),
         emulationPreset: clampInt(raw.emulationPreset, 0, EMULATION_PRESETS.length - 1, base.emulationPreset),
@@ -4643,6 +5047,13 @@ function sanitizeSection(raw, defaultMode) {
         currentBank: clampInt(raw.currentBank, 0, BANK_COUNT - 1, base.currentBank),
         banks: Array.from({ length: BANK_COUNT }, (_, i) => sanitizeBank(Array.isArray(raw.banks) ? raw.banks[i] : null, i))
     };
+}
+
+function sanitizeBankEditorView(raw) {
+    return makeBankEditorView().map((row, sec) => row.map((_unused, bank) => {
+        const src = Array.isArray(raw) && Array.isArray(raw[sec]) ? raw[sec][bank] : null;
+        return src === 'chop' || src === 'trim' || src === 'main' ? src : 'main';
+    }));
 }
 
 function sanitizeLooperState(raw) {
@@ -4798,10 +5209,13 @@ function enqueueBootBankSyncJobs(sec, bank, forceDirect) {
 
 function restoreSavedBankCuesToDsp(sec, bank, blocking = false) {
     const b = s.sections[sec].banks[bank];
-    const slicePayload = serializeSliceStarts(b.sliceStarts, b.chopCount);
+    const manual = s.sections[sec].mode === MODE_SINGLE && s.bankEditorView[sec][bank] === 'chop' && validSliceMap(b.manualSliceStarts);
+    const starts = manual ? b.manualSliceStarts : activeCueStartsForBank(sec, bank);
+    const slicePayload = serializeSliceStarts(starts, b.chopCount);
     if (!slicePayload || !b.sourcePath) return false;
     const send = blocking ? spb : sp;
     send('section_slice_starts', sec + ':' + bank + ':' + slicePayload, blocking ? 500 : 0);
+    s.residentChopMaps[sec][bank] = starts === b.manualSliceStarts;
     return true;
 }
 
@@ -4898,6 +5312,8 @@ function applyParsedSession(parsed, silent, label) {
     s.selectedSlice = clampInt(parsed.selectedSlice, 0, TOTAL_PADS - 1, 0);
     if (LEFT_GRID_ONLY) s.selectedSlice = slotFromSlice(s.selectedSlice);
     s.focusedSection = LEFT_GRID_ONLY ? 0 : sectionFromSlice(s.selectedSlice);
+    s.bankEditorView = sanitizeBankEditorView(parsed.bankEditorView);
+    s.residentChopMaps = Array.from({ length: GRID_COUNT }, () => Array(BANK_COUNT).fill(false));
     s.knobPage = parsed.knobPage === 'B' ? 'B' : 'A';
     s.editScope = parsed.editScope === 'G' ? 'G' : 'P';
     s.fxScreenScope = parsed.fxScreenScope === 'global' ? 'global' : 'bank';
@@ -5216,12 +5632,6 @@ function cycleAssignMode() {
 }
 
 function handleMainButtonPress() {
-    if (editorActive()) {
-        // Audition uses the normal pad route, envelopes and note-off rules.
-        const t = editorTarget();
-        triggerPadOn(t.sec, t.bank, t.slot, 100, true, false, 'editor');
-        return;
-    }
     if (s.shiftHeld && s.volumeTouchHeld) {
         openSessionBrowser('load', false);
         return;
@@ -6011,6 +6421,7 @@ function triggerPadOn(sec, bank, slot, velocity, routeBank, recordToLooper = tru
         lastOnMs: nowMs
     };
     setPadPlaybackState(sec, bank, slot, 'playing');
+    trackChopPlayback(sec, bank, slot);
     /* no-op: avoid implicit loop retriggers from non-loop pads */
     if (sl.loop > 0) markLedsDirty();
     else s.dirty = true;
@@ -6161,6 +6572,8 @@ function releaseActiveVoice(sec, bank, slot, routeBank, recordToLooper, nowMs = 
 
     clearPendingOff(sec, bank, slot);
     emitPadNoteOffNow(sec, bank, slot, effectiveRouteBank, recordToLooper);
+    const p = s.chopPlayback;
+    if (p && p.loop && p.sec === sec && p.bank === bank && p.slot === slot) stopLazyChopAudition();
     delete activeVoicesByAddr[key];
     setPadPlaybackState(sec, bank, slot, 'idle');
     if (slotAt(sec, bank, slot).loop > 0) markLedsDirty();
@@ -6340,6 +6753,14 @@ function handlePadNote(note, velocity) {
     if (s.view === 'fx') return toggleFxPadByNote(note);
 
     const directSlice = sliceFromPadNote(note);
+    if (editorActive() && s.shiftHeld && directSlice >= 0 &&
+        playedPadEditorMode(sectionFromSlice(directSlice), focusedBankIndex(sectionFromSlice(directSlice))) === 'chop') {
+        if (directSlice < 0) return false;
+        const markSec = sectionFromSlice(directSlice);
+        focusPlayedPadEditor(directSlice, markSec, focusedBankIndex(markSec));
+        markLazyChopAtPlayhead(slotFromSlice(directSlice));
+        return true;
+    }
     if (s.shiftHeld && s.volumeTouchHeld) {
         if (directSlice < 0) return false;
         const sec = sectionFromSlice(directSlice);
@@ -6351,6 +6772,17 @@ function handlePadNote(note, velocity) {
         setSlotReverse(sec, bank, slot, cur ? 0 : 1, true);
         showStatus('P' + (slot + 1) + ' Reverse ' + (slotAt(sec, bank, slot).reverse ? 'ON' : 'OFF'), 90);
         s.dirty = true;
+        return true;
+    }
+
+    if (s.deleteHeld && !s.shiftHeld && editorActive() && directSlice >= 0 &&
+        playedPadEditorMode(sectionFromSlice(directSlice), focusedBankIndex(sectionFromSlice(directSlice))) === 'chop') {
+        if (directSlice < 0) return false;
+        const sec = sectionFromSlice(directSlice);
+        const slot = slotFromSlice(directSlice);
+        delete s.activePadPress[String(note)];
+        focusPlayedPadEditor(directSlice, sec, focusedBankIndex(sec));
+        emptyChopCueAtPad(sec, focusedBankIndex(sec), slot);
         return true;
     }
 
@@ -6405,6 +6837,19 @@ function handlePadNote(note, velocity) {
     }
 
     if (!s.shiftHeld) {
+        const nextView = playedPadEditorMode(sec, bank);
+        // A restored/opened bank normally has its map ready. A cold bank needs
+        // one ordered, nonblocking map write; subsequent hits send notes only.
+        if (nextView === 'chop' && !s.residentChopMaps[sec][bank] &&
+            validSliceMap(s.sections[sec].banks[bank].manualSliceStarts)) {
+            sendBankSliceMapToDsp(sec, bank, s.sections[sec].banks[bank].manualSliceStarts, false);
+        }
+        if (nextView === 'chop' && validSliceMap(s.sections[sec].banks[bank].manualSliceStarts) &&
+            !chopCuePadLit(s.sections[sec].banks[bank], slot)) {
+            focusPlayedPadEditor(slice, sec, bank);
+            markLazyChopAtPlayhead(slot);
+            return true;
+        }
         const sl = slotAt(sec, bank, slot);
         if (sl.loop > 0) {
             const existing = currentVoiceAt(sec, bank, slot);
@@ -6412,7 +6857,7 @@ function handlePadNote(note, velocity) {
                 releaseActiveVoice(sec, bank, slot, false, true, Date.now(), true);
                 delete s.activePadPress[String(note)];
                 s.editScope = 'P';
-                setSelectedSliceRealtime(slice);
+                focusPlayedPadEditor(slice, sec, bank);
                 return true;
             }
             /* Route loop/ping pads through bank routing to avoid mono choke interactions. */
@@ -6428,16 +6873,17 @@ function handlePadNote(note, velocity) {
                 pressedAtMs: Date.now()
             };
             s.editScope = 'P';
-            setSelectedSliceRealtime(slice);
+            focusPlayedPadEditor(slice, sec, bank);
             return true;
         }
         if (!triggerPadOn(sec, bank, slot, velocity, false, true, 'pad:' + String(note))) return true;
         s.activePadPress[String(note)] = { sec, bank, slot, triggerNote, velocity: clampInt(velocity, 1, 127, 100) };
         s.editScope = 'P';
-        setSelectedSliceRealtime(slice);
+        focusPlayedPadEditor(slice, sec, bank);
     } else {
         delete s.activePadPress[String(note)];
-        setSelectedSlice(slice, true);
+        if (editorActive()) focusPlayedPadEditor(slice, sec, bank);
+        else setSelectedSlice(slice, true);
         if (s.recording || isRecordTransitionPending()) {
             showStatus('REC focus ' + recordTargetLabel({ sec, bank, slot }), 60);
             return true;
@@ -6865,6 +7311,13 @@ function onMidiMessageInternal(data) {
 
         const cc = b1;
         const val = b2;
+        if (cc === MoveArrowUp || cc === MoveArrowDown) {
+            if (val === 0) { delete s.editorArrowHeld[cc]; return; }
+            if (s.view === 'main' || editorActive() || s.view === 'fx') {
+                if (s.editorArrowHeld[cc]) return;
+                s.editorArrowHeld[cc] = true;
+            }
+        }
 
         if (s.view === 'park') {
             if ((cc === MoveMenu || cc === MoveMainButton) && val > 0) {
@@ -7099,23 +7552,24 @@ function onMidiMessageInternal(data) {
         if (cc === MoveCapture) {
             s.captureHeld = val > 0;
             updateUtilityButtonLeds();
-            if (val > 0 && s.view === 'main') randomizeFocusedTransientSlices();
+            if (val > 0 && (s.view === 'main' || editorActive())) randomizeFocusedTransientSlices();
             return;
         }
 
         if ((cc === MoveArrowRight || cc === MoveArrowLeft) && val > 0) {
+            if (s.loopPadMode && (s.view === 'main' || editorActive())) {
+                shiftLooperPadWindow(cc === MoveArrowRight ? 1 : -1);
+                return;
+            }
             if (editorActive()) {
                 sampleWave.scroll(cc === MoveArrowRight ? 1 : -1);
                 s.dirty = true;
                 return;
             }
-            if (s.view === 'main' && s.loopPadMode) {
-                shiftLooperPadWindow(cc === MoveArrowRight ? 1 : -1);
-                return;
-            }
         }
 
         if (cc === MoveArrowUp && val > 0) {
+            if (s.view === 'chop') { openSampleEditor('trim'); return; }
             if (editorActive()) { handleBackButton(); return; }
             if (s.view === 'main') {
                 s.view = 'fx';
@@ -7131,7 +7585,7 @@ function onMidiMessageInternal(data) {
         if (cc === MoveArrowDown && val > 0) {
             if (s.view === 'main') { openSampleEditor(s.shiftHeld ? 'chop' : 'trim'); return; }
             if (s.view === 'trim') { openSampleEditor('chop'); return; }
-            if (s.view === 'chop') { openSampleEditor('trim'); return; }
+            if (s.view === 'chop') return;
             if (s.view === 'fx') {
                 s.view = 'main';
                 showStatus('Main screen', 70);
@@ -7147,11 +7601,6 @@ function onMidiMessageInternal(data) {
             return;
         }
 
-        if (cc === MoveMainButton && val === 0 && editorActive()) {
-            const t = editorTarget();
-            triggerPadOff(t.sec, t.bank, t.slot, true, false);
-            return;
-        }
         if (cc === MoveMainButton && val > 0) {
             handleMainButtonPress();
             return;
@@ -7178,12 +7627,23 @@ function beginBoot() {
     s.padPressFlash = {};
     s.shiftHeld = false;
     s.shiftPressTick = -1;
+    s.editorArrowHeld = {};
     s.shiftLastTapTick = -9999;
     s.muteHeld = false;
     s.deleteHeld = false;
     s.copyHeld = false;
     s.captureHeld = false;
     s.copyPressTick = -1;
+    s.chopMapSec = -1;
+    s.chopMapBank = -1;
+    s.lazyChopActive = false;
+    s.residentChopMaps = Array.from({ length: GRID_COUNT }, () => Array(BANK_COUNT).fill(false));
+    s.editorPadAtMs = -Infinity;
+    s.lazyChopPending = false;
+    s.lazyChopStartedMs = 0;
+    s.lazyChopDurationMs = 0;
+    s.lazyChopPath = '';
+    s.lazyChopMarks = 0;
     s.sections = [
         makeSection(MODE_SINGLE),
         makeSection(MODE_PER_SLOT)
@@ -7457,6 +7917,8 @@ function tick() {
 }
 
 function beforeExit() {
+    stopLazyChopAudition();
+    deactivateChopEditorMap();
     sampleWave.close();
     const keys = Object.keys(activeVoicesByAddr);
     for (let i = 0; i < keys.length; i++) {

@@ -4,9 +4,17 @@ Reviewed 2026-10-20. TwinSampler baseline: `85e1381` (v0.3.7).
 Schwung latest stable: [v1.7.3](https://github.com/charlesvestal/schwung/releases/tag/v1.7.3),
 published 2026-10-04. Also checked upstream main `586aebd` (2026-10-15).
 
-## 0.3.9 follow-up
+## 0.4.0 release follow-up
 
-The current local build is 0.3.9; 0.3.8 is retained as a backup. A private-buffer
+The 0.3.8/0.3.9 local development work below is included in the 0.4.0 release.
+The final editor workflow adds manual CHOP maps, per-bank saved modes,
+note-first screen following, empty-pad cue marking, three-level arrow navigation,
+looper navigation and Jog-to-browser access inside the editors. The regression
+suite now contains 30 checks. `RELEASE_NOTES.md` documents the released controls.
+
+## 0.3.9 development findings
+
+The development build was labeled 0.3.9; 0.3.8 was retained as a backup. A private-buffer
 ARM64 diagnostic on Move (Schwung 1.7.3) reproduced the source-loop level bug:
 at 0.25 master gain, loop RMS was 4x one-shot RMS. The wrapper loop renderer
 omitted global gain. After correction, loop and ping-pong RMS match one-shots

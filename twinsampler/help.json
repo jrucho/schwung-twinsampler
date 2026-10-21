@@ -9,10 +9,24 @@
         "K3/K4: start/end",
         "Shift: coarse edges",
         "Shift+Jog: zoom",
-        "Arrows: scroll",
+        "L/R: looper pad view",
+        "else waveform scroll",
         "Jog: select pad",
-        "Jog press: audition",
-        "Back/Up: main"
+        "Jog press: samples",
+        "CHOP: play P1 first",
+        "Empty pad: new cue",
+        "Shift+pad: mark cue",
+        "Pads play their chops",
+        "Shift: no preview",
+        "CHOP starts with no cues",
+        "P1 lit, cues light",
+        "K3 moves P1 start",
+        "Erase+pad: empty cue",
+        "Each bank keeps mode",
+        "Screen follows pad",
+        "Capture: re-chop",
+        "Up: CHOP > Trim > main",
+        "Back: main"
       ]
     },
     {

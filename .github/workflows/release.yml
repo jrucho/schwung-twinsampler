@@ -20,6 +20,24 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Validate release metadata
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          const read = path => JSON.parse(fs.readFileSync(path, 'utf8'));
+          const module = read('twinsampler/module.json');
+          const source = read('src/module.json');
+          const release = read('release.json');
+          assert.equal(module.id, 'twinsampler');
+          assert.equal(source.version, module.version);
+          assert.equal(release.version, module.version);
+          assert.equal(process.env.RELEASE_TAG, `v${module.version}`);
+          assert.equal(release.download_url, `https://github.com/jrucho/schwung-twinsampler/releases/download/v${module.version}/twinsampler-module.tar.gz`);
+          NODE
+
       - name: Verify startup restore and host compatibility
         run: bash scripts/test.sh
 
@@ -29,9 +47,33 @@ jobs:
       - name: Build module package
         run: bash scripts/build.sh
 
+      - name: Verify packaged runtime files and ARM64 DSP
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          for (const name of ['module.json', 'ui.js', 'ui_chain.js', 'help.json', 'param_transport.mjs', 'waveform.mjs', 'fx_presets.mjs', 'dsp.so', 'dsp_core.so']) {
+            assert.ok(fs.statSync(`dist/twinsampler/${name}`).size > 0, name);
+          }
+          for (const name of ['dsp.so', 'dsp_core.so']) {
+            const elf = fs.readFileSync(`dist/twinsampler/${name}`);
+            assert.equal(elf.subarray(0, 4).toString('hex'), '7f454c46', name);
+            assert.equal(elf[4], 2, 'ELF64');
+            assert.equal(elf[5], 1, 'little endian');
+            assert.equal(elf.readUInt16LE(18), 183, 'AArch64');
+          }
+          NODE
+
+      - name: Generate package checksum
+        working-directory: dist
+        run: sha256sum twinsampler-module.tar.gz > twinsampler-module.tar.gz.sha256
+
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
           name: TwinSampler ${{ github.ref_name }}
-          files: dist/twinsampler-module.tar.gz
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          draft: true
+          files: |
+            dist/twinsampler-module.tar.gz
+            dist/twinsampler-module.tar.gz.sha256

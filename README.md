@@ -12,6 +12,12 @@ Twin Sampler is a high-performance "overtake" sampler module designed specifical
 
 ## Installation
 
+Install or update **TwinSampler** from the **Schwung Module Store**. The existing
+store entry resolves version **0.4.0** through this repository's `release.json`.
+For manual installation, download `twinsampler-module.tar.gz` from
+[the v0.4.0 release](https://github.com/jrucho/schwung-twinsampler/releases/tag/v0.4.0)
+and extract it to obtain the `twinsampler` folder.
+
 Place the `twinsampler` folder in the following directory on your Ableton Move:
 `modules/overtake/twinsampler`
 
@@ -23,9 +29,9 @@ Place the `twinsampler` folder in the following directory on your Ableton Move:
 
 ---
 
-## v0.3.9 development: editors, loading and Schwung compatibility
+## v0.4.0: editors, live chopping and independent grid performance
 
-The current development version uses Schwung's optional bulk parameter API
+Version 0.4.0 uses Schwung's optional bulk parameter API
 (verified in upstream **v1.7.3**) to reduce startup communication overhead.
 Older hosts automatically retain individual parameter writes. File loads,
 sample reversal, looping changes and slicing are kept separate from numeric
@@ -46,20 +52,54 @@ the data partition, not the small system partition.
 | Down from main | Open sample waveform/trim |
 | Down again, or Shift + Down from main | Open source-bank chop editor (SRC mode) |
 | Menu → Sample Editor / Chop Editor | Open an editor directly |
-| Tap a pad / turn Jog | Select the pad to edit |
+| Tap a pad / turn Jog | Select the slice to edit; pads play through the normal sampler |
 | K3 / K4 | Adjust the selected start / end edge |
+| K3 on P1 in CHOP | Move the sample start point manually |
+| Shift in CHOP | Enable cue marking; does not start or restart audio |
+| Shift + pad in CHOP | Mark a cue on the chosen pad; only that pad lights |
+| Empty pad in CHOP | Mark a new cue directly during playback, without Shift |
+| Plain pad in CHOP | Play that pad's chop with its normal envelope and controls |
+| Erase + pad in CHOP | Empty that pad's cue; P1 is not moved and later cues stay put |
+| Release Shift | Return to playing chops; existing playback continues |
+| Switch bank | Restore that bank's saved Trim or CHOP mode |
+| Capture | Randomize the focused source bank's transient chops |
 | Shift + K3 / K4 | Coarse 10 ms edge adjustment |
 | Shift + Jog | Zoom 1x–128x around the selected start |
-| Left / Right | Scroll the zoomed waveform window |
-| Press / release Jog | Audition using normal pad trigger/gate behavior |
-| Back / Up | Return to main |
+| Left / Right | Change the looper pad view when looper pad mode is active; otherwise scroll the zoomed waveform |
+| Press Jog | Open the sample browser for the selected pad/bank, just like main |
+| Up | CHOP → Trim → main |
+| Down | main → Trim → CHOP (stays at CHOP) |
+| Back | Return directly to main |
 
-The other six knobs retain their per-pad controls in the editors. Chop editing
-changes shared boundaries between source slices; use the Trim page to adjust
-an individual pad's offsets, including the first/last slice's outer edge.
+The other six knobs retain their per-pad controls in the editors. Each source
+bank keeps two independent chop maps: the transient/random map used on the main
+and Trim screens, and a manual map used only in CHOP. Both maps are saved with
+the project. Each bank also remembers whether it was left in Trim or CHOP, and
+that mode is saved with the project. CHOP starts with no internal cues: P1 spans
+the sample, is lit in the bank color, and P2-P16 stay dark. Play P1 through the
+normal sampler, then press Shift + pad during playback to mark a cue and light
+that pad. Empty pads can also mark a new cue directly without Shift; marked pads
+play their chops, and Shift + pad re-marks an existing cue. Shift alone never
+starts a full-file preview. The displayed cue playhead estimates the source
+position from the triggered slice, its pitch, reverse and loop settings. Pressing
+a pad from main opens its bank's remembered editor. While an editor is open,
+the screen follows the last played pad in its bank's mode: right drums show Trim
+and left chops show CHOP. This display change never rewrites either bank's saved
+mode or unloads the other bank's chop map. Knobs edit the displayed pad;
+Shift + pad marks cues in the pressed pad's CHOP bank even when a drum was last
+displayed. Erase + pad
+empties one cue without shifting later cues. Chop edits
+change shared boundaries, including the first and last outer cuts; use Trim to
+adjust an individual pad's offsets.
 Per-pad sample mode opens Trim rather than modifying an unrelated source bank.
 Source chop positions are converted into the core's 44.1 kHz frame domain even
 when the WAV on disk is 48 kHz. Waveform overviews are approximate on long files.
+
+Alternating between left-side chops and right-side drums triggers each note
+before following its display target, without reopening the editor or reinstalling
+chop maps on every hit.
+Both banks keep their playback maps ready. Waveform scanning waits briefly after
+a hit, and returning to cached waveforms avoids re-reading their WAV headers.
 
 ### FX presets and loading screens
 
@@ -67,7 +107,7 @@ On the FX page (Up from main), K1 selects one of five named sounds for the
 selected effect; K2–K8 edit its parameters. An asterisk after a preset name
 means the settings were edited or came from an older session. Saved FX settings
 are preserved until you choose another preset. The Lo-fi stereo channel and
-instant DJFX history issues are fixed in 0.3.9.
+instant DJFX history issues are fixed in 0.4.0.
 
 Project restores show a progress screen through the entire restore. Sample
 loads, explicit saves, new/init, undo and redo also show a busy screen before
@@ -141,9 +181,9 @@ When a pad is focused, the eight knobs control:
 * **Copy Pad:** Hold **Shift**, tap the source pad, then tap the destination pad.
 * **Copy Bank:** Hold **Shift**, press the source **Step button**, then the destination **Step button**.
 * **Erase:**
-    * **Delete + Pad:** Clears audio from a specific pad.
+    * **Delete + Pad:** In CHOP, empties that pad's chop cue without shifting later cues; elsewhere it clears audio from a specific pad.
     * **Shift + Delete:** Clears all audio in the focused bank.
-* **Capture:** In Source mode, press **Capture** to randomize or rebuild the transient chop map.
+* **Capture:** In Source mode, press **Capture** on the main, trim, or chop screen to randomize or rebuild the transient chop map.
 * **Undo/Redo:** Press **Undo** for latest edit; **Shift + Undo** for Redo. A loading screen is shown while the operation completes.
 
 ---
@@ -252,6 +292,3 @@ https://notebooklm.google.com/notebook/31678b7d-3a8e-4d41-8a5f-d2675b3e7298?arti
 <img width="1788" height="998" alt="9" src="https://github.com/user-attachments/assets/c91c4bb2-285d-4981-8deb-509b9fa69db1" />
 
 <img width="1787" height="997" alt="10" src="https://github.com/user-attachments/assets/19e6d9da-0ff9-4314-883f-f5f3932d6ed0" />
-
-
-

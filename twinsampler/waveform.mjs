@@ -50,13 +50,14 @@ export function readWaveInfo(io, path) {
 export function createWaveform(io, now = () => Date.now()) {
     let path = '', info = null, scan = null, fd = -1, key = '', status = '', zoom = 1, center = 0.5, reverse = false;
     const cache = new Map();
+    const infoCache = new Map();
     function close() { if (fd >= 0) io.close(fd); fd = -1; }
     function reset() { close(); scan = null; key = ''; }
     function target(next, reversed = false) {
         if (next === path && reverse === reversed) return;
-        reset(); path = next; reverse = reversed; info = null; status = ''; zoom = 1; center = 0.5;
+        reset(); path = next; reverse = reversed; info = infoCache.get(next) || null; status = ''; zoom = 1; center = 0.5;
     }
-    function invalidate() { reset(); info = null; cache.clear(); }
+    function invalidate() { reset(); info = null; cache.clear(); infoCache.clear(); }
     function changeZoom(delta, anchor) {
         zoom = Math.max(1, Math.min(128, delta > 0 ? zoom * 2 : zoom / 2));
         if (Number.isFinite(anchor)) center = Math.max(0, Math.min(1, anchor));
@@ -71,13 +72,22 @@ export function createWaveform(io, now = () => Date.now()) {
     function tick() {
         if (!path) { status = 'No sample'; return false; }
         if (status) return false;
-        if (!info && !status) { info = readWaveInfo(io, path); if (!info) status = 'Cannot read WAV'; }
+        if (!info && !status) {
+            info = readWaveInfo(io, path);
+            if (!info) status = 'Cannot read WAV';
+            else {
+                infoCache.set(path, info);
+                while (infoCache.size > 32) infoCache.delete(infoCache.keys().next().value);
+            }
+        }
         if (!info) return false;
         const w = window();
         const nextKey = path + ':' + reverse + ':' + info.frames + ':' + w.from + ':' + w.to;
         if (nextKey !== key) {
             close(); key = nextKey;
             scan = cache.get(key) || { min: new Float32Array(128), max: new Float32Array(128), col: 0 };
+            cache.set(key, scan);
+            while (cache.size > 4) cache.delete(cache.keys().next().value);
         }
         if (scan.col >= 128) return false;
         if (fd < 0) fd = io.open(path);
@@ -114,13 +124,13 @@ export function createWaveform(io, now = () => Date.now()) {
             if (now() - start >= 3) break;
         }
         if (scan.col === 128) {
-            close(); cache.set(key, scan);
-            while (cache.size > 4) cache.delete(cache.keys().next().value);
+            close();
         }
         return true;
     }
     function model() { return { path, info, scan, status, zoom, ...window() }; }
-    return { target, tick, model, changeZoom, scroll, close, invalidate };
+    function infoFor(next) { return next === path && info ? info : infoCache.get(next) || null; }
+    return { target, tick, model, changeZoom, scroll, close, invalidate, infoFor };
 }
 
 /* Shared source/chop coordinates use the core's 44.1k domain, not file frames. */
@@ -131,12 +141,14 @@ export function sourceSliceFrames(starts, durationMs) {
     return Array.from({ length: 17 }, (_, i) => Math.floor(i * total / 16));
 }
 
-export function moveSliceBoundary(starts, slot, edge, deltaFrames) {
+export function moveSliceBoundary(starts, slot, edge, deltaFrames, allowOuter = false, totalFrames = 0) {
     const out = starts.slice();
     const at = edge === 'end' ? slot + 1 : slot;
-    // Keep the full source extent; use pad trims to change its outer edges.
-    if (at <= 0 || at >= 16) return out;
-    const min = out[at - 1] + 1, max = out[at + 1] - 1;
+    if (at < 0 || at > 16) return out;
+    if (!allowOuter && (at <= 0 || at >= 16)) return out;
+    if (at === 16 && (!allowOuter || totalFrames <= 0)) return out;
+    const min = at === 0 ? 0 : out[at - 1] + 1;
+    const max = at === 16 ? totalFrames : out[at + 1] - 1;
     if (min <= max) out[at] = Math.max(min, Math.min(max, out[at] + Math.round(deltaFrames)));
     return out;
 }

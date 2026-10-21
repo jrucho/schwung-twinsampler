@@ -1,16 +1,36 @@
 # Changelog
 
-## 0.3.9 — Local development, not yet published
+## 0.4.0
 
 ### Fixed
+- Jog press opens the sample browser from Trim and CHOP using the same selected
+  pad/bank and assignment behavior as main, rather than auditioning a pad.
+- The screen follows the last played pad after triggering its note, independently
+  of each bank's saved Trim/CHOP mode and resident playback map. Knobs edit the
+  displayed pad, while CHOP cue marking and LEDs stay tied to their own bank.
+- Alternating CHOP and drum grids uses local screen focus instead of reopening
+  editors, restoring maps and forcing cursor/LED sync ahead of every note. Bank
+  chop maps stay resident, WAV metadata is cached, and waveform work is deferred
+  briefly after pad hits.
+- Empty CHOP pads mark new cues directly during playback; marked pads play their
+  slices, with Shift + pad available to re-mark existing cues.
+- CHOP pads play their manual slices through the normal sampler. Shift no longer
+  starts a full-file preview; play P1, then Shift + pad marks cues during playback.
+  Pad presses from main restore the played bank's remembered editor.
 - Source-mode loop and ping-pong playback now respect master gain, matching
   one-shot volume. A private-buffer diagnostic on Move reproduced a 4x level
-  jump at 25% master gain in 0.3.8; 0.3.9's loop/one-shot RMS ratio is ~1.00.
+  jump at 25% master gain in the development 0.3.8 build; the fixed loop/one-shot
+  RMS ratio is ~1.00.
 - Removed the second full-session replay and repeated focused-pad refreshes
   after startup's `READY`, which could briefly freeze pad response. All initial
   compatibility replays remain inside the loading screen.
 - Subsequent delayed trim verification advances in small, time-budgeted groups
   instead of replaying all 256 pads in a single UI tick.
+- Arrow navigation steps through Main, Trim and CHOP one level per press;
+  repeated held-button messages no longer skip levels. Left/Right changes the
+  looper pad view from either editor when looper pad mode is active.
+- Capture now randomizes the focused source-bank chops from the trim and chop
+  editors, matching its behavior on the main screen.
 - Lo-fi's sample-and-hold now updates both stereo channels.
 - FX bypass remains bit-exact while maintaining recent audio history, so an
   immediate DJFX capture no longer starts with an empty history buffer.
@@ -19,6 +39,15 @@
 - Sample waveform/trim page and a source-bank chop editor, with zoom, scroll,
   pad selection, audition and bounds-checked start/end editing. Waveform work
   begins only when an editor is opened, in bounded cancellable UI ticks.
+- CHOP has an independent manual map with no internal cues by default. P1
+  spans the sample and is lit in the bank color; P2-P16 stay dark until
+  an empty pad or Shift + pad marks a cue during playback. K3 moves the P1 start manually,
+  and Erase + pad empties only that cue while later cues stay put. Each source
+  bank keeps separate manual and transient/random maps, and both are saved with
+  the project.
+- Each source bank remembers its own Trim or CHOP editor mode. Switching banks,
+  including between the left and right grids, restores that bank's mode, and the
+  per-bank choices are saved with the project.
 - Loading screens before project restore, sample loading, explicit saving,
   new/init, undo and redo. Project restoration is split into progress jobs;
   individual file conversions and undo/redo DSP calls can still block while
@@ -36,10 +65,8 @@
 - Expanded checks cover waveform formats, editor addressing, loading lifecycle,
   absence of a post-READY replay, and native DSP rendering of all presets.
 
-0.3.8 is preserved as `dist/twinsampler-0.3.8-backup.tar.gz` locally and as a
-module/session archive under `/data/UserData/TwinSamplerBackups/` on Move.
-No release, tag, commit or push has been created. The local `release.json`
-points to the planned v0.3.9 asset, which exists only after publication.
+This release includes the work previously labeled 0.3.8 and 0.3.9 during local
+development; neither development version was published as a GitHub release.
 
 ## 0.3.8 — Local device build, not published
 

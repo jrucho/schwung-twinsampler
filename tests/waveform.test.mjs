@@ -75,6 +75,27 @@ test('reversed waveform, cancellation and corrupt input are handled safely', () 
     assert.equal(readWaveInfo(memoryIo(invalid), 'bad-align.wav'), null);
 });
 
+test('returning to cached bank waveforms performs no header or sample reads', () => {
+    const io = memoryIo(wav());
+    const wave = createWaveform(io, () => 0);
+    for (const path of ['chops.wav', 'drums.wav']) {
+        wave.target(path);
+        while (!wave.model().scan || wave.model().scan.col < 128) wave.tick();
+    }
+    const before = io.stats();
+    for (let i = 0; i < 8; i++) {
+        for (const path of ['chops.wav', 'drums.wav']) {
+            assert.equal(wave.infoFor(path).durationMs, 1000);
+            wave.target(path);
+            wave.tick();
+            assert.equal(wave.model().scan.col, 128);
+        }
+    }
+    assert.deepEqual(io.stats(), before, 'cached editor switches never reopen the WAV');
+    wave.invalidate();
+    assert.equal(wave.infoFor('chops.wav'), null, 'sample invalidation clears cached metadata');
+});
+
 test('slice edits stay ordered in core frame domain for 48k samples', () => {
     const cuts = sourceSliceFrames([], 1000);
     assert.equal(cuts[16], 44100);
