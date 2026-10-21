@@ -168,8 +168,9 @@ The archive is `dist/twinsampler-module.tar.gz`, with a matching `.sha256` file.
 An ARM64 Linux compiler
 (`aarch64-linux-gnu-gcc`), ARM64 binutils and Node.js are required to rebuild and
 verify the DSP wrapper. Runtime requirements above Move's GLIBC 2.35 are rejected.
-Release CI uses Ubuntu 22.04 and renders audio from the extracted archive under
-ARM64 emulation before upload. See [DEVELOPMENT_REVIEW.md](DEVELOPMENT_REVIEW.md)
+Release CI uses Ubuntu 22.04 to build and render audio from the extracted archive
+under ARM64 emulation. Published release assets are uploaded from the exact
+Move-verified archive and checksum, never from a separate rebuild. See [DEVELOPMENT_REVIEW.md](DEVELOPMENT_REVIEW.md)
 for measurements, compatibility findings and remaining work.
 Changes are recorded in [CHANGELOG.md](CHANGELOG.md). This version is developed
 locally until publication is explicitly requested.

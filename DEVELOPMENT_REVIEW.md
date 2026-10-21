@@ -127,9 +127,9 @@ post-READY verification it mentions has been superseded by this follow-up.
   over autosave.
 - **Background operation.** Use `host_suspend_overtake` before legacy fallbacks.
   Upstream `host_hide_module` only hides tool overtakes and otherwise does nothing.
-- **Release checks.** CI runs startup regressions and installs the ARM compiler
-  before packaging, avoiding the previous normal Ubuntu runner's fallback to a
-  potentially outdated prebuilt wrapper.
+- **Release checks.** CI runs startup regressions, builds with the ARM compiler
+  and renders the packaged DSP under QEMU. CI publishes only a verification
+  artifact; the release asset comes from the exact archive verified on Move.
 
 ## Verification and measurement
 

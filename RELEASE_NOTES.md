@@ -50,4 +50,5 @@ and reopen the module. A matching `.sha256` file is generated with the archive.
 - 170 private-buffer ARM64 audio cases passed on Move, including JS-generated
   control replay, pitch at 44.1/48 kHz, and P1 at 6 seconds with Trim/CHOP restore.
 - Release CI checks the extracted archive's ARM64 runtime requirements and replays
-  these audio probes under emulation before uploading the draft release.
+  these audio probes under emulation. The published asset is the exact archive
+  installed and verified on Move, not a separate CI rebuild.

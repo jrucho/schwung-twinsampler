@@ -22,23 +22,25 @@ The repository's `release.json` supplies the versioned update URL.
 ## Publication
 
 1. Inspect status, diff and recent history; stage the intended source/docs/tests.
-2. Commit the release and push tag `v0.4.1` first. The **Release Module** action
-   validates matching metadata, runs the checks, builds ARM64 and creates a draft
-   release with curated notes, the module archive and its SHA-256 checksum.
-3. Confirm the action succeeds; download and inspect the draft archive. It must
-   extract to `twinsampler/module.json` with version `0.4.1` and all runtime files.
-   CI must pass the GLIBC <= 2.35 check and render the archive's actual ARM64 DSP
-   under QEMU. Install that same downloaded draft archive on Move and check pad
-   sound before publishing; do not substitute a separately built local archive.
-   Check P1 at a nonzero start past five seconds, Trim/CHOP map switching,
-   held-source envelope/gain edits, shifted bank sound knobs and armed-recording
-   monitor level. Control probes replay the actual JS-to-DSP command stream.
-4. Publish the completed release as latest, then push `main`. This makes the
-   versioned asset available before the store's `release.json` pointer changes.
-5. Confirm public `release.json`, the release tag, module metadata, downloaded
-    archive and checksum agree.
-   If an asset is replaced manually, replace its checksum with the one generated
-   by the same build as well.
+2. Commit the release, push `main`, then push tag `v0.4.1`. The **Verify Release
+   Module** action validates matching metadata, runs the checks, builds ARM64 and
+   uploads a verification artifact. It deliberately does not publish a release.
+3. Confirm the action succeeds. Its artifact must extract to `twinsampler/module.json`
+   with version `0.4.1` and pass the GLIBC <= 2.35 check plus the actual ARM64 DSP
+   audio probes under QEMU. This proves the sources build; it is not the asset.
+4. Install the local `dist/twinsampler-module.tar.gz` on Move and check pad sound.
+   Compare every installed runtime file against the extracted archive. Check P1 at
+   a nonzero start past five seconds, Trim/CHOP map switching, held-source
+   envelope/gain edits, shifted bank sound knobs, the trim-audition toggle and
+   armed-recording monitor level.
+5. Publish the release as latest by uploading that **Move-verified archive and its
+   matching checksum** (for 0.4.1: SHA-256
+   `40bb94802d4fe4e55dd382f971439584146cf5bf4f24e185f970ddc735cafe88`), using
+   `RELEASE_NOTES.md` as the body. Never upload a separately rebuilt archive:
+   compiler and tar metadata differences change its bytes.
+6. Confirm public `release.json`, the release tag, module metadata, the downloaded
+   archive and checksum agree, then re-verify the downloaded archive against Move.
+   If an asset is replaced, replace its checksum with the checksum of that exact file.
 6. Check the existing Schwung catalog entry before proposing any catalog PR;
    avoid adding a duplicate. `min_host_version` is a host requirement, not the
     TwinSampler release version.
