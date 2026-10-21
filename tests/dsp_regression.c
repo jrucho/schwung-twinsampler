@@ -1,4 +1,6 @@
 /* Native wrapper tests; the ARM-only binary core is not invoked here. */
+/* Enable the wrapper's POSIX/GNU file APIs before any system header on Linux. */
+#define _GNU_SOURCE
 #include <assert.h>
 #include "../twinsampler/dsp_wrapper_monitor.c"
 
