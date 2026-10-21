@@ -1,4 +1,4 @@
-name: Release Module
+name: Verify Release Module
 
 on:
   push:
@@ -6,11 +6,13 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  verify:
+    # Match Move's glibc 2.35 baseline. Newer Ubuntu cross libraries can
+    # produce ARM64 binaries which compile successfully but cannot load on Move.
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,39 +43,45 @@ jobs:
       - name: Verify startup restore and host compatibility
         run: bash scripts/test.sh
 
-      - name: Install ARM64 DSP compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install compatible ARM64 compiler and runtime emulator
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
 
       - name: Build module package
         run: bash scripts/build.sh
 
-      - name: Verify packaged runtime files and ARM64 DSP
+      - name: Verify the exact archive and render audio with its ARM64 DSP
         run: |
-          node --input-type=module <<'NODE'
-          import fs from 'node:fs';
-          import assert from 'node:assert/strict';
-          for (const name of ['module.json', 'ui.js', 'ui_chain.js', 'help.json', 'param_transport.mjs', 'waveform.mjs', 'fx_presets.mjs', 'dsp.so', 'dsp_core.so']) {
-            assert.ok(fs.statSync(`dist/twinsampler/${name}`).size > 0, name);
-          }
-          for (const name of ['dsp.so', 'dsp_core.so']) {
-            const elf = fs.readFileSync(`dist/twinsampler/${name}`);
-            assert.equal(elf.subarray(0, 4).toString('hex'), '7f454c46', name);
-            assert.equal(elf[4], 2, 'ELF64');
-            assert.equal(elf[5], 1, 'little endian');
-            assert.equal(elf.readUInt16LE(18), 183, 'AArch64');
-          }
-          NODE
+          mkdir -p dist/release-check
+          tar -xzf dist/twinsampler-module.tar.gz -C dist/release-check
+          node scripts/verify-package.mjs dist/release-check/twinsampler
+          aarch64-linux-gnu-gcc -O2 -std=c11 tests/pitch_probe.c -o dist/pitch_probe -ldl -lm
+          sudo mkdir -p /data/UserData/schwung
+          sudo chown "$USER" /data/UserData/schwung
+          qemu-aarch64 -L /usr/aarch64-linux-gnu dist/pitch_probe \
+            "$PWD/dist/release-check/twinsampler" "$PWD/dist/release-check/pitch-fixture.wav"
+          aarch64-linux-gnu-gcc -O2 -std=c11 tests/editor_control_probe.c -o dist/editor_control_probe -ldl -lm
+          node tests/editor_control_trace.mjs "$PWD/dist/release-check/control-tone.wav" | \
+            qemu-aarch64 -L /usr/aarch64-linux-gnu dist/editor_control_probe \
+              "$PWD/dist/release-check/twinsampler" "$PWD/dist/release-check/control-tone.wav"
+          node tests/editor_control_trace.mjs "$PWD/dist/release-check/live-tone.wav" live | \
+            qemu-aarch64 -L /usr/aarch64-linux-gnu dist/editor_control_probe \
+              "$PWD/dist/release-check/twinsampler" "$PWD/dist/release-check/live-tone.wav"
+          TS_CONTROL_ONLY=start TS_FIRST_START_MS=6000 node tests/editor_control_trace.mjs "$PWD/dist/release-check/long-tone.wav" | \
+            qemu-aarch64 -L /usr/aarch64-linux-gnu dist/editor_control_probe \
+              "$PWD/dist/release-check/twinsampler" "$PWD/dist/release-check/long-tone.wav" 6 6000
 
-      - name: Generate package checksum
+      - name: Generate verification checksum
         working-directory: dist
         run: sha256sum twinsampler-module.tar.gz > twinsampler-module.tar.gz.sha256
 
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
+      # This archive is a verification build, not the published asset. The
+      # release asset is uploaded from the exact archive already installed and
+      # accepted on Move, so store installs receive those verified bytes.
+      - name: Keep verification package for inspection
+        uses: actions/upload-artifact@v4
         with:
-          name: TwinSampler ${{ github.ref_name }}
-          body_path: RELEASE_NOTES.md
-          draft: true
-          files: |
+          name: twinsampler-verify-${{ github.ref_name }}
+          path: |
             dist/twinsampler-module.tar.gz
             dist/twinsampler-module.tar.gz.sha256
+          if-no-files-found: error

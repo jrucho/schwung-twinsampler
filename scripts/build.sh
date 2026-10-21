@@ -29,14 +29,15 @@ if [[ -f "${SOURCE_DIR}/dsp_wrapper_monitor.c" ]]; then
   fi
 
   if [[ -n "${DSP_CC}" ]]; then
-    "${DSP_CC}" -O2 -shared -fPIC \
+    "${DSP_CC}" -O2 -std=c11 -shared -fPIC \
       -o "${DIST_DIR}/dsp.so" \
       "${SOURCE_DIR}/dsp_wrapper_monitor.c" \
       -I "${SOURCE_DIR}" \
       -ldl -lm
     echo "Built ${DIST_DIR}/dsp.so from ${SOURCE_DIR}/dsp_wrapper_monitor.c using ${DSP_CC}"
   else
-    echo "Warning: ARM compiler not available; keeping existing dsp.so in package." >&2
+    echo "Error: an ARM64 compiler is required; refusing to package a stale dsp.so." >&2
+    exit 1
   fi
 fi
 
@@ -70,6 +71,8 @@ if [[ ! -f "${DIST_DIR}/module.json" ]]; then
   exit 1
 fi
 
+node scripts/verify-package.mjs "${DIST_DIR}"
+
 tar -czf "${ARCHIVE_PATH}" -C dist "${MODULE_ID}"
 
 if [[ ! -f "${ARCHIVE_PATH}" ]]; then
@@ -77,5 +80,15 @@ if [[ ! -f "${ARCHIVE_PATH}" ]]; then
   exit 1
 fi
 
+node --input-type=module - "${ARCHIVE_PATH}" <<'NODE'
+import { createHash } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { basename } from 'node:path';
+const archive = process.argv[2];
+const hash = createHash('sha256').update(readFileSync(archive)).digest('hex');
+writeFileSync(archive + '.sha256', hash + '  ' + basename(archive) + '\n');
+NODE
+
 echo "Build complete: ${DIST_DIR}"
 echo "Archive complete: ${ARCHIVE_PATH}"
+echo "Checksum complete: ${ARCHIVE_PATH}.sha256"

@@ -87,6 +87,7 @@ typedef struct wrapper_instance {
     int current_bank[2];
     int route_bank[2];
     int section_mode[2];
+    uint32_t core_source_base_frame[2][8];
     int edit_section;
     int edit_bank;
     int edit_slot;
@@ -1122,6 +1123,9 @@ static void remember_source_path(wrapper_instance_t *inst, const char *val) {
     if (!parse_prefixed_int_payload(val, parts, 2, &path)) return;
     const int sec = clampi(parts[0], 0, 1);
     const int bank = clampi(parts[1], 0, 7);
+    if (strcmp(inst->source_path[sec][bank], path ? path : ""))
+        inst->source_slice_start_count[sec][bank] = 0;
+    inst->core_source_base_frame[sec][bank] = 0;
     snprintf(inst->source_path[sec][bank], sizeof(inst->source_path[sec][bank]), "%s", path ? path : "");
     free_source_sample(&inst->source_sample[sec][bank]);
     if (inst->source_path[sec][bank][0] && (inst->section_mode[sec] == 0 || bank_has_loop_slots(inst, sec, bank))) {
@@ -1797,6 +1801,103 @@ static int core_is_recording(wrapper_instance_t *inst) {
     return inst->recording_cached;
 }
 
+/* The binary core also limits slot trims to five seconds. For longer P1
+ * offsets, cache a coarse source window so ordinary knob ticks do not copy
+ * the sample again. Public cue coordinates and loop buffers stay absolute. */
+static int prepare_core_source_window(wrapper_instance_t *inst, int sec, int bank) {
+    if (inst->section_mode[sec] != 0) return 1;
+    const uint32_t rate = core_playback_sample_rate(), chunk = rate * 5u;
+    const uint32_t first = inst->source_slice_start_count[sec][bank] > 0
+        ? inst->source_slice_starts[sec][bank][0] : 0;
+    const double actual = fmax(0, first + inst->slot_start_trim_ms[sec][bank][0] * rate / 1000.0);
+    uint32_t base = first / chunk * chunk;
+    if (actual < base) base = (uint32_t)actual / chunk * chunk;
+    if (actual - base > chunk) base = first;
+    if (base == inst->core_source_base_frame[sec][bank]) return 1;
+    const char *path = inst->source_path[sec][bank];
+    char normalized[PATH_MAX], cropped[PATH_MAX], value[TS_SLOT_PATH_MAX + 32];
+    const char *load = path;
+    if (maybe_rewrite_sample_path(inst, path, normalized, sizeof(normalized), 0)) load = normalized;
+    if (base > 0) {
+        wav_info_t info;
+        if (!inspect_wav_file(load, &info) || !wav_is_simple_core_format(&info, rate) ||
+            !ensure_sample_cache_dir() || info.data_size / info.block_align <= base) return 0;
+        uint64_t hash = sample_cache_hash(path, &info, rate, 0);
+        hash = fnv1a64_bytes(hash, &base, sizeof(base));
+        snprintf(cropped, sizeof(cropped), "%s/start-%016llx.wav", TS_SAMPLE_CACHE_DIR, (unsigned long long)hash);
+        const uint32_t bytes = info.data_size - base * info.block_align;
+        wav_info_t cached;
+        if (!inspect_wav_file(cropped, &cached) || cached.data_size != bytes) {
+            FILE *in = fopen(load, "rb"), *out = fopen(cropped, "wb");
+            int ok = in && out;
+            if (ok) ok = fseeko(in, (off_t)info.data_offset + (off_t)base * info.block_align, SEEK_SET) == 0 &&
+                write_wav_header(out, info.channels, rate, bytes);
+            uint8_t buf[16384]; uint32_t remaining = bytes;
+            while (ok && remaining) {
+                const size_t n = remaining < sizeof(buf) ? remaining : sizeof(buf);
+                ok = fread(buf, 1, n, in) == n && fwrite(buf, 1, n, out) == n;
+                remaining -= (uint32_t)n;
+            }
+            if (in) fclose(in);
+            if (out && fclose(out)) ok = 0;
+            if (!ok) { unlink(cropped); return 0; }
+        }
+        load = cropped;
+    }
+    snprintf(value, sizeof(value), "%d:%d:%s", sec, bank, load);
+    inst->core_api_v2->set_param(inst->core_instance, "section_source_path", value);
+    inst->core_source_base_frame[sec][bank] = base;
+    return 1;
+}
+
+/* The binary core pins source slice zero to file frame zero, even when a
+ * manual cue map has a nonzero first point. Keep the public trim independent
+ * and translate only the core's P1 start offset into absolute file time. */
+static void sync_core_first_slice_start(wrapper_instance_t *inst, int sec, int bank) {
+    if (!inst || !inst->core_api_v2 || !inst->core_api_v2->set_param || !inst->core_instance) return;
+    if (inst->section_mode[sec] != 0) return;
+    const double first_ms = inst->source_slice_start_count[sec][bank] > 0
+        ? ((double)inst->source_slice_starts[sec][bank][0] - inst->core_source_base_frame[sec][bank]) *
+            1000.0 / (double)core_playback_sample_rate() : 0;
+    char value[128];
+    snprintf(value, sizeof(value), "%d:%d:0:%.6f", sec, bank,
+        first_ms + inst->slot_start_trim_ms[sec][bank][0]);
+    inst->core_api_v2->set_param(inst->core_instance, "slot_start_trim_at", value);
+    char n[32];
+    snprintf(n, sizeof(n), "%d", sec); inst->core_api_v2->set_param(inst->core_instance, "edit_section", n);
+    snprintf(n, sizeof(n), "%d", bank); inst->core_api_v2->set_param(inst->core_instance, "edit_bank", n);
+    inst->core_api_v2->set_param(inst->core_instance, "edit_slot", "0");
+    snprintf(value, sizeof(value), "%.6f", first_ms + inst->slot_start_trim_ms[sec][bank][0]);
+    inst->core_api_v2->set_param(inst->core_instance, "slot_start_trim", value);
+    snprintf(n, sizeof(n), "%d", inst->edit_section); inst->core_api_v2->set_param(inst->core_instance, "edit_section", n);
+    snprintf(n, sizeof(n), "%d", inst->edit_bank); inst->core_api_v2->set_param(inst->core_instance, "edit_bank", n);
+    snprintf(n, sizeof(n), "%d", inst->edit_slot); inst->core_api_v2->set_param(inst->core_instance, "edit_slot", n);
+}
+
+static void sync_core_source_cues(wrapper_instance_t *inst, int sec, int bank) {
+    if (!prepare_core_source_window(inst, sec, bank)) {
+        log_msg("TwinSampler: could not prepare source start window");
+        return;
+    }
+    if (inst->source_slice_start_count[sec][bank] > 0) {
+        char adjusted[1024]; int used = snprintf(adjusted, sizeof(adjusted), "%d:%d:", sec, bank);
+        for (int i = 0; i < inst->source_slice_start_count[sec][bank]; i++) {
+            const uint32_t point = inst->source_slice_starts[sec][bank][i];
+            const uint32_t base = inst->core_source_base_frame[sec][bank];
+            used += snprintf(adjusted + used, sizeof(adjusted) - used, "%s%u", i ? "," : "", point > base ? point - base : 0);
+        }
+        inst->core_api_v2->set_param(inst->core_instance, "section_slice_starts", adjusted);
+    }
+    sync_core_first_slice_start(inst, sec, bank);
+}
+
+static void sync_core_first_slice_trim(wrapper_instance_t *inst, int sec, int bank) {
+    const uint32_t old_base = inst->core_source_base_frame[sec][bank];
+    if (!prepare_core_source_window(inst, sec, bank)) return;
+    if (old_base != inst->core_source_base_frame[sec][bank]) sync_core_source_cues(inst, sec, bank);
+    else sync_core_first_slice_start(inst, sec, bank);
+}
+
 static void wrapper_set_param(void *instance, const char *key, const char *val) {
     wrapper_instance_t *inst = (wrapper_instance_t *)instance;
     if (!inst || !key) return;
@@ -2008,10 +2109,32 @@ static void wrapper_set_param(void *instance, const char *key, const char *val) 
     if (inst->core_api_v2 && inst->core_api_v2->set_param && inst->core_instance) {
         char rewritten_value[TS_SAMPLE_PARAM_BUF];
         const char *forward_val = val ? val : "";
+        if (!strcmp(key, "section_randomize_transients")) {
+            int parts[2] = {0};
+            if (parse_colon_ints(val, parts, 2) >= 2) {
+                const int sec = clampi(parts[0], 0, 1), bank = clampi(parts[1], 0, 7);
+                inst->source_slice_start_count[sec][bank] = 0;
+                prepare_core_source_window(inst, sec, bank);
+                sync_core_first_slice_start(inst, sec, bank);
+            }
+        }
         if (rewrite_sample_param_value(inst, key, forward_val, rewritten_value, sizeof(rewritten_value))) {
             forward_val = rewritten_value;
         }
         inst->core_api_v2->set_param(inst->core_instance, key, forward_val);
+        if (!strcmp(key, "section_slice_starts")) {
+            int parts[2] = {0};
+            if (parse_colon_ints(val, parts, 2) >= 2) {
+                const int sec = clampi(parts[0], 0, 1), bank = clampi(parts[1], 0, 7);
+                sync_core_source_cues(inst, sec, bank);
+            }
+        } else if (!strcmp(key, "slot_start_trim_at")) {
+            int parts[3] = {0};
+            if (parse_colon_ints(val, parts, 3) >= 3 && parts[2] == 0)
+                sync_core_first_slice_trim(inst, clampi(parts[0], 0, 1), clampi(parts[1], 0, 7));
+        } else if ((!strcmp(key, "slot_start_trim") || !strcmp(key, "slice_start_trim")) && inst->edit_slot == 0) {
+            sync_core_first_slice_trim(inst, inst->edit_section, inst->edit_bank);
+        }
     }
 }
 
@@ -2065,6 +2188,15 @@ static int wrapper_get_param(void *instance, const char *key, char *buf, int buf
         return snprintf(buf, (size_t)buf_len, "%d", inst->debug_sample_loads ? 1 : 0);
     }
 
+    int cue_sec = 0, cue_bank = 0, cue = 0;
+    if (sscanf(key, "section_slice_start_%d_%d_%d", &cue_sec, &cue_bank, &cue) == 3 &&
+        cue_sec >= 0 && cue_sec < 2 && cue_bank >= 0 && cue_bank < 8 && cue >= 0 &&
+        cue < inst->source_slice_start_count[cue_sec][cue_bank]) {
+        return snprintf(buf, (size_t)buf_len, "%u", inst->source_slice_starts[cue_sec][cue_bank][cue]);
+    }
+    if (!strcmp(key, "slot_start_trim") && inst->section_mode[inst->edit_section] == 0 && inst->edit_slot == 0) {
+        return snprintf(buf, (size_t)buf_len, "%.6f", inst->slot_start_trim_ms[inst->edit_section][inst->edit_bank][0]);
+    }
     if (inst->core_api_v2 && inst->core_api_v2->get_param && inst->core_instance) {
         return inst->core_api_v2->get_param(inst->core_instance, key, buf, buf_len);
     }
@@ -2611,11 +2743,32 @@ static void apply_perf_fx_to_output(wrapper_instance_t *inst, int16_t *out_inter
     }
 }
 
+/* Native input monitoring can already be present on Move's output bus. A
+ * positively correlated copy must not be added again when Rec enables thru. */
+static int input_present_on_bus(const int16_t *input, const int16_t *bus, int samples) {
+    double input_energy = 0, bus_energy = 0, cross = 0;
+    if (!input || !bus || samples <= 0) return 0;
+    for (int i = 0; i < samples; i++) {
+        input_energy += (double)input[i] * input[i];
+        bus_energy += (double)bus[i] * bus[i];
+        cross += (double)input[i] * bus[i];
+    }
+    if (input_energy < samples * 64.0 || bus_energy < samples * 64.0 || cross <= 0) return 0;
+    return cross * cross >= 0.99 * input_energy * bus_energy;
+}
+
 static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
     wrapper_instance_t *inst = (wrapper_instance_t *)instance;
     if (!inst || !out_interleaved_lr || frames <= 0) return;
 
     const int total = frames * 2;
+    int input_on_host_bus = 0;
+    if ((inst->monitor_enabled || inst->recording_cached) && g_host && g_host->mapped_memory &&
+        g_host->audio_in_offset > 0 && g_host->audio_out_offset > 0) {
+        input_on_host_bus = input_present_on_bus(
+            (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset),
+            (const int16_t *)(g_host->mapped_memory + g_host->audio_out_offset), total);
+    }
     int input_replaced = 0;
     int16_t *audio_in_rw = NULL;
 
@@ -2658,7 +2811,7 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
                 desired_capture_source = 1;
             } else {
                 if (inst->record_intent_internal && internal_active) desired_capture_source = 2;
-                else if (input_active && bus_active) desired_capture_source = 3;
+                else if (input_active && bus_active && !input_on_host_bus) desired_capture_source = 3;
                 else if (input_active) desired_capture_source = 1;
                 else if (bus_active) desired_capture_source = 2;
                 else desired_capture_source = 1;
@@ -2722,11 +2875,12 @@ static void wrapper_render_block(void *instance, int16_t *out_interleaved_lr, in
     }
 
     if (inst->monitor_enabled && g_host && g_host->mapped_memory &&
+        !(inst->monitor_policy && input_on_host_bus) &&
         !(inst->monitor_policy && core_is_recording(inst) && capture_source == 2) &&
         g_host->audio_in_offset > 0) {
         const int16_t *audio_in = (const int16_t *)(g_host->mapped_memory + g_host->audio_in_offset);
         if (audio_in) {
-            const float gain = inst->monitor_gain;
+            const float gain = inst->monitor_gain * inst->global_gain;
             for (int i = 0; i < total; i++) {
                 const int32_t mon = (int32_t)((float)audio_in[i] * gain);
                 const int32_t sum = (int32_t)out_interleaved_lr[i] + mon;

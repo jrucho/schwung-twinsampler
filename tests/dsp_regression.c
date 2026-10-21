@@ -22,7 +22,48 @@ static void fill_tone(int16_t *out, int frames, int offset) {
     }
 }
 
+static void silent_core_render(void *instance, int16_t *out, int frames) {
+    (void)instance;
+    memset(out, 0, (size_t)frames * 2 * sizeof(*out));
+}
+
+static void check_record_monitor(void) {
+    uint8_t memory[8192] = {0};
+    host_api_v1_t host = { .sample_rate = 44100, .mapped_memory = memory,
+        .audio_out_offset = 256, .audio_in_offset = 2304 };
+    plugin_api_v2_t api = { .render_block = silent_core_render };
+    wrapper_instance_t *inst = calloc(1, sizeof(*inst));
+    assert(inst);
+    int16_t backup[256], mix[256], out[256];
+    inst->input_backup = backup; inst->input_mix = mix; inst->scratch_samples = 256;
+    inst->core_api_v2 = &api; inst->core_instance = inst;
+    inst->monitor_enabled = 1; inst->monitor_policy = 1;
+    inst->monitor_gain = 1; inst->global_gain = 0.25f; inst->record_mix_schwung = 1;
+    inst->record_mix_gain = 1;
+    int16_t *input = (int16_t *)(memory + host.audio_in_offset);
+    int16_t *bus = (int16_t *)(memory + host.audio_out_offset);
+    fill_tone(input, 128, 0);
+    g_host = &host;
+    for (int recording = 0; recording <= 1; recording++) {
+        inst->recording_cached = recording;
+        inst->capture_source_last = 0;
+        memcpy(bus, input, 256 * sizeof(*bus));
+        wrapper_render_block(inst, out, 128);
+        assert(rms(out, 128, 0) == 0); // Already audible through Move; don't double it.
+        if (recording) assert(inst->capture_source_last == 1); // Don't record input twice either.
+        memset(bus, 0, 256 * sizeof(*bus));
+        wrapper_render_block(inst, out, 128);
+        assert(fabs(rms(out, 128, 0) / rms(input, 128, 0) - 0.25) < 0.002);
+    }
+    inst->global_gain = 0;
+    wrapper_render_block(inst, out, 128);
+    assert(rms(out, 128, 0) == 0);
+    g_host = NULL;
+    free(inst);
+}
+
 int main(void) {
+    check_record_monitor();
     wrapper_instance_t *inst = calloc(1, sizeof(*inst));
     assert(inst);
     inst->pfx_delay_len = 44100 * 2;

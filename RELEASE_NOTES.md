@@ -1,51 +1,53 @@
-# TwinSampler 0.4.0
+# TwinSampler 0.4.1
 
-Live chopping, waveform editors and smoother dual-grid performance for Ableton
-Move running Schwung.
+## Fixes
 
-## Highlights
+- **Trim audition toggle:** hold Shift, touch the master-volume knob, then touch
+  K3. ON/OFF now controls Trim/CHOP auditions as well as Main. Touch repeats and
+  capacitive releases are handled without double-toggling. Running loops stay live.
+- **Release DSP compatibility:** build with a Move-compatible glibc baseline,
+  reject newer runtime dependencies, and test actual packaged ARM64 pad audio
+  before uploading. The previous release environment could produce
+  `GLIBC_2.38 not found` on Move, leaving pads silent despite a working UI.
+- **Editor sound controls:** Shift + K1/K2/K5/K6/K7/K8 edits bank attack,
+  decay/release, Trigger/Gate, pitch, gain and loop. Plain knobs edit the selected
+  pad. Held source-pad edits audition a refreshed voice; drum one-shots use the
+  new sound on their next hit. K2 is labeled Release in Gate mode.
+- **Movable first chop:** select P1 in CHOP and turn K3 to move its actual
+  playback start, including beyond five seconds. Shift + K3 moves in 10 ms
+  steps. Later cues keep their positions, and the first start is saved.
+- **Recording monitor level:** monitoring follows master gain and avoids adding
+  an input already present on Move's output bus a second time. Automatic capture
+  also avoids summing the same input twice.
+- **Recording in the editors:** Record arms, starts and stops recording without
+  leaving Trim or CHOP. Shift + Record disarms, or stops and loads a recording.
+  The destination remains locked to the pad/bank selected when recording starts.
+- **Pitch feedback:** when global tuning is nonzero, local pitch, global pitch
+  and their effective sum are displayed together. A pad reading zero can no
+  longer silently conceal a global -2.5 semitone offset.
+- **Update reload:** reopening TwinSampler refreshes the imported UI implementation
+  through Schwung's loader, avoiding stale editor code after an installation.
 
-- **Trim and CHOP waveform editors:** Down steps Main → Trim → CHOP; Up returns
-  CHOP → Trim → Main. K3/K4 edit edges, Shift+Jog zooms, and Jog press opens the
-  sample library from either editor.
-- **Live cue marking:** play the bank-colored P1, then tap empty pads to mark new
-  chops. Marked pads play their slices; Shift+pad re-marks cues and Erase+pad
-  empties a cue without shifting the later pads. Shift alone stays silent.
-- **Independent bank modes:** each bank remembers Trim or CHOP in saved projects.
-  Manual CHOP maps are separate from transient/random chop maps.
-- **Play both grids together:** the screen follows the last played drum or chop
-  after its note triggers. Both playback maps stay ready, cue LEDs remain tied to
-  their own bank, and knobs edit the displayed pad.
-- **Looper navigation inside editors:** Left/Right changes the looper pad view
-  whenever looper pad mode is active; otherwise it scrolls the waveform.
-- **Loading and startup improvements:** progress screens for project/sample
-  loading, saving, init and undo/redo; bounded restore work and no delayed
-  whole-session replay after READY.
-- **FX improvements:** 45 named effect presets, corrected stereo Lo-fi, DJFX
-  capture history after bypass, and matching master gain for source one-shots,
-  loops and ping-pong playback.
+## Pitch settings
 
-## Installation and updating
+The reported -2.5 semitone offset was a saved **global pitch** setting. Pad and
+global pitch default to zero. Global tuning affects all samples, including new
+imports and recordings; return it to **0.0** in affected projects. Bank and pad
+pitch settings remain independent, and saved project tuning is preserved.
+Loading a session restores all saved pitch values. Only replacing a bank's
+source or an individual pad's sample resets the corresponding bank/pad settings.
 
-Update **TwinSampler** through the **Schwung Module Store**. Its existing catalog
-entry reads this repository's `release.json`, which points to the v0.4.0 package.
+## Installation
 
-For manual installation, download **twinsampler-module.tar.gz** and extract its
-`twinsampler/` folder into `modules/overtake/`. A SHA-256 checksum is supplied as
-**twinsampler-module.tar.gz.sha256**. Reload TwinSampler after installing.
-
-Existing projects remain loadable. New saves include per-bank editor modes and
-manual cue maps. Cue positions follow pad order; the displayed marking playhead
-is estimated from slice playback, pitch, reverse and loop settings.
+Build with `bash scripts/build.sh`. Extract `dist/twinsampler-module.tar.gz` and
+copy its `twinsampler/` folder into `modules/overtake/` on Move, then fully exit
+and reopen the module. A matching `.sha256` file is generated with the archive.
 
 ## Verification
 
-- 30 automated checks covering startup/restore, waveform formats, DSP rendering,
-  live cue marking, editor navigation, sample browsing and cross-grid playback.
-- Alternating-grid checks verify note delivery precedes display following, with
-  no editor-setup/map-restore traffic between warmed-up hits.
-- Installable ARM64 DSP rebuilt from the wrapper source during release CI.
-
-The optional bulk host API is used when available, with an individual-write
-fallback for older Schwung hosts. The catalog's minimum host requirement remains
-0.3.6; the development/device checks used Schwung 1.7.3.
+- 42 automated checks for UI control routing, session restore, waveform editing,
+  saved pitch, source audition and native DSP/monitoring behavior.
+- 170 private-buffer ARM64 audio cases passed on Move, including JS-generated
+  control replay, pitch at 44.1/48 kHz, and P1 at 6 seconds with Trim/CHOP restore.
+- Release CI checks the extracted archive's ARM64 runtime requirements and replays
+  these audio probes under emulation before uploading the draft release.

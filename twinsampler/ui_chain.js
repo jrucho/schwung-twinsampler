@@ -308,6 +308,9 @@ const HELP_PAGES = [
     ['Sessions', 'Shift+Menu: load', 'Shift+Copy: save', 'INIT is locked', 'Autosaves on exit'],
     ['Sample / Chop Editor', 'Down: Trim / CHOP', 'K3/K4: edge cuts', 'CHOP starts with no cues', 'P1 lit, cues light'],
     ['Live Chop (CHOP)', 'Play P1 first', 'Empty pad: new cue', 'Shift+pad: re-mark', 'Erase+pad: empty cue'],
+    ['Editor performance', 'Shift+K6: bank pitch', 'K6: pad pitch', 'Rec: arm/start/stop', 'Shift+Rec: stop+load'],
+    ['Editor bank edits', 'Shift+K1/2: Atk/Rel', 'Shift+K5: mode', 'Shift+K6/7: pitch/gain', 'Shift+K8: loop'],
+    ['Trim audition', 'Hold Shift+Master', 'Touch K3: ON / OFF', 'Hold pad: turn K3/K4', 'Loops stay live'],
     ['Waveform navigation', 'Shift+Jog: zoom', 'L/R: loopers or scroll', 'Jog turn: select pad', 'Jog press: samples'],
     ['FX presets', 'Up: FX page', 'K1: named preset', 'K2-K8: edit sound', '* = custom settings'],
     ['Exit', 'Back: exit confirm', 'Menu Exit: confirm', 'YES exits fully', 'Autosave enabled']
@@ -656,6 +659,7 @@ const s = {
     shiftHeld: false,
     editorArrowHeld: {},
     volumeTouchHeld: false,
+    trimSoundTouchHeld: false,
     knobPage: 'A',
     editScope: 'P', /* P=pad slot, G=focused section+bank */
     previousView: 'main',
@@ -3434,7 +3438,7 @@ function adjustFocusedPadColor(delta) {
 function adjustPadAttack(delta) {
     const a = focusedAddr();
     const v = slotAt(a.sec, a.bank, a.slot).attack + delta * 5.0;
-    setSlotAttack(a.sec, a.bank, a.slot, v);
+    setSlotAttack(a.sec, a.bank, a.slot, v, editorActive());
     showStatus('P' + (a.slot + 1) + ' Atk ' + Math.round(slotAt(a.sec, a.bank, a.slot).attack), 80);
     s.dirty = true;
 }
@@ -3449,9 +3453,10 @@ function steppedDecayValue(current, delta) {
 function adjustPadDecay(delta) {
     const a = focusedAddr();
     const v = steppedDecayValue(slotAt(a.sec, a.bank, a.slot).decay, delta);
-    setSlotDecay(a.sec, a.bank, a.slot, v);
+    setSlotDecay(a.sec, a.bank, a.slot, v, editorActive());
     const next = slotAt(a.sec, a.bank, a.slot).decay;
-    showStatus('P' + (a.slot + 1) + ' Dec ' + (next >= DECAY_MAX_MS ? 'INF' : Math.round(next)), 80);
+    showStatus('P' + (a.slot + 1) + (slotAt(a.sec, a.bank, a.slot).modeGate ? ' Release ' : ' Decay ') +
+        (next >= DECAY_MAX_MS ? 'INF' : Math.round(next)), 80);
     s.dirty = true;
 }
 
@@ -3518,9 +3523,14 @@ function consumeBinaryKnobTurn(actionKey, delta) {
 function togglePadMode() {
     const a = focusedAddr();
     const cur = slotAt(a.sec, a.bank, a.slot).modeGate;
-    setSlotMode(a.sec, a.bank, a.slot, cur ? 0 : 1);
+    setSlotMode(a.sec, a.bank, a.slot, cur ? 0 : 1, editorActive());
     showStatus('P' + (a.slot + 1) + ' ' + (slotAt(a.sec, a.bank, a.slot).modeGate ? 'Gate' : 'Trig'), 80);
     s.dirty = true;
+}
+
+function pitchReadout(pitch, scope = 'P') {
+    return scope + ':' + pitch.toFixed(1) + ' G:' + s.globalPitch.toFixed(1) +
+        ' =' + (pitch + s.globalPitch).toFixed(1);
 }
 
 function adjustPadPitch(delta) {
@@ -3529,8 +3539,29 @@ function adjustPadPitch(delta) {
     setSlotPitch(a.sec, a.bank, a.slot, v);
     const refreshed = refreshActiveLoopVoiceForPitch(a.sec, a.bank, a.slot);
     if (!refreshed) retriggerHeldFocusedSourcePadForPitch();
-    showStatus('P' + (a.slot + 1) + ' Pitch ' + slotAt(a.sec, a.bank, a.slot).pitch.toFixed(1), 80);
+    const pitch = slotAt(a.sec, a.bank, a.slot).pitch;
+    showStatus(s.globalPitch !== 0 ? pitchReadout(pitch) : 'P' + (a.slot + 1) + ' Pitch ' + pitch.toFixed(1), 80);
     s.dirty = true;
+}
+
+// Core one-shot voices snapshot their sound parameters on note-on. Audition
+// editor changes through a fresh voice as well as saving the new pad settings.
+function refreshEditorSoundEdit(bankWide = false) {
+    if (!editorActive()) return;
+    const sec = s.focusedSection, bank = focusedBankIndex(sec), focused = focusedSlotIndex();
+    for (let slot = 0; slot < GRID_SIZE; slot++) {
+        if ((!bankWide || s.sections[sec].mode === MODE_SINGLE) && slot !== focused) continue;
+        const sl = slotAt(sec, bank, slot), voice = currentVoiceAt(sec, bank, slot);
+        if (!voice || sl.loop > 0 || s.sections[sec].mode === MODE_PER_SLOT) continue;
+        // Drum one-shots retain their old voice until its end. Their new sound
+        // settings apply on the next hit; overlapping a preview would double it.
+        const held = Object.values(s.activePadPress).some(p => p && p.sec === sec && p.bank === bank && p.slot === slot);
+        s.trimPreviewSerial++;
+        if (triggerPadOn(sec, bank, slot, voice.velocity, !!voice.routeBank, false,
+            'editor-sound:' + s.trimPreviewSerial) && !held && sl.modeGate) {
+            triggerPadOff(sec, bank, slot, !!voice.routeBank, false);
+        }
+    }
 }
 
 function adjustPadGain(delta) {
@@ -3867,7 +3898,8 @@ function adjustFocusedBankPitch(delta) {
     });
     const refreshed = refreshActiveLoopVoicesInBankForPitch(sec, bank);
     if (!refreshed) retriggerHeldFocusedSourcePadForPitch();
-    showStatus('Bank pitch ' + slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).pitch.toFixed(1), 80);
+    const pitch = slotAt(sec, bank, 0).pitch;
+    showStatus(s.globalPitch !== 0 ? pitchReadout(pitch, 'B') : 'Bank pitch ' + pitch.toFixed(1), 80);
 }
 
 function adjustRecordMaxSeconds(delta) {
@@ -4106,7 +4138,7 @@ function handleRecordButtonPress() {
         showStatus('REC busy...', 50);
         return;
     }
-    if (s.view !== 'main') {
+    if (s.view !== 'main' && !editorActive()) {
         showStatus('Close browser to record', 80);
         return;
     }
@@ -4287,7 +4319,8 @@ function drawMain() {
     } else {
         if (s.editScope === 'P') {
             const modeTxt = sl.modeGate ? 'Gate' : 'Trig';
-            print(0, 40, shortText('M:' + modeTxt + ' P:' + sl.pitch.toFixed(1) + ' G:' + sl.gain.toFixed(2) + ' Pan:' + sl.pan.toFixed(2), 21), 1);
+            print(0, 40, shortText(s.globalPitch !== 0 ? pitchReadout(sl.pitch)
+                : 'M:' + modeTxt + ' P:' + sl.pitch.toFixed(1) + ' G:' + sl.gain.toFixed(2) + ' Pan:' + sl.pan.toFixed(2), 21), 1);
         } else {
             print(0, 40, shortText('Pitch:' + s.globalPitch.toFixed(1) + ' Gain:' + s.globalGain.toFixed(2) + ' Vel:' + (s.velocitySens ? 'On' : 'Off'), 21), 1);
         }
@@ -4604,12 +4637,14 @@ function adjustEditorEdge(edge, delta) {
     if (!model.info || model.path !== t.path) { showStatus('Waiting for waveform', 70); return; }
     const bounds = editorBounds(t, model.info);
     const step = delta * (s.shiftHeld ? 10 : 1);
+    const silentTrimEdit = !s.startTrimSoundingEnabled && t.sl.loop <= 0;
     if (s.view === 'chop' && t.source) {
         const totalFrames = Math.max(1, Math.round(model.info.durationMs * 44.1));
         const cuts = moveSliceBoundary(bounds.cuts, t.slot, edge, step * 44.1, true, totalFrames);
         if (cuts.every((value, i) => value === bounds.cuts[i])) {
             showStatus('Edge limit: use Trim', 80); return;
         }
+        if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
         t.b.manualSliceStarts = cuts;
         t.b.manualChopTouched = 1;
         sendBankSliceMapToDsp(t.sec, t.bank, cuts);
@@ -4618,6 +4653,7 @@ function adjustEditorEdge(edge, delta) {
         markLedsDirty();
         markSessionChanged();
     } else {
+        if (silentTrimEdit) stopFocusedPadAudioForTrimEdit();
         // Source loop overlay and core trims share a +/-5000 ms limit. Keep
         // the UI truthful and never permit the audible region to invert.
         if (edge === 'start') {
@@ -4628,6 +4664,7 @@ function adjustEditorEdge(edge, delta) {
             setSlotEndTrim(t.sec, t.bank, t.slot, clampFloat(ms - bounds.baseEnd, -5000, 5000, 0), true);
         }
     }
+    if (!silentTrimEdit) retriggerFocusedPadForStartTrim();
     s.dirty = true;
 }
 
@@ -4665,6 +4702,10 @@ function drawSampleEditor() {
     }
     const footer = s.statusTicks > 0
         ? s.statusText
+        : (s.recordArmed || s.recording || isRecordTransitionPending())
+            ? (s.recordState === 'armed' ? 'ARM ' : 'REC ') + recordTargetLabel(s.recordState === 'armed'
+                ? captureFocusedRecordTarget() : s.recTargetLocked || captureFocusedRecordTarget())
+        : s.globalPitch !== 0 ? pitchReadout(t.sl.pitch)
         : (s.view === 'chop'
             ? (s.lazyChopActive ? 'PLAY ' + (lazyChopPlayheadMs() / 1000).toFixed(3) + 's' : 'P1 play; empty=cue')
             : 'K3/4 edges Sh+Jog zoom');
@@ -5663,7 +5704,15 @@ function handleMainButtonPress() {
 function knobTouchActionLabel(note) {
     const idx = clampInt(note, 0, 7, 0);
     if (editorActive()) {
-        return ['Pad attack', 'Pad decay', 'Start edge', 'End edge', 'Trigger / Gate', 'Pad pitch', 'Pad gain', 'Pad loop'][idx];
+        if (idx === 5 && s.globalPitch !== 0) {
+            const a = focusedAddr();
+            return pitchReadout(slotAt(a.sec, a.bank, s.shiftHeld ? 0 : a.slot).pitch, s.shiftHeld ? 'B' : 'P');
+        }
+        if (s.shiftHeld) return ['Bank attack', 'Bank decay/release', 'Start edge x10', 'End edge x10',
+            'Bank Trigger/Gate', 'Bank pitch', 'Bank gain', 'Bank loop'][idx];
+        const a = focusedAddr();
+        return ['Pad attack', slotAt(a.sec, a.bank, a.slot).modeGate ? 'Pad release' : 'Pad decay',
+            'Start edge', 'End edge', 'Trigger / Gate', 'Pad pitch', 'Pad gain', 'Pad loop'][idx];
     }
 
     if (s.view === 'browser') {
@@ -5709,7 +5758,8 @@ function knobTouchActionLabel(note) {
         if (idx === 2) return 'All start trim';
         if (idx === 3) return 'All end trim';
         if (idx === 4) return 'All mode';
-        if (idx === 5) return s.sections[s.focusedSection].mode === MODE_SINGLE ? 'Bank pitch' : 'Global pitch';
+        if (idx === 5) return s.globalPitch !== 0
+            ? pitchReadout(slotAt(s.focusedSection, focusedBankIndex(s.focusedSection), 0).pitch, 'B') : 'Bank pitch';
         if (idx === 6) return 'All gain';
         if (idx === 7) return 'All loop';
     }
@@ -5720,7 +5770,10 @@ function knobTouchActionLabel(note) {
         if (idx === 2) return 'Pad start trim';
         if (idx === 3) return 'Pad end trim';
         if (idx === 4) return 'Pad mode';
-        if (idx === 5) return 'Pad pitch';
+        if (idx === 5) {
+            const a = focusedAddr();
+            return s.globalPitch !== 0 ? pitchReadout(slotAt(a.sec, a.bank, a.slot).pitch) : 'Pad pitch';
+        }
         if (idx === 6) return 'Pad gain';
         if (idx === 7) return 'Pad loop';
     } else {
@@ -5761,7 +5814,8 @@ function handleKnobTouch(note, velocity) {
     }
 
     s.knobPage = note < 4 ? 'A' : 'B';
-    showStatus('K' + (note + 1) + ': ' + knobTouchActionLabel(note), 60);
+    const label = knobTouchActionLabel(note);
+    showStatus(/^[PB]:/.test(label) ? label : 'K' + (note + 1) + ': ' + label, 60);
     s.dirty = true;
     return true;
 }
@@ -7036,13 +7090,24 @@ function handleParamKnob(cc, delta) {
             finally { endHistoryTransaction(); }
             return;
         }
-        // The other six knobs retain the familiar per-pad controls here.
-        if (cc === MoveKnob1) adjustPadAttack(delta);
-        else if (cc === MoveKnob2) adjustPadDecay(delta);
-        else if (cc === MoveKnob5 && consumeBinaryKnobTurn('editor-mode', delta)) togglePadMode();
-        else if (cc === MoveKnob6) adjustPadPitch(delta);
-        else if (cc === MoveKnob7) adjustPadGain(delta);
-        else if (cc === MoveKnob8) adjustPadLoop(delta);
+        if (cc < MoveKnob1 || cc > MoveKnob8) return;
+        ensureFocusedEditTargetForKnobs();
+        const bankWide = s.shiftHeld;
+        if (cc === MoveKnob1) { if (bankWide) adjustAllAttack(delta); else adjustPadAttack(delta); }
+        else if (cc === MoveKnob2) { if (bankWide) adjustAllDecay(delta); else adjustPadDecay(delta); }
+        else if (cc === MoveKnob5) {
+            if (!consumeBinaryKnobTurn('editor-mode', delta)) return;
+            if (bankWide) toggleAllMode(); else togglePadMode();
+        }
+        else if (cc === MoveKnob6) {
+            if (bankWide) adjustFocusedBankPitch(delta);
+            else adjustPadPitch(delta);
+        }
+        else if (cc === MoveKnob7) { if (bankWide) adjustAllGain(delta); else adjustPadGain(delta); }
+        else if (cc === MoveKnob8) { if (bankWide) adjustAllLoop(delta); else adjustPadLoop(delta); }
+        if (cc !== MoveKnob8 && !(cc === MoveKnob6 && s.sections[s.focusedSection].mode === MODE_SINGLE)) {
+            refreshEditorSoundEdit(bankWide);
+        }
         s.dirty = true;
         return;
     }
@@ -7275,8 +7340,15 @@ function onMidiMessageInternal(data) {
     const b2 = clampInt(data[2], 0, 127, 0);
 
     if ((status === 0x90 || status === 0x80) && b1 === MoveMasterTouch) {
-        s.volumeTouchHeld = (status === 0x90 && b2 > 0) ? true : false;
+        s.volumeTouchHeld = status === 0x90 && b2 > 63;
         return;
+    }
+    if ((status === 0x90 || status === 0x80) && b1 === 2) {
+        // Capacitive releases may be Note On with velocity 0..63. Toggle
+        // only on a fresh K3 touch, not repeats or release messages.
+        const wasHeld = s.trimSoundTouchHeld;
+        s.trimSoundTouchHeld = status === 0x90 && b2 > 63;
+        if (!s.trimSoundTouchHeld || (wasHeld && s.shiftHeld && s.volumeTouchHeld)) return;
     }
 
     beginHistoryTransaction();
@@ -7624,6 +7696,8 @@ function beginBoot() {
     s.ledsDirty = true;
     s.activePadPress = {};
     s.binaryKnobState = {};
+    s.trimSoundTouchHeld = false;
+    s.volumeTouchHeld = false;
     s.padPressFlash = {};
     s.shiftHeld = false;
     s.shiftPressTick = -1;

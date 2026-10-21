@@ -118,7 +118,8 @@ function makeUi(bulk, ready = '1', withSession = true) {
             adjustEditorEdge, sampleWave, beginLoading, onMidiMessageExternal,
             onMidiMessageInternal, tickSampleEditor, drawSampleEditor,
             setSlotEndTrim, saveSessionToPath, chopCuePadLit, applyParsedSession,
-            rebuildLedQueue };
+            rebuildLedQueue, knobTouchActionLabel, pollRecordingState,
+            setSourcePath, setSlotPath, assignRecordedPathToTarget };
     `, context);
     if (withSession) {
         const payload = context.testUi.makeInitSessionPayload();
@@ -203,6 +204,21 @@ test('background action prefers official overtake suspend', () => {
     assert.deepEqual(calls, ['suspend']);
 });
 
+test('reopening the wrapper refreshes a cached implementation before capturing its handlers', () => {
+    const calls = [];
+    const context = vm.createContext({ moveConstants: {}, console,
+        twinsampler_chain_ui: { __moduleId: 'twinsampler_overtake', init: () => calls.push('old') } });
+    context.shadow_load_ui_module = path => {
+        calls.push(path);
+        context.twinsampler_chain_ui = { __moduleId: 'twinsampler_overtake', init: () => calls.push('new') };
+        return true;
+    };
+    const wrapper = readFileSync(new URL('../twinsampler/ui.js', import.meta.url), 'utf8');
+    vm.runInContext(wrapper.replace(/^import .*;\r?$/gm, ''), context);
+    context.init();
+    assert.deepEqual(calls, ['/data/UserData/schwung/modules/overtake/twinsampler/ui_chain.js', 'new']);
+});
+
 test('READY has no delayed full-session or focused-pad replay', () => {
     const app = makeUi(true);
     boot(app);
@@ -250,8 +266,8 @@ test('invalid project is reported without replacing current session', () => {
     assert.equal(JSON.stringify(app.ui.serializeSession()), saved);
 });
 
-function attachWaveFile(app) {
-    const data = Buffer.alloc(44 + 48000 * 4);
+function attachWaveFile(app, seconds = 1) {
+    const data = Buffer.alloc(44 + 48000 * seconds * 4);
     data.write('RIFF'); data.writeUInt32LE(data.length - 8, 4); data.write('WAVEfmt ', 8);
     data.writeUInt32LE(16, 16); data.writeUInt16LE(1, 20); data.writeUInt16LE(2, 22);
     data.writeUInt32LE(48000, 24); data.writeUInt32LE(192000, 28);
@@ -786,6 +802,293 @@ test('legacy CHOP maps seeded from random do not overwrite the independent map',
     assert.equal(app.ui.s.sections[0].banks[1].manualSliceStarts.length, 17,
         'a manually edited legacy CHOP map is preserved');
     assert.equal(app.ui.s.sections[0].banks[1].manualChopTouched, 1);
+});
+
+test('editor Shift+Pitch edits only the focused bank without changing global tuning', () => {
+    for (const view of ['trim', 'chop']) {
+        const app = makeUi(true);
+        boot(app); attachWaveFile(app);
+        app.ui.s.selectedSlice = 2;
+        app.ui.s.focusedSection = 0;
+        app.ui.s.globalPitch = 0;
+        app.ui.openSampleEditor(view);
+        const before = app.ui.s.sections.map(section => section.banks.map(bank => bank.slots.map(slot => slot.pitch)));
+        const start = app.writes.length;
+        app.ui.onMidiMessageInternal([0xB0, 49, 127]);
+        assert.equal(app.ui.knobTouchActionLabel(5), 'Bank pitch');
+        app.ui.onMidiMessageInternal([0xB0, 76, 1]);
+        for (let sec = 0; sec < 2; sec++) for (let bank = 0; bank < 8; bank++) {
+            app.ui.s.sections[sec].banks[bank].slots.forEach((slot, i) => {
+                assert.equal(slot.pitch, before[sec][bank][i] + (sec === 0 && bank === 0 ? 0.5 : 0));
+            });
+        }
+        assert.equal(app.ui.s.globalPitch, 0);
+        assert.equal(app.writes.slice(start).some(([key]) => key === 'global_pitch'), false);
+        app.ui.onMidiMessageInternal([0xB0, 49, 0]);
+        assert.equal(app.ui.knobTouchActionLabel(5), 'Pad pitch');
+        app.ui.onMidiMessageInternal([0xB0, 76, 1]);
+        assert.equal(app.ui.s.sections[0].banks[0].slots[2].pitch, before[0][0][2] + 1);
+        assert.equal(app.ui.s.sections[0].banks[0].slots[3].pitch, before[0][0][3] + 0.5);
+        assert.equal(app.ui.s.view, view);
+    }
+});
+
+test('Record arms, disarms, starts and stops+loads in both editors with a locked target', () => {
+    for (const view of ['trim', 'chop']) for (const cc of [86, 118]) {
+        const app = makeUi(true);
+        boot(app); attachWaveFile(app);
+        let recording = '0';
+        let recordedPath = '';
+        app.context.host_module_get_param = key => key === '__ready' ? '1'
+            : key === 'recording' ? recording : key === 'last_recorded_path' ? recordedPath : undefined;
+        app.ui.s.sections[0].currentBank = 1;
+        app.ui.s.selectedSlice = 3;
+        app.ui.s.focusedSection = 0;
+        app.ui.openSampleEditor(view);
+        const rec = () => app.ui.onMidiMessageInternal([0xB0, cc, 127]);
+        rec();
+        assert.equal(app.ui.s.recordState, 'armed');
+        app.ui.onMidiMessageInternal([0xB0, 49, 127]);
+        rec();
+        assert.equal(app.ui.s.recordState, 'idle', 'Shift+Record disarms');
+        app.ui.onMidiMessageInternal([0xB0, 49, 0]);
+        const start = app.writes.length;
+        rec(); rec();
+        assert.equal(app.ui.s.recordState, 'starting');
+        assert.ok(app.writes.slice(start).some(([key, value]) => key === 'record_target' && value === '0:1:3'));
+        assert.ok(app.writes.slice(start).some(([key, value]) => key === 'record_start' && value === '1'));
+        recording = '1'; app.ui.pollRecordingState();
+        assert.equal(app.ui.s.recordState, 'recording');
+        app.ui.s.sections[0].currentBank = 2;
+        app.ui.s.selectedSlice = 4;
+        app.ui.onMidiMessageInternal([0xB0, 49, 127]);
+        rec();
+        assert.equal(app.ui.s.recordState, 'stopping');
+        assert.ok(app.writes.slice(start).some(([key, value]) => key === 'record_stop' && value === '1'));
+        recordedPath = '/Samples/new-recording.wav';
+        recording = '0'; app.ui.pollRecordingState();
+        assert.equal(app.ui.s.recordState, 'idle');
+        assert.equal(app.ui.s.sections[0].banks[1].sourcePath, recordedPath);
+        assert.notEqual(app.ui.s.sections[0].banks[2].sourcePath, recordedPath);
+        assert.equal(app.ui.s.view, view, 'recording does not leave the editor');
+    }
+});
+
+test('fresh imports and recordings use zero pad pitch while saved global tuning is explicit', () => {
+    const app = makeUi(true, '1', false);
+    boot(app);
+    assert.equal(app.ui.s.globalPitch, 0);
+    assert.ok(app.writes.some(([key, value]) => key === 'global_pitch' && Number(value) === 0));
+    app.ui.s.sections[0].banks[0].slots[0].pitch = -2.5;
+    app.ui.setSourcePath(0, 0, '/Samples/imported-source.wav', true);
+    assert.ok(app.ui.s.sections[0].banks[0].slots.every(slot => slot.pitch === 0));
+    app.ui.s.sections[1].banks[0].slots[0].pitch = -2.5;
+    app.ui.setSlotPath(1, 0, 0, '/Samples/imported-pad.wav', true);
+    assert.equal(app.ui.s.sections[1].banks[0].slots[0].pitch, 0);
+    for (const sec of [0, 1]) {
+        app.ui.s.sections[sec].banks[0].slots[0].pitch = -2.5;
+        app.ui.assignRecordedPathToTarget('/Samples/recorded.wav', { sec, bank: 0, slot: 0 });
+        assert.equal(app.ui.s.sections[sec].banks[0].slots[0].pitch, 0);
+    }
+    assert.equal(app.ui.s.globalPitch, 0);
+    const saved = app.ui.serializeSession();
+    saved.globalPitch = -2.5;
+    app.ui.applyParsedSession(saved, true, 'intentional tuning');
+    assert.equal(app.ui.s.globalPitch, -2.5, 'project tuning is not silently discarded on restore');
+});
+
+test('saved session restores pitch exactly; replacing samples resets only their destinations', () => {
+    const app = makeUi(true);
+    boot(app);
+    app.ui.s.view = 'trim';
+    app.ui.s.shiftHeld = true;
+    app.ui.handleParamKnob(76, 1);
+    app.ui.s.shiftHeld = false;
+    app.ui.handleParamKnob(76, -1);
+    const pitches = ui => JSON.parse(JSON.stringify(ui.s.sections.map(section =>
+        section.banks.map(bank => bank.slots.map(slot => slot.pitch)))));
+    const savedPitches = pitches(app.ui);
+    const file = '/test/pitched-project.json';
+    app.ui.saveSessionToPath(file, 'PITCHTEST', false, false);
+    while (app.ui.s.operationActive) app.ui.tick();
+    assert.ok(app.files.has(file));
+
+    const loaded = makeUi(true, '1', false);
+    boot(loaded);
+    loaded.files.set(file, app.files.get(file));
+    assert.equal(loaded.ui.startSessionLoad(file), true);
+    let ticks = 0;
+    while (loaded.ui.s.operationActive && ticks++ < 3000) loaded.ui.tick();
+    assert.equal(loaded.ui.s.operationActive, false);
+    assert.deepEqual(pitches(loaded.ui), savedPitches, 'all 256 saved pad pitches survive a real project load');
+
+    loaded.ui.setSourcePath(0, 1, '/Samples/replacement-bank.wav', true);
+    const expected = structuredClone(savedPitches);
+    expected[0][1].fill(0);
+    assert.deepEqual(pitches(loaded.ui), expected, 'only the replaced source bank resets');
+    loaded.ui.setSlotPath(1, 3, 5, '/Samples/replacement-pad.wav', true);
+    expected[1][3][5] = 0;
+    assert.deepEqual(pitches(loaded.ui), expected, 'only the replaced sample pad resets');
+});
+
+test('zero pad pitch cannot hide a saved global offset in pitch feedback', () => {
+    const app = makeUi(true, '1', false);
+    boot(app); attachWaveFile(app);
+    app.ui.s.globalPitch = -2.5;
+    app.ui.s.sections[0].banks[0].slots[0].pitch = 0;
+    for (const view of ['main', 'trim', 'chop']) {
+        app.ui.s.view = view;
+        app.ui.s.editScope = 'P';
+        app.ui.s.shiftHeld = false;
+        app.ui.onMidiMessageInternal([0x90, 5, 127]);
+        assert.equal(app.ui.s.statusText, 'P:0.0 G:-2.5 =-2.5');
+        assert.ok(app.ui.s.statusText.length <= 21, 'the effective pitch must fit on the display');
+        app.ui.s.shiftHeld = true;
+        app.ui.onMidiMessageInternal([0x90, 5, 127]);
+        assert.equal(app.ui.s.statusText, 'B:0.0 G:-2.5 =-2.5');
+    }
+    app.ui.s.shiftHeld = false;
+    app.ui.handleParamKnob(76, 1);
+    assert.equal(app.ui.s.statusText, 'P:0.5 G:-2.5 =-2.0');
+    assert.equal(app.ui.s.globalPitch, -2.5, 'displaying the offset must not change project tuning');
+});
+
+test('Shift editor sound knobs affect only the displayed bank', () => {
+    for (const view of ['trim', 'chop']) {
+        const app = makeUi(true); boot(app); attachWaveFile(app);
+        app.ui.s.focusedSection = 0; app.ui.s.selectedSlice = 0;
+        app.ui.openSampleEditor(view); app.ui.tickSampleEditor();
+        const bank = app.ui.s.sections[0].banks[0];
+        for (const slot of bank.slots) Object.assign(slot, { attack: 100, decay: 1000, gain: 1, modeGate: 1, loop: 0 });
+        const other = JSON.stringify([app.ui.s.sections[0].banks.slice(1), app.ui.s.sections[1].banks]);
+        app.ui.s.shiftHeld = true;
+        for (const [cc, delta] of [[71, 1], [72, 1], [75, 10], [77, 1], [78, 1]])
+            app.ui.handleParamKnob(cc, delta);
+        for (const slot of bank.slots) {
+            assert.equal(slot.attack, 105); assert.equal(slot.decay, 1020);
+            assert.equal(slot.gain, 1.05); assert.equal(slot.modeGate, 0); assert.equal(slot.loop, 1);
+        }
+        assert.equal(JSON.stringify([app.ui.s.sections[0].banks.slice(1), app.ui.s.sections[1].banks]), other);
+        assert.equal(app.ui.knobTouchActionLabel(0), 'Bank attack');
+        assert.equal(app.ui.knobTouchActionLabel(6), 'Bank gain');
+    }
+});
+
+test('editor sound parameters use acknowledged writes after realtime pad following', () => {
+    for (const view of ['trim', 'chop']) {
+        const app = makeUi(true); boot(app); attachWaveFile(app);
+        for (const sec of [0, 1]) app.ui.s.sections[sec].banks[0].slots[0].loop = 0;
+        app.ui.openSampleEditor(view); app.ui.tickSampleEditor();
+        app.ui.onMidiMessageInternal([0x90, 72, 127]);
+        app.ui.onMidiMessageInternal([0x90, 68, 127]);
+        const async = [];
+        const set = app.context.host_module_set_param;
+        app.context.host_module_set_param = (key, value) => { async.push(key); return set(key, value); };
+        for (const [cc, delta] of [[71, 1], [72, 1], [75, 10], [76, 1], [77, 1]])
+            app.ui.handleParamKnob(cc, delta);
+        assert.deepEqual(async.filter(key => /^(slot_|slice_)/.test(key)), [],
+            'editor sound settings must not depend on a lossy nonblocking parameter queue');
+    }
+});
+
+test('held source sound edits audition the changed voice in Trim and CHOP', () => {
+    for (const view of ['trim', 'chop']) {
+        const app = makeUi(true); boot(app); attachWaveFile(app);
+        app.ui.s.focusedSection = 0; app.ui.s.selectedSlice = 0;
+        Object.assign(app.ui.s.sections[0].banks[0].slots[0], { loop: 0, modeGate: 1 });
+        app.ui.openSampleEditor(view); app.ui.tickSampleEditor();
+        app.ui.onMidiMessageInternal([0x90, 68, 127]);
+        for (const cc of [71, 72, 77]) {
+            app.advanceMs(100);
+            const before = app.writes.filter(([key]) => key === 'pad_note_on').length;
+            app.ui.onMidiMessageInternal([0xB0, cc, 1]);
+            assert.equal(app.writes.filter(([key]) => key === 'pad_note_on').length, before + 1,
+                'a held source voice must audition the new envelope/gain');
+        }
+        assert.equal(app.ui.s.view, view);
+    }
+});
+
+test('trim sound gesture toggles once per touch and handles capacitive releases', () => {
+    for (const view of ['main', 'trim', 'chop']) {
+        const app = makeUi(true); boot(app); attachWaveFile(app);
+        if (view !== 'main') app.ui.openSampleEditor(view);
+        const midi = data => app.ui.onMidiMessageInternal(data);
+        midi([0xB0, 49, 127]); // Shift
+        midi([0x90, 8, 127]);  // Master touch
+        midi([0x90, 2, 127]);  // K3 touch
+        assert.equal(app.ui.s.startTrimSoundingEnabled, false);
+        assert.equal(app.ui.s.statusText, 'Start trim sound OFF');
+        midi([0x90, 2, 127]);  // Repeated held-touch message must not flip back.
+        assert.equal(app.ui.s.startTrimSoundingEnabled, false);
+        midi([0x90, 2, 63]);   // Move may encode capacitive release as Note On 0..63.
+        assert.equal(app.ui.s.startTrimSoundingEnabled, false);
+        midi([0x90, 2, 127]);
+        assert.equal(app.ui.s.startTrimSoundingEnabled, true);
+        assert.equal(app.ui.s.statusText, 'Start trim sound ON');
+        midi([0x80, 2, 0]);    // Conventional Note Off release must work too.
+        midi([0x90, 2, 127]);
+        assert.equal(app.ui.s.startTrimSoundingEnabled, false);
+        midi([0x80, 2, 0]);
+        midi([0x90, 8, 63]);
+        assert.equal(app.ui.s.volumeTouchHeld, false, 'a nonzero capacitive release releases Master');
+        midi([0x90, 2, 127]);
+        assert.equal(app.ui.s.startTrimSoundingEnabled, false, 'Shift + K3 without Master touch does not toggle');
+        assert.equal(app.ui.s.view, view);
+    }
+});
+
+test('trim audition respects OFF and resumes ON while the pad remains held', () => {
+    for (const [view, sec] of [['main', 0], ['trim', 0], ['chop', 0], ['trim', 1]]) {
+        const app = makeUi(true); boot(app); attachWaveFile(app);
+        app.ui.s.focusedSection = sec; app.ui.s.selectedSlice = sec * 16;
+        const bank = app.ui.s.sections[sec].banks[0], slot = bank.slots[0];
+        Object.assign(slot, { loop: 0, modeGate: 1, startTrim: 0, endTrim: 0 });
+        if (view !== 'main') { app.ui.openSampleEditor(view); app.ui.tickSampleEditor(); }
+        const note = sec === 0 ? 68 : 72;
+        const count = () => app.writes.filter(([key]) => key === 'pad_note_on').length;
+        app.ui.onMidiMessageInternal([0x90, note, 127]);
+        app.advanceMs(100);
+        const onBefore = count();
+        app.ui.handleParamKnob(73, 1);
+        assert.equal(count(), onBefore + 1, 'ON auditions the held pad when its start moves');
+        app.ui.onMidiMessageInternal([0x80, note, 0]); app.advanceMs(100);
+        app.ui.onMidiMessageInternal([0x90, note, 127]); app.advanceMs(100);
+        app.ui.s.startTrimSoundingEnabled = false;
+        const before = app.writes.length, notes = count();
+        const startBefore = view === 'chop' ? bank.manualSliceStarts[0] : slot.startTrim;
+        app.ui.handleParamKnob(73, 1);
+        app.ui.handleParamKnob(74, -1);
+        assert.equal(count(), notes, 'OFF never starts a new trim audition');
+        assert.ok(app.writes.slice(before).some(([key]) => key === 'pad_note_off'), 'OFF releases the old audition');
+        assert.notEqual(view === 'chop' ? bank.manualSliceStarts[0] : slot.startTrim, startBefore,
+            'silent editing still changes the trim/cue');
+        app.ui.s.startTrimSoundingEnabled = true;
+        app.advanceMs(100);
+        app.ui.handleParamKnob(73, 1);
+        assert.equal(count(), notes + 1, 'ON works again without releasing/repressing the held pad');
+        assert.equal(app.ui.s.view, view);
+    }
+});
+
+test('P1 CHOP start moves past five seconds, preserves later cues and is saved', () => {
+    const app = makeUi(true); boot(app); attachWaveFile(app, 8);
+    app.ui.s.focusedSection = 0; app.ui.s.selectedSlice = 0;
+    app.ui.openSampleEditor('chop'); app.ui.tickSampleEditor();
+    const bank = app.ui.s.sections[0].banks[0];
+    const random = bank.sliceStarts.slice();
+    app.ui.handleParamKnob(73, 6000);
+    assert.equal(bank.manualSliceStarts[0], 264600);
+    assert.equal(bank.slots[0].startTrim, 0, 'moving the CHOP start does not consume the pad trim range');
+    bank.manualSliceStarts = [264600, ...Array(4).fill(308700), ...Array(12).fill(352800)];
+    const later = bank.manualSliceStarts.slice(1);
+    app.ui.handleParamKnob(73, 5000);
+    assert.equal(bank.manualSliceStarts[0], 308699, 'the start stops before the next cue');
+    assert.deepEqual(bank.manualSliceStarts.slice(1), later);
+    assert.deepEqual(bank.sliceStarts, random);
+    const saved = app.ui.serializeSession();
+    app.ui.applyParsedSession(saved, true, 'first-chop start');
+    assert.equal(app.ui.s.sections[0].banks[0].manualSliceStarts[0], 308699);
 });
 
 test('explicit save has a loading screen and writes only after its first frames', () => {

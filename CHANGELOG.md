@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.4.1
+
+### Fixed
+- Trim/CHOP start/end edits honor the trim-sound toggle, matching Main. Turning
+  auditioning back on works while the same pad is still held, including PAD mode.
+  Shift + master-volume touch + K3 touch toggles once per fresh touch; repeated
+  touch messages and capacitive releases no longer flip it back or leave Master held.
+- P1's manual CHOP start now affects actual playback, not just the waveform.
+  The core's pinned first boundary is translated into a playback offset;
+  cached data-partition source windows support starts beyond its five-second
+  trim limit while project cues remain in original sample coordinates.
+- Held source-pad envelope and gain edits audition a refreshed voice. Drum
+  trigger voices use edited sound parameters on the next hit without an
+  overlapping preview. Gate-mode K2 is labeled Release.
+- Editor sound changes synchronize the DSP edit target and use acknowledged
+  writes so attack/decay/mode changes are not lost in the nonblocking queue.
+- Shift + K1/K2/K5/K7/K8 performs bank-wide attack, decay/release, mode, gain
+  and loop edits in Trim/CHOP; Shift + K3/K4 keeps coarse edge editing.
+- Record monitoring respects master gain and suppresses an input already
+  audible through Move's bus. Automatic capture avoids recording that copy twice.
+- Refresh the imported UI implementation on module reopen through Schwung's
+  cache-busting loader so updated files do not leave the prior editor running.
+- Shift + K6 adjusts the focused bank's pitch in Trim and CHOP, matching Main.
+  Plain K6 continues to adjust only the selected pad.
+- Record can arm, start, stop, and stop+load from Trim and CHOP.
+- Pitch touch labels identify bank pitch consistently in both section modes.
+- A zero pad pitch no longer conceals global transposition: nonzero global pitch
+  appears alongside local and effective pitch in the Main/editor readouts and
+  pitch-knob feedback. Recording state also remains visible in editor footers.
+- Release builds use Ubuntu 22.04's Move-compatible cross libraries, reject DSP
+  requirements above GLIBC 2.35, and render pad audio from the exact archive in
+  ARM64 emulation before upload. Rebuilding with the former Ubuntu 24.04 cross
+  libraries reproduced `GLIBC_2.38 not found` on Move.
+
+### Notes
+- The reported default -2.5 semitone offset was traced to saved global pitch,
+  not recording or sample-rate conversion. Fresh pad/global defaults are zero;
+  intentional project tuning remains preserved. Reset global pitch to 0.0 in
+  affected sessions to remove the offset from future playback.
+
 ## 0.4.0
 
 ### Fixed

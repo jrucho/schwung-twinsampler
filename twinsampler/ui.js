@@ -1,6 +1,15 @@
 import * as moveConstants from '/data/UserData/schwung/shared/constants.mjs';
 import './ui_chain.js';
 
+// Schwung cache-busts this entry module, but static imports can survive a
+// module exit/reopen. Reload the implementation through the same host loader
+// so an installed update does not keep running the previous ui_chain.js.
+if (typeof shadow_load_ui_module === 'function') {
+    if (!shadow_load_ui_module('/data/UserData/schwung/modules/overtake/twinsampler/ui_chain.js')) {
+        console.log('TwinSampler implementation reload failed');
+    }
+}
+
 const MoveBack = Number.isFinite(moveConstants.MoveBack) ? moveConstants.MoveBack : 51;
 const MoveShift = Number.isFinite(moveConstants.MoveShift) ? moveConstants.MoveShift : 49;
 const impl = (globalThis && globalThis.twinsampler_chain_ui && globalThis.twinsampler_chain_ui.__moduleId === 'twinsampler_overtake')

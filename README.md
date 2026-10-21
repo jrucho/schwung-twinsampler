@@ -13,9 +13,9 @@ Twin Sampler is a high-performance "overtake" sampler module designed specifical
 ## Installation
 
 Install or update **TwinSampler** from the **Schwung Module Store**. The existing
-store entry resolves version **0.4.0** through this repository's `release.json`.
+store entry resolves the published version through this repository's `release.json`.
 For manual installation, download `twinsampler-module.tar.gz` from
-[the v0.4.0 release](https://github.com/jrucho/schwung-twinsampler/releases/tag/v0.4.0)
+[the latest release](https://github.com/jrucho/schwung-twinsampler/releases/latest)
 and extract it to obtain the `twinsampler` folder.
 
 Place the `twinsampler` folder in the following directory on your Ableton Move:
@@ -29,7 +29,38 @@ Place the `twinsampler` folder in the following directory on your Ableton Move:
 
 ---
 
-## v0.4.0: editors, live chopping and independent grid performance
+## v0.4.1: editor performance controls
+
+Shift + K6 pitches all pads in the focused bank from Main, Trim and CHOP.
+Without Shift, K6 in either editor still pitches only the selected pad.
+Shift + K1/K2/K5/K7/K8 also edits the focused bank's attack, decay/release,
+Trigger/Gate, gain and loop. Shift + K3/K4 retains coarse edge adjustment.
+Held source-pad edits audition a refreshed voice. Drum one-shot parameters
+take effect on the next hit; Gate-mode K2 controls the tail after pad release.
+Record works in both editors: press once to arm, again to start, and again to
+stop. Shift + Record disarms an armed recording or stops and loads a running one.
+Monitoring follows master gain and avoids doubling an input already on Move's bus.
+
+To toggle trim auditioning, **hold Shift, touch the master-volume knob, then
+touch K3 once**. The screen shows `Start trim sound ON` or `OFF`. Release the
+gesture, hold a pad and turn K3/K4: ON auditions the trim; OFF edits without
+starting a new audition. Running loops retain their live-edit behavior.
+
+In CHOP, select P1 and turn K3 to move the first chop's actual start through the
+sample, stopping before the next existing cue. Shift + K3 uses 10 ms steps.
+Starts beyond five seconds are supported and saved with the manual map.
+
+New samples and recordings start with pad pitch at zero. Global pitch is a
+separate, saved project setting that affects every bank, including new imports
+and recordings. If everything sounds flat, check Global pitch on Main in Bank
+edit scope and return it to 0.0; changing bank pitch does not reset global pitch.
+Loading a saved session restores its pitches exactly. Replacing a source sample
+resets only that bank's pad settings; replacing a per-pad sample resets only
+that pad's settings.
+When global pitch is nonzero, pitch feedback shows pad/bank pitch, global pitch
+and the effective result, e.g. `P:0.0 G:-2.5 =-2.5`.
+
+### v0.4.0: editors, live chopping and independent grid performance
 
 Version 0.4.0 uses Schwung's optional bulk parameter API
 (verified in upstream **v1.7.3**) to reduce startup communication overhead.
@@ -64,6 +95,13 @@ the data partition, not the small system partition.
 | Switch bank | Restore that bank's saved Trim or CHOP mode |
 | Capture | Randomize the focused source bank's transient chops |
 | Shift + K3 / K4 | Coarse 10 ms edge adjustment |
+| Shift + master-volume touch + K3 touch | Toggle trim audition sound ON/OFF |
+| Shift + K1 / K2 | Bank attack / decay or Gate release |
+| Shift + K5 | Bank Trigger/Gate mode |
+| Shift + K6 | Pitch the focused bank; plain K6 pitches the selected pad |
+| Shift + K7 / K8 | Bank gain / loop mode |
+| Record | Arm / start / stop recording without leaving Trim or CHOP |
+| Shift + Record | Disarm, or stop and load the recording |
 | Shift + Jog | Zoom 1x–128x around the selected start |
 | Left / Right | Change the looper pad view when looper pad mode is active; otherwise scroll the zoomed waveform |
 | Press Jog | Open the sample browser for the selected pad/bank, just like main |
@@ -126,9 +164,12 @@ Build an installable archive with:
 bash scripts/build.sh
 ```
 
-The archive is `dist/twinsampler-module.tar.gz`. An ARM64 Linux compiler
-(`aarch64-linux-gnu-gcc`) rebuilds the DSP wrapper when available. Release CI
-installs that compiler explicitly. See [DEVELOPMENT_REVIEW.md](DEVELOPMENT_REVIEW.md)
+The archive is `dist/twinsampler-module.tar.gz`, with a matching `.sha256` file.
+An ARM64 Linux compiler
+(`aarch64-linux-gnu-gcc`), ARM64 binutils and Node.js are required to rebuild and
+verify the DSP wrapper. Runtime requirements above Move's GLIBC 2.35 are rejected.
+Release CI uses Ubuntu 22.04 and renders audio from the extracted archive under
+ARM64 emulation before upload. See [DEVELOPMENT_REVIEW.md](DEVELOPMENT_REVIEW.md)
 for measurements, compatibility findings and remaining work.
 Changes are recorded in [CHANGELOG.md](CHANGELOG.md). This version is developed
 locally until publication is explicitly requested.

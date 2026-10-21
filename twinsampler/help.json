@@ -21,12 +21,37 @@
         "CHOP starts with no cues",
         "P1 lit, cues light",
         "K3 moves P1 start",
+        "Shift+K3: 10ms steps",
+        "First start is saved",
         "Erase+pad: empty cue",
         "Each bank keeps mode",
         "Screen follows pad",
         "Capture: re-chop",
         "Up: CHOP > Trim > main",
         "Back: main"
+      ]
+    },
+    {
+      "title": "Editor Sound Knobs",
+      "lines": [
+        "Hold Shift + touch",
+        "Master, then touch K3:",
+        "trim sound ON / OFF",
+        "Hold pad + turn K3/4",
+        "Loops stay live",
+        "",
+        "K1: pad attack",
+        "K2: decay / release",
+        "Gate: release tail",
+        "after pad note-off",
+        "K5: Trigger / Gate",
+        "K6: pad pitch",
+        "K7: pad gain",
+        "K8: pad loop",
+        "Shift + these knobs:",
+        "edit focused bank",
+        "Held SRC: auditions",
+        "Drums: next pad hit"
       ]
     },
     {
@@ -137,7 +162,8 @@
         "Start/End/Mode",
         "",
         "Shift + K6 turn:",
-        "source bank pitch",
+        "focused bank pitch",
+        "(Main/Trim/CHOP)",
         "Shift + K7 turn:",
         "bank gain",
         "Shift + K8 turn:",
@@ -207,6 +233,7 @@
     {
       "title": "Record",
       "lines": [
+        "Main / Trim / CHOP",
         "Rec button",
         "(main view):",
         "1x arm monitor",
